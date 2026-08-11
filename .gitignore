@@ -1,0 +1,20 @@
+/target/
+/node_modules/
+/dist/
+/.pnpm-store/
+/.vite/
+/.tauri/
+*.log
+*.tmp
+
+# Workspace guidance is intentionally local-only.
+/AGENTS.md
+/CODE_STANDARDS.md
+/TESTING.md
+/.github/copilot-instructions.md
+
+# Local IDE and OS state.
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
