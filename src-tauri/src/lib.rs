@@ -1214,6 +1214,7 @@ const fn diagnostic_name(code: DiagnosticCode) -> &'static str {
         DiagnosticCode::OccupiedDestination => "occupiedDestination",
         DiagnosticCode::StaleSource => "staleSource",
         DiagnosticCode::ParentUnavailable => "parentUnavailable",
+        DiagnosticCode::InvalidRule => "invalidRule",
     }
 }
 

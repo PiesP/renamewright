@@ -216,30 +216,6 @@ impl ValidationEnvironment {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RenameRule {
-    Prefix { value: String },
-}
-
-impl RenameRule {
-    #[must_use]
-    pub fn prefix(value: impl Into<String>) -> Self {
-        Self::Prefix {
-            value: value.into(),
-        }
-    }
-
-    pub(crate) fn apply(&self, name: &OsStr) -> OsString {
-        match self {
-            Self::Prefix { value } => {
-                let mut proposed = OsString::from(value);
-                proposed.push(name);
-                proposed
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagnosticSeverity {
     Information,
@@ -259,6 +235,7 @@ pub enum DiagnosticCode {
     OccupiedDestination,
     StaleSource,
     ParentUnavailable,
+    InvalidRule,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
