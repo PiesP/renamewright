@@ -47,10 +47,16 @@ pub use recovery::{
     reconcile_prepared_step, recover_transaction,
 };
 
-/// Filesystem mutation remains unavailable during the planning milestone.
+/// Applying a newly planned rename remains unavailable.
 #[must_use]
-pub const fn mutation_is_enabled() -> bool {
+pub const fn plan_execution_is_enabled() -> bool {
     false
+}
+
+/// Startup recovery is available after the recovery safety gates pass.
+#[must_use]
+pub const fn recovery_execution_is_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -275,11 +281,12 @@ mod tests {
     use renamewright_core::EntryKind;
     use renamewright_core::SourceId;
 
-    use super::{SourceRegistry, mutation_is_enabled};
+    use super::{SourceRegistry, plan_execution_is_enabled, recovery_execution_is_enabled};
 
     #[test]
-    fn planning_milestone_is_read_only() {
-        assert!(!mutation_is_enabled());
+    fn plan_execution_remains_locked_while_recovery_is_available() {
+        assert!(!plan_execution_is_enabled());
+        assert!(recovery_execution_is_enabled());
     }
 
     #[test]
