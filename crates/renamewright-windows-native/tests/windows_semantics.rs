@@ -324,6 +324,49 @@ fn sharing_violation_prevents_opening_a_rename_handle() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn cross_volume_rename_fails_without_changing_either_side() -> Result<(), Box<dyn std::error::Error>>
+{
+    let source_directory = tempfile::tempdir()?;
+    let source_path = source_directory.path().join("source.txt");
+    fs::write(&source_path, b"source")?;
+    let source = EntryHandle::open_final_component(&source_path)?;
+    let source_identity = file_identity(source.as_handle())?;
+
+    let Ok(destination_directory) = tempfile::Builder::new()
+        .prefix("renamewright-cross-volume-")
+        .tempdir_in(std::env::current_dir()?)
+    else {
+        return Ok(());
+    };
+    let marker_path = destination_directory.path().join("marker.txt");
+    fs::write(&marker_path, b"marker")?;
+    let marker = EntryHandle::open_final_component(&marker_path)?;
+    let marker_identity = file_identity(marker.as_handle())?;
+    if source_identity.volume_serial_number() == marker_identity.volume_serial_number() {
+        return Ok(());
+    }
+
+    let error = rename_noreplace(
+        source.as_handle(),
+        destination_directory.path(),
+        OsStr::new("destination.txt"),
+    )
+    .err()
+    .ok_or("cross-volume rename unexpectedly succeeded")?;
+
+    assert!(error.raw_os_error().is_some());
+    assert_eq!(fs::read(&source_path)?, b"source");
+    assert!(
+        !destination_directory
+            .path()
+            .join("destination.txt")
+            .exists()
+    );
+    assert_eq!(fs::read(marker_path)?, b"marker");
+    Ok(())
+}
+
+#[test]
 fn invalid_leaf_names_are_rejected_before_ffi() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let source_path = directory.path().join("source.txt");

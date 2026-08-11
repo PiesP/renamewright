@@ -90,7 +90,9 @@ pub fn rename_noreplace(
     destination_parent: &Path,
     destination_name: &OsStr,
 ) -> io::Result<()> {
-    let encoded_name = encode_destination(destination_parent, destination_name)?;
+    let destination = destination_path(destination_parent, destination_name)?;
+    reject_existing_destination(&destination)?;
+    let encoded_name = encode_destination(&destination)?;
     let name_bytes = encoded_name
         .len()
         .checked_mul(size_of::<u16>())
@@ -177,7 +179,7 @@ fn encode_leaf_name(name: &OsStr) -> io::Result<Vec<u16>> {
     }
 }
 
-fn encode_destination(parent: &Path, name: &OsStr) -> io::Result<Vec<u16>> {
+fn destination_path(parent: &Path, name: &OsStr) -> io::Result<std::path::PathBuf> {
     let _ = encode_leaf_name(name)?;
     if !parent.is_absolute() {
         return Err(io::Error::new(
@@ -185,12 +187,26 @@ fn encode_destination(parent: &Path, name: &OsStr) -> io::Result<Vec<u16>> {
             "destination parent must be absolute",
         ));
     }
+    Ok(parent.join(name))
+}
 
-    let encoded = parent
-        .join(name)
-        .as_os_str()
-        .encode_wide()
-        .collect::<Vec<_>>();
+fn reject_existing_destination(destination: &Path) -> io::Result<()> {
+    // Windows can accept a zero-flag rename when the destination is another
+    // hard link to the source. Reject every observed entry first to preserve
+    // Renamewright's stricter contract; the following native rename still
+    // provides the atomic no-replace authority for entries created by a race.
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destination already exists",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn encode_destination(destination: &Path) -> io::Result<Vec<u16>> {
+    let encoded = destination.as_os_str().encode_wide().collect::<Vec<_>>();
     if encoded.contains(&0) {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
