@@ -1,6 +1,8 @@
-export const RULE_PIPELINE_SCHEMA_VERSION = 1;
+export const RULE_PIPELINE_SCHEMA_VERSION = 2;
 export const MAX_RULES = 32;
 export const MAX_RULE_TEXT_BYTES = 4_096;
+export const MAX_SEQUENCE_PADDING = 20;
+const MAX_U64 = 18_446_744_073_709_551_615n;
 
 interface RuleBase {
   ruleId: number;
@@ -29,7 +31,27 @@ export interface RegexReplaceRule extends RuleBase {
   replacement: string;
 }
 
-export type RuleRequest = PrefixRule | SuffixRule | LiteralReplaceRule | RegexReplaceRule;
+export type SequenceScope = 'allSources' | 'perParent';
+export type SequenceOrder = 'sourceOrder' | 'nameAscending';
+export type SequencePlacement = 'prefix' | 'suffix';
+
+export interface SequenceRule extends RuleBase {
+  kind: 'sequence';
+  scope: SequenceScope;
+  order: SequenceOrder;
+  start: number;
+  step: number;
+  padding: number;
+  placement: SequencePlacement;
+  separator: string;
+}
+
+export type RuleRequest =
+  | PrefixRule
+  | SuffixRule
+  | LiteralReplaceRule
+  | RegexReplaceRule
+  | SequenceRule;
 export type RuleKind = RuleRequest['kind'];
 
 export interface RulePipelineRequest {
@@ -42,6 +64,18 @@ export interface RuleTraceStep {
   ruleId: number;
   before: string;
   after: string;
+}
+
+export interface BrowserRuleSource {
+  sourceId: number;
+  parentId: number;
+  originalName: string;
+}
+
+export interface BrowserRuleResult {
+  proposedName: string;
+  trace: RuleTraceStep[];
+  diagnostic?: 'sequenceOverflow';
 }
 
 export class PlanningError extends Error {
@@ -66,6 +100,19 @@ export function createRule(ruleId: number, kind: RuleKind): RuleRequest {
       return { kind, ruleId, enabled: true, search: '', replacement: '' };
     case 'regexReplace':
       return { kind, ruleId, enabled: true, pattern: '', replacement: '' };
+    case 'sequence':
+      return {
+        kind,
+        ruleId,
+        enabled: true,
+        scope: 'allSources',
+        order: 'sourceOrder',
+        start: 1,
+        step: 1,
+        padding: 3,
+        placement: 'prefix',
+        separator: '-',
+      };
   }
 }
 
@@ -75,6 +122,7 @@ export function ruleLabel(kind: RuleKind): string {
     suffix: 'Add suffix',
     literalReplace: 'Replace text',
     regexReplace: 'Replace by pattern',
+    sequence: 'Add sequence',
   };
   return labels[kind];
 }
@@ -94,6 +142,9 @@ export function planningError(cause: unknown): PlanningError {
     ruleTextTooLong: `${subject} contains text longer than ${MAX_RULE_TEXT_BYTES.toLocaleString()} bytes.`,
     emptyLiteralSearch: `${subject} needs text to search for.`,
     invalidRegex: `${subject} uses an invalid regular expression.`,
+    invalidSequenceStart: `${subject} needs a non-negative safe whole-number start.`,
+    invalidSequenceStep: `${subject} needs a positive whole-number step.`,
+    invalidSequencePadding: `${subject} needs padding from 1 through ${MAX_SEQUENCE_PADDING}.`,
     pickerUnavailable: 'The native file picker is unavailable.',
     sourceAdmissionFailed: 'One or more selected sources are no longer available.',
     stateUnavailable: 'The planning worker is unavailable.',
@@ -109,17 +160,19 @@ export function planningError(cause: unknown): PlanningError {
 export function applyBrowserRules(
   originalName: string,
   request: RulePipelineRequest
-): { proposedName: string; trace: RuleTraceStep[] } {
-  return compileBrowserRulePipeline(request)(originalName);
+): BrowserRuleResult {
+  const source = { sourceId: 1, parentId: 1, originalName };
+  return compileBrowserRulePipeline(request, [source])(source);
 }
 
 export function compileBrowserRulePipeline(
-  request: RulePipelineRequest
-): (originalName: string) => { proposedName: string; trace: RuleTraceStep[] } {
+  request: RulePipelineRequest,
+  sources: readonly BrowserRuleSource[]
+): (source: BrowserRuleSource) => BrowserRuleResult {
   validateRequest(request);
   const compiledRules: Array<{
     ruleId: number;
-    apply: (input: string) => string;
+    apply: (input: string, source: BrowserRuleSource) => string | undefined;
   }> = [];
   for (const rule of request.rules) {
     if (!rule.enabled) {
@@ -148,14 +201,35 @@ export function compileBrowserRulePipeline(
       case 'regexReplace':
         compiledRules.push({ ruleId: rule.ruleId, apply: compileRegexReplace(rule) });
         break;
+      case 'sequence': {
+        const values = allocateSequence(sources, rule);
+        compiledRules.push({
+          ruleId: rule.ruleId,
+          apply: (input, source) => {
+            const value = values.get(source.sourceId);
+            if (value === undefined) {
+              return undefined;
+            }
+            const number = String(value).padStart(rule.padding, '0');
+            return rule.placement === 'prefix'
+              ? `${number}${rule.separator}${input}`
+              : `${input}${rule.separator}${number}`;
+          },
+        });
+        break;
+      }
     }
   }
-  return (originalName) => {
-    let proposedName = originalName;
+  return (source) => {
+    let proposedName = source.originalName;
     const trace: RuleTraceStep[] = [];
     for (const [ruleIndex, rule] of compiledRules.entries()) {
       const before = proposedName;
-      proposedName = rule.apply(proposedName);
+      const after = rule.apply(proposedName, source);
+      if (after === undefined) {
+        return { proposedName, trace, diagnostic: 'sequenceOverflow' };
+      }
+      proposedName = after;
       trace.push({ ruleIndex, ruleId: rule.ruleId, before, after: proposedName });
     }
     return { proposedName, trace };
@@ -201,6 +275,33 @@ function validateRequest(request: RulePipelineRequest): void {
         rule.ruleId
       );
     }
+    if (rule.kind === 'sequence') {
+      if (!Number.isSafeInteger(rule.start) || rule.start < 0) {
+        throw new PlanningError(
+          'invalidSequenceStart',
+          `Rule ${rule.ruleId} needs a non-negative whole-number start.`,
+          rule.ruleId
+        );
+      }
+      if (!Number.isSafeInteger(rule.step) || rule.step <= 0) {
+        throw new PlanningError(
+          'invalidSequenceStep',
+          `Rule ${rule.ruleId} needs a positive whole-number step.`,
+          rule.ruleId
+        );
+      }
+      if (
+        !Number.isSafeInteger(rule.padding) ||
+        rule.padding < 1 ||
+        rule.padding > MAX_SEQUENCE_PADDING
+      ) {
+        throw new PlanningError(
+          'invalidSequencePadding',
+          `Rule ${rule.ruleId} needs padding from 1 through ${MAX_SEQUENCE_PADDING}.`,
+          rule.ruleId
+        );
+      }
+    }
   }
 }
 
@@ -213,7 +314,50 @@ function ruleText(rule: RuleRequest): string[] {
       return [rule.search, rule.replacement];
     case 'regexReplace':
       return [rule.pattern, rule.replacement];
+    case 'sequence':
+      return [rule.separator];
   }
+}
+
+function allocateSequence(
+  sources: readonly BrowserRuleSource[],
+  rule: SequenceRule
+): Map<number, bigint | undefined> {
+  const ordered = [...sources].sort((left, right) => {
+    if (rule.order === 'sourceOrder') {
+      return left.sourceId - right.sourceId;
+    }
+    if (left.originalName !== right.originalName) {
+      return compareUnicodeScalars(left.originalName, right.originalName);
+    }
+    return left.sourceId - right.sourceId;
+  });
+  let globalOrdinal = 0;
+  const parentOrdinals = new Map<number, number>();
+  return new Map(
+    ordered.map((source) => {
+      const ordinal =
+        rule.scope === 'allSources' ? globalOrdinal++ : (parentOrdinals.get(source.parentId) ?? 0);
+      if (rule.scope === 'perParent') {
+        parentOrdinals.set(source.parentId, ordinal + 1);
+      }
+      const value = BigInt(rule.start) + BigInt(rule.step) * BigInt(ordinal);
+      return [source.sourceId, value <= MAX_U64 ? value : undefined] as const;
+    })
+  );
+}
+
+function compareUnicodeScalars(left: string, right: string): number {
+  const leftScalars = [...left].map((value) => value.codePointAt(0) ?? 0);
+  const rightScalars = [...right].map((value) => value.codePointAt(0) ?? 0);
+  const sharedLength = Math.min(leftScalars.length, rightScalars.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference = (leftScalars[index] ?? 0) - (rightScalars[index] ?? 0);
+    if (difference !== 0) {
+      return difference;
+    }
+  }
+  return leftScalars.length - rightScalars.length;
 }
 
 function compileRegexReplace(rule: RegexReplaceRule): (input: string) => string {

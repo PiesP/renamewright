@@ -9,7 +9,7 @@ import type {
   SourceChange,
 } from '../../src/planning/client';
 import {
-  applyBrowserRules,
+  compileBrowserRulePipeline,
   createRule,
   RULE_PIPELINE_SCHEMA_VERSION,
   type RulePipelineRequest,
@@ -25,11 +25,21 @@ const emptyRequest = (): RulePipelineRequest => ({
 });
 
 function makePlan(request: RulePipelineRequest): Plan {
-  const rows = sources.map((originalName, index) => {
-    const { proposedName } = applyBrowserRules(originalName, request);
-    const blocked = proposedName.includes('?') || proposedName.toUpperCase() === 'CON.TXT';
+  const ruleSources = sources.map((originalName, index) => ({
+    sourceId: index + 1,
+    parentId: 1,
+    originalName,
+  }));
+  const apply = compileBrowserRulePipeline(request, ruleSources);
+  const rows = ruleSources.map((source) => {
+    const { sourceId, originalName } = source;
+    const { proposedName, diagnostic } = apply(source);
+    const blocked =
+      diagnostic !== undefined ||
+      proposedName.includes('?') ||
+      proposedName.toUpperCase() === 'CON.TXT';
     return {
-      sourceId: index + 1,
+      sourceId,
       originalName,
       proposedName,
       status: blocked
@@ -37,7 +47,7 @@ function makePlan(request: RulePipelineRequest): Plan {
         : proposedName === originalName
           ? ('unchanged' as const)
           : ('changed' as const),
-      diagnostics: blocked ? ['illegalCharacter'] : [],
+      diagnostics: diagnostic ? [diagnostic] : blocked ? ['illegalCharacter'] : [],
     };
   });
 
@@ -58,7 +68,7 @@ function fakeClient(): PlanningClient {
     selectSources: async (request) => makePlan(request),
     previewRules: async (request) => makePlan(request),
     inspectPlan: async (planId) =>
-      JSON.stringify({ schemaVersion: 2, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
+      JSON.stringify({ schemaVersion: 3, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
     exportPlan: async () => false,
     listLedger: async () => [],
     inspectRecovery: async () => {
@@ -478,6 +488,37 @@ test('adds, reorders, and disables rules without losing stable editing state', a
   expect(screen.getAllByRole('cell', { name: /Unchanged/u })).toHaveLength(2);
 });
 
+test('edits sequence allocation independently from preview row order', async () => {
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  await user.selectOptions(screen.getByRole('combobox', { name: 'New rule' }), 'sequence');
+  await user.click(screen.getByRole('button', { name: 'Add rule' }));
+  const sequenceEditor = screen.getByRole('heading', { name: 'Add sequence' }).closest('section');
+  if (!sequenceEditor) {
+    throw new Error('Sequence editor was not rendered.');
+  }
+
+  await user.selectOptions(
+    within(sequenceEditor).getByRole('combobox', { name: 'Number by' }),
+    'nameAscending'
+  );
+  await user.clear(within(sequenceEditor).getByRole('spinbutton', { name: 'Start' }));
+  await user.type(within(sequenceEditor).getByRole('spinbutton', { name: 'Start' }), '5');
+  await user.clear(within(sequenceEditor).getByRole('spinbutton', { name: 'Step' }));
+  await user.type(within(sequenceEditor).getByRole('spinbutton', { name: 'Step' }), '5');
+  await user.clear(within(sequenceEditor).getByRole('spinbutton', { name: 'Padding' }));
+  await user.type(within(sequenceEditor).getByRole('spinbutton', { name: 'Padding' }), '2');
+
+  expect(await screen.findByText('10-invoice.pdf')).toBeInTheDocument();
+  expect(screen.getByText('15-notes.txt')).toBeInTheDocument();
+  expect(screen.getByText('05-CON.txt')).toBeInTheDocument();
+  expect(sequenceEditor).toHaveTextContent(
+    'Number allocation is fixed before preview rows are rendered.'
+  );
+});
+
 test('associates an invalid regex error with its rule editor', async () => {
   const user = userEvent.setup();
   render(() => <App client={fakeClient()} />);
@@ -568,7 +609,7 @@ test('inspects and exports only the current opaque plan ID', async () => {
   await user.click(inspectButton);
 
   expect(inspectPlan).toHaveBeenCalledWith(9);
-  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 2');
+  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 3');
   await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
   expect(exportPlan).toHaveBeenCalledWith(9);
   expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');

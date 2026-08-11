@@ -15,7 +15,7 @@ test('previews a safe prefix and blocks invalid Windows names', async ({ page })
   await expect(page.getByText('2026-Quarterly review.pdf')).toBeVisible();
   await expect(page.getByText('3 changes')).toBeVisible();
   await page.getByRole('button', { name: 'Inspect JSON' }).click();
-  await expect(page.getByRole('dialog')).toContainText('"schemaVersion": 2');
+  await expect(page.getByRole('dialog')).toContainText('"schemaVersion": 3');
   await expect(page.getByRole('dialog')).not.toContainText('/home/');
   await page.getByRole('button', { name: 'Close' }).click();
 
@@ -50,6 +50,26 @@ test('edits and reorders an ordered text rule pipeline', async ({ page }) => {
   await regexEditor.getByRole('textbox', { name: 'Rust regex' }).fill('(');
   await expect(regexEditor).toContainText('Rule 3 uses an invalid regular expression.');
   await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
+});
+
+test('allocates sequence numbers before preview rows are rendered', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Load sample' }).click();
+  await page.getByRole('combobox', { name: 'New rule' }).selectOption('sequence');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+
+  const sequenceEditor = page.locator('.rule-editor').filter({ hasText: 'Add sequence' });
+  await sequenceEditor.getByRole('combobox', { name: 'Number by' }).selectOption('nameAscending');
+  await sequenceEditor.getByRole('spinbutton', { name: 'Start' }).fill('10');
+  await sequenceEditor.getByRole('spinbutton', { name: 'Step' }).fill('5');
+  await sequenceEditor.getByRole('spinbutton', { name: 'Padding' }).fill('2');
+
+  await expect(page.getByText('10-Quarterly review.pdf')).toBeVisible();
+  await expect(page.getByText('20-team-photo 01.jpg')).toBeVisible();
+  await expect(page.getByText('15-project-notes.txt')).toBeVisible();
+  await expect(sequenceEditor).toContainText(
+    'Number allocation is fixed before preview rows are rendered.'
+  );
 });
 
 test('keeps the workbench inside narrow viewports', async ({ page }) => {

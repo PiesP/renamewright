@@ -37,6 +37,16 @@ interface RuleTextInputProps {
   onInput: (value: string) => void;
 }
 
+interface RuleNumberInputProps {
+  id: string;
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  invalid: boolean;
+  onInput: (value: number) => void;
+}
+
 function RuleTextInput(props: RuleTextInputProps) {
   return (
     <div class="rule-field">
@@ -49,6 +59,31 @@ function RuleTextInput(props: RuleTextInputProps) {
           placeholder={props.placeholder}
           aria-invalid={props.invalid ? 'true' : 'false'}
           onInput={(event) => props.onInput(event.currentTarget.value)}
+        />
+        <span aria-hidden="true">{props.invalid ? '!' : ''}</span>
+      </div>
+    </div>
+  );
+}
+
+function RuleNumberInput(props: RuleNumberInputProps) {
+  return (
+    <div class="rule-field">
+      <label for={props.id}>{props.label}</label>
+      <div class="input-shell" data-invalid={props.invalid ? 'true' : 'false'}>
+        <input
+          id={props.id}
+          type="number"
+          inputMode="numeric"
+          min={props.min}
+          max={props.max}
+          step="1"
+          value={props.value}
+          aria-invalid={props.invalid ? 'true' : 'false'}
+          onInput={(event) => {
+            const value = event.currentTarget.valueAsNumber;
+            props.onInput(Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0);
+          }}
         />
         <span aria-hidden="true">{props.invalid ? '!' : ''}</span>
       </div>
@@ -758,6 +793,142 @@ export function App(props: AppProps) {
                           </>
                         )}
                       </Match>
+                      <Match when={rule.kind === 'sequence' && rule}>
+                        {(current) => (
+                          <>
+                            <div class="rule-field">
+                              <label for={inputId('scope')}>Numbering scope</label>
+                              <select
+                                id={inputId('scope')}
+                                value={current().scope}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'sequence'
+                                      ? {
+                                          ...candidate,
+                                          scope: event.currentTarget.value as
+                                            | 'allSources'
+                                            | 'perParent',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="allSources">All sources</option>
+                                <option value="perParent">Restart in each folder</option>
+                              </select>
+                            </div>
+                            <div class="rule-field">
+                              <label for={inputId('order')}>Number by</label>
+                              <select
+                                id={inputId('order')}
+                                value={current().order}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'sequence'
+                                      ? {
+                                          ...candidate,
+                                          order: event.currentTarget.value as
+                                            | 'sourceOrder'
+                                            | 'nameAscending',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="sourceOrder">Stable source order</option>
+                                <option value="nameAscending">Filename (ordinal)</option>
+                              </select>
+                            </div>
+                            <div class="sequence-number-fields">
+                              <RuleNumberInput
+                                id={inputId('start')}
+                                label="Start"
+                                value={current().start}
+                                min={0}
+                                max={Number.MAX_SAFE_INTEGER}
+                                invalid={invalid()}
+                                onInput={(start) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'sequence'
+                                      ? { ...candidate, start }
+                                      : candidate
+                                  )
+                                }
+                              />
+                              <RuleNumberInput
+                                id={inputId('step')}
+                                label="Step"
+                                value={current().step}
+                                min={1}
+                                max={Number.MAX_SAFE_INTEGER}
+                                invalid={invalid()}
+                                onInput={(step) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'sequence'
+                                      ? { ...candidate, step }
+                                      : candidate
+                                  )
+                                }
+                              />
+                              <RuleNumberInput
+                                id={inputId('padding')}
+                                label="Padding"
+                                value={current().padding}
+                                min={1}
+                                max={20}
+                                invalid={invalid()}
+                                onInput={(padding) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'sequence'
+                                      ? { ...candidate, padding }
+                                      : candidate
+                                  )
+                                }
+                              />
+                            </div>
+                            <div class="rule-field">
+                              <label for={inputId('placement')}>Placement</label>
+                              <select
+                                id={inputId('placement')}
+                                value={current().placement}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'sequence'
+                                      ? {
+                                          ...candidate,
+                                          placement: event.currentTarget.value as
+                                            | 'prefix'
+                                            | 'suffix',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="prefix">Before filename</option>
+                                <option value="suffix">After filename</option>
+                              </select>
+                            </div>
+                            <RuleTextInput
+                              id={inputId('separator')}
+                              label="Separator"
+                              value={current().separator}
+                              placeholder="-"
+                              invalid={invalid()}
+                              onInput={(separator) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'sequence'
+                                    ? { ...candidate, separator }
+                                    : candidate
+                                )
+                              }
+                            />
+                            <p class="field-help">
+                              Number allocation is fixed before preview rows are rendered.
+                            </p>
+                          </>
+                        )}
+                      </Match>
                     </Switch>
                     <Show when={invalid()}>
                       <p class="field-help field-help-error">{error()}</p>
@@ -779,6 +950,7 @@ export function App(props: AppProps) {
                 <option value="suffix">Suffix</option>
                 <option value="literalReplace">Replace text</option>
                 <option value="regexReplace">Regular expression</option>
+                <option value="sequence">Sequence numbering</option>
               </select>
               <button
                 class="button button-secondary"
