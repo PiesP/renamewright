@@ -208,6 +208,7 @@ impl JournalWriter {
         }
 
         let file = OpenOptions::new()
+            .read(true)
             .append(true)
             .create_new(true)
             .open(path)
