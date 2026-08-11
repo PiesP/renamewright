@@ -56,6 +56,12 @@ and Actions plus OSV dependency advisories and Semgrep. Expensive mutation,
 packaging, and signed-release work are added only when the corresponding
 implementation exists.
 
+OSV exceptions must identify one advisory, explain why the current dependency
+graph cannot remove it, and expire within 90 days. An exception suppresses only
+that known advisory; newly disclosed findings still fail the gate. Expired
+entries are removed or renewed only after checking the current upstream graph
+and documenting the new decision in review.
+
 ## Dependency policy
 
 Dependabot checks npm, Cargo, the Rust toolchain, and GitHub Actions daily. Normal
