@@ -65,6 +65,18 @@ test('renders the path-free startup ledger at supported narrow widths', async ({
         if (command === 'poll_source_changes') {
           return null;
         }
+        if (command === 'inspect_recovery') {
+          return {
+            ledgerId: 1,
+            direction: 'forward',
+            stepIndex: 2,
+            readiness: 'reconciliationRequired',
+            disposition: 'notApplied',
+            resumeAvailable: false,
+            rollbackAvailable: false,
+            reconcileAvailable: true,
+          };
+        }
         throw new Error(`Unexpected command: ${command}`);
       },
     };
@@ -77,7 +89,20 @@ test('renders the path-free startup ledger at supported narrow widths', async ({
     await expect(page.getByRole('heading', { name: 'Rename Ledger' })).toBeVisible();
     await expect(page.getByText('Plan 67')).toBeVisible();
     await expect(page.getByText('Inspection required')).toBeVisible();
-    await expect(page.getByRole('button', { name: /recover/iu })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Inspect plan 67 recovery' }).click();
+    const inspection = page.getByRole('status').filter({ hasText: 'Observation ready to record' });
+    await expect(inspection).toBeVisible();
+    const inspectionBox = await inspection.boundingBox();
+    const reviewBarBox = await page.locator('.review-bar').boundingBox();
+    expect(inspectionBox).not.toBeNull();
+    expect(reviewBarBox).not.toBeNull();
+    expect(
+      (inspectionBox?.y ?? 0) + (inspectionBox?.height ?? 0),
+      `inspection obscured by review bar at ${width}px`
+    ).toBeLessThanOrEqual(reviewBarBox?.y ?? 0);
+    await expect(
+      page.getByRole('button', { name: /^(resume|roll back|record observation)$/iu })
+    ).toHaveCount(0);
 
     const sizes = await page.evaluate(() => ({
       client: document.documentElement.clientWidth,

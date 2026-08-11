@@ -6,6 +6,8 @@ import {
   type LedgerStatus,
   type Plan,
   type PlanningClient,
+  type RecoveryDisposition,
+  type RecoveryInspection,
 } from './planning/client';
 import { VirtualPlanTable } from './planning/VirtualPlanTable';
 
@@ -22,9 +24,12 @@ export function App(props: AppProps) {
   const [error, setError] = createSignal('');
   const [notice, setNotice] = createSignal('');
   const [ledger, setLedger] = createSignal<LedgerEntry[]>([]);
+  const [recoveryInspection, setRecoveryInspection] = createSignal<RecoveryInspection>();
+  const [inspectingLedgerId, setInspectingLedgerId] = createSignal<number>();
   let requestSequence = 0;
   let planInspector: HTMLDialogElement | undefined;
   let planInspectorOpener: HTMLButtonElement | undefined;
+  let recoveryInspectionPanel: HTMLDivElement | undefined;
   let previewTimer: number | undefined;
 
   const dismissPlanInspector = () => {
@@ -127,6 +132,24 @@ export function App(props: AppProps) {
     }
   };
 
+  const inspectLedgerEntry = async (entry: LedgerEntry) => {
+    setInspectingLedgerId(entry.ledgerId);
+    setRecoveryInspection(undefined);
+    setError('');
+    try {
+      setRecoveryInspection(await planningClient.inspectRecovery(entry.ledgerId));
+      queueMicrotask(() => {
+        recoveryInspectionPanel?.scrollIntoView?.({ block: 'nearest' });
+      });
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : 'The recovery state could not be inspected.'
+      );
+    } finally {
+      setInspectingLedgerId(undefined);
+    }
+  };
+
   onMount(() => {
     void planningClient
       .listLedger()
@@ -187,6 +210,47 @@ export function App(props: AppProps) {
       unreadable: 'Journal unreadable',
     };
     return labels[status];
+  };
+
+  const dispositionLabel = (disposition: RecoveryDisposition | null) => {
+    if (!disposition) {
+      return '';
+    }
+    const labels: Record<RecoveryDisposition, string> = {
+      notApplied: 'The prepared rename was not applied.',
+      applied: 'The prepared rename was applied.',
+      missing: 'The expected entry is missing.',
+      multipleLocations: 'The same identity appears in multiple locations.',
+      unexpectedLocation: 'The entry is in an unexpected location.',
+    };
+    return labels[disposition];
+  };
+
+  const recoveryInspectionTitle = () => {
+    switch (recoveryInspection()?.readiness) {
+      case 'ready':
+        return 'Identity checks passed';
+      case 'reconciliationRequired':
+        return 'Observation ready to record';
+      case 'blocked':
+        return 'Recovery is blocked';
+      default:
+        return '';
+    }
+  };
+
+  const recoveryInspectionDescription = () => {
+    const inspection = recoveryInspection();
+    if (!inspection) {
+      return '';
+    }
+    if (inspection.readiness === 'reconciliationRequired') {
+      return `${dispositionLabel(inspection.disposition)} Recovery actions remain locked.`;
+    }
+    if (inspection.readiness === 'blocked') {
+      return 'The journal no longer matches one expected entry location. No action is available.';
+    }
+    return 'Resume and rollback remain locked until Windows interruption testing passes.';
   };
 
   return (
@@ -281,7 +345,7 @@ export function App(props: AppProps) {
               <ul aria-label="Rename journal status">
                 {ledger().map((entry) => (
                   <li>
-                    <div>
+                    <div class="ledger-entry-summary">
                       <strong>
                         {entry.planId === null
                           ? `Ledger ${entry.ledgerId}`
@@ -289,12 +353,42 @@ export function App(props: AppProps) {
                       </strong>
                       <span>{entry.sourceCount} sources</span>
                     </div>
-                    <span data-recovery={entry.recoveryAvailable ? 'true' : 'false'}>
-                      {ledgerStatusLabel(entry.status)}
-                    </span>
+                    <div class="ledger-entry-actions">
+                      <span data-recovery={entry.recoveryAvailable ? 'true' : 'false'}>
+                        {ledgerStatusLabel(entry.status)}
+                      </span>
+                      <Show when={entry.recoveryAvailable}>
+                        <button
+                          class="button button-secondary button-compact ledger-inspect-button"
+                          type="button"
+                          disabled={inspectingLedgerId() !== undefined}
+                          aria-label={`Inspect ${entry.planId === null ? `ledger ${entry.ledgerId}` : `plan ${entry.planId}`} recovery`}
+                          onClick={() => void inspectLedgerEntry(entry)}
+                        >
+                          {inspectingLedgerId() === entry.ledgerId ? 'Inspecting…' : 'Inspect'}
+                        </button>
+                      </Show>
+                    </div>
                   </li>
                 ))}
               </ul>
+              <Show when={recoveryInspection()}>
+                <div
+                  class="ledger-inspection"
+                  role="status"
+                  aria-live="polite"
+                  ref={recoveryInspectionPanel}
+                >
+                  <strong>{recoveryInspectionTitle()}</strong>
+                  <p>{recoveryInspectionDescription()}</p>
+                  <span>
+                    {recoveryInspection()?.direction === 'forward' ? 'Forward' : 'Rollback'}
+                    {recoveryInspection()?.stepIndex === null
+                      ? ' · terminal record'
+                      : ` · step ${recoveryInspection()?.stepIndex}`}
+                  </span>
+                </div>
+              </Show>
             </section>
           </Show>
         </aside>
