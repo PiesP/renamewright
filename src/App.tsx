@@ -390,6 +390,7 @@ export function App(props: AppProps) {
       damaged: 'Damaged journal',
       unsupportedVersion: 'Unsupported journal',
       tooLarge: 'Journal too large',
+      discoveryLimitExceeded: 'Discovery limit reached',
       unreadable: 'Journal unreadable',
     };
     return labels[status];

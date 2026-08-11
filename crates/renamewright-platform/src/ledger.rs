@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt::{self, Display, Formatter};
@@ -11,6 +11,7 @@ use renamewright_core::{JournalRecord, JournalStatus, PlanId, replay_journal};
 use crate::{JournalCodecErrorKind, JournalInspection, MAX_JOURNAL_FILE_BYTES, inspect_journal};
 
 pub const MAX_DISCOVERED_JOURNALS: usize = 1_024;
+pub const MAX_DISCOVERED_JOURNAL_BYTES: u64 = MAX_JOURNAL_FILE_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LedgerId(u64);
@@ -42,6 +43,7 @@ pub enum LedgerStatus {
     Damaged,
     UnsupportedVersion,
     TooLarge,
+    DiscoveryLimitExceeded,
     Unreadable,
 }
 
@@ -156,6 +158,14 @@ pub struct RenameLedger {
 
 impl RenameLedger {
     pub fn discover(root: &Path) -> Result<Self, LedgerDiscoveryError> {
+        Self::discover_with_limits(root, MAX_DISCOVERED_JOURNALS, MAX_DISCOVERED_JOURNAL_BYTES)
+    }
+
+    fn discover_with_limits(
+        root: &Path,
+        max_journals: usize,
+        max_total_bytes: u64,
+    ) -> Result<Self, LedgerDiscoveryError> {
         let entries = match fs::read_dir(root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -172,30 +182,28 @@ impl RenameLedger {
                 });
             }
         };
-        let mut candidates = entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension() == Some(OsStr::new("rwj")))
-            .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_file()))
-            .collect::<Vec<_>>();
-        candidates.sort_by_key(fs::DirEntry::file_name);
-        if candidates.len() > MAX_DISCOVERED_JOURNALS {
-            return Err(LedgerDiscoveryError {
-                kind: LedgerDiscoveryErrorKind::TooManyJournals,
-            });
-        }
+        let (candidates, count_limited) = bounded_journal_candidates(entries, max_journals);
 
-        let mut items = Vec::with_capacity(candidates.len());
-        for (index, candidate) in candidates.into_iter().enumerate() {
+        let mut items =
+            Vec::with_capacity(candidates.len().saturating_add(usize::from(count_limited)));
+        let mut remaining_bytes = max_total_bytes;
+        for (index, native_path) in candidates.into_iter().enumerate() {
             let ledger_id = LedgerId(u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1));
-            let native_path = candidate.path();
-            let (projection, inspection) = match read_bounded_journal(&native_path) {
+            let (projection, inspection) = match read_bounded_journal(&native_path, remaining_bytes)
+            {
                 Ok(bytes) => {
+                    remaining_bytes = remaining_bytes
+                        .saturating_sub(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
                     let inspection = inspect_journal(&bytes);
                     (project_inspection(ledger_id, &inspection), Some(inspection))
                 }
                 Err(ReadJournalError::TooLarge) => {
                     (empty_projection(ledger_id, LedgerStatus::TooLarge), None)
                 }
+                Err(ReadJournalError::DiscoveryLimitExceeded) => (
+                    empty_projection(ledger_id, LedgerStatus::DiscoveryLimitExceeded),
+                    None,
+                ),
                 Err(ReadJournalError::Io) => {
                     (empty_projection(ledger_id, LedgerStatus::Unreadable), None)
                 }
@@ -204,6 +212,18 @@ impl RenameLedger {
                 projection,
                 native_path,
                 inspection,
+            });
+        }
+        if count_limited {
+            let ledger_id = LedgerId(
+                u64::try_from(items.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+            );
+            items.push(CatalogItem {
+                projection: empty_projection(ledger_id, LedgerStatus::DiscoveryLimitExceeded),
+                native_path: root.to_path_buf(),
+                inspection: None,
             });
         }
         let superseded_plan_ids = items
@@ -428,10 +448,31 @@ const fn project_status(status: JournalStatus) -> (LedgerStatus, Option<usize>, 
 
 enum ReadJournalError {
     TooLarge,
+    DiscoveryLimitExceeded,
     Io,
 }
 
-fn read_bounded_journal(path: &Path) -> Result<Vec<u8>, ReadJournalError> {
+fn bounded_journal_candidates(entries: fs::ReadDir, max_journals: usize) -> (Vec<PathBuf>, bool) {
+    let mut candidates = BTreeMap::new();
+    let mut count_limited = false;
+    for entry in entries.filter_map(Result::ok) {
+        if entry.path().extension() != Some(OsStr::new("rwj"))
+            || !entry.file_type().is_ok_and(|file_type| file_type.is_file())
+        {
+            continue;
+        }
+        candidates.insert(entry.file_name(), entry.path());
+        if candidates.len() > max_journals {
+            count_limited = true;
+            if let Some(name) = candidates.keys().next_back().cloned() {
+                candidates.remove(&name);
+            }
+        }
+    }
+    (candidates.into_values().collect(), count_limited)
+}
+
+fn read_bounded_journal(path: &Path, remaining_bytes: u64) -> Result<Vec<u8>, ReadJournalError> {
     let mut file = open_journal_no_follow(path).map_err(|_| ReadJournalError::Io)?;
     let metadata = file.metadata().map_err(|_| ReadJournalError::Io)?;
     if !metadata.is_file() {
@@ -440,14 +481,22 @@ fn read_bounded_journal(path: &Path) -> Result<Vec<u8>, ReadJournalError> {
     if metadata.len() > MAX_JOURNAL_FILE_BYTES {
         return Err(ReadJournalError::TooLarge);
     }
-    let limit = MAX_JOURNAL_FILE_BYTES.saturating_add(1);
+    if metadata.len() > remaining_bytes {
+        return Err(ReadJournalError::DiscoveryLimitExceeded);
+    }
+    let limit = remaining_bytes
+        .min(MAX_JOURNAL_FILE_BYTES)
+        .saturating_add(1);
     let mut bytes = Vec::new();
     file.by_ref()
         .take(limit)
         .read_to_end(&mut bytes)
         .map_err(|_| ReadJournalError::Io)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_JOURNAL_FILE_BYTES {
+    let observed_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if observed_bytes > MAX_JOURNAL_FILE_BYTES {
         Err(ReadJournalError::TooLarge)
+    } else if observed_bytes > remaining_bytes {
+        Err(ReadJournalError::DiscoveryLimitExceeded)
     } else {
         Ok(bytes)
     }
@@ -476,4 +525,30 @@ fn open_journal_no_follow(path: &Path) -> io::Result<File> {
 #[cfg(not(any(target_os = "linux", windows)))]
 fn open_journal_no_follow(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{LedgerStatus, RenameLedger};
+
+    #[test]
+    fn aggregate_byte_limit_defers_later_journals() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::write(directory.path().join("a-first.rwj"), b"12345678")?;
+        fs::write(directory.path().join("b-second.rwj"), b"abcdefgh")?;
+
+        let ledger = RenameLedger::discover_with_limits(directory.path(), 2, 8)?;
+        let statuses = ledger
+            .entries()
+            .map(|entry| entry.status())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            statuses,
+            vec![LedgerStatus::Torn, LedgerStatus::DiscoveryLimitExceeded]
+        );
+        Ok(())
+    }
 }

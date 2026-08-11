@@ -38,7 +38,7 @@ pub use journal::{
 };
 pub use ledger::{
     LedgerDiscoveryError, LedgerDiscoveryErrorKind, LedgerEntry, LedgerId, LedgerStatus,
-    MAX_DISCOVERED_JOURNALS, RenameLedger,
+    MAX_DISCOVERED_JOURNAL_BYTES, MAX_DISCOVERED_JOURNALS, RenameLedger,
 };
 pub use recovery::{
     PreparedStepDisposition, PreparedStepInspection, RecoveryAction, RecoveryActionError,

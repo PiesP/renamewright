@@ -6,7 +6,9 @@ use renamewright_core::{
     EntryKind, ExecutionIdentity, JournalEntry, JournalNameGraph, JournalRecord, ParentId, PlanId,
     SourceFingerprint, SourceId,
 };
-use renamewright_platform::{LedgerStatus, MAX_JOURNAL_FILE_BYTES, RenameLedger, encode_journal};
+use renamewright_platform::{
+    LedgerStatus, MAX_DISCOVERED_JOURNALS, MAX_JOURNAL_FILE_BYTES, RenameLedger, encode_journal,
+};
 
 fn header() -> JournalRecord {
     JournalRecord::TransactionStarted {
@@ -184,6 +186,23 @@ fn a_missing_directory_is_an_empty_ledger() -> Result<(), Box<dyn std::error::Er
     let ledger = RenameLedger::discover(&missing)?;
 
     assert_eq!(ledger.entries().len(), 0);
+    Ok(())
+}
+
+#[test]
+fn excess_journal_count_degrades_to_a_bounded_ledger() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    for index in 0..=MAX_DISCOVERED_JOURNALS {
+        fs::write(directory.path().join(format!("journal-{index:04}.rwj")), [])?;
+    }
+
+    let ledger = RenameLedger::discover(directory.path())?;
+
+    assert!(ledger.entries().len() <= MAX_DISCOVERED_JOURNALS.saturating_add(1));
+    assert_eq!(
+        ledger.entries().last().ok_or("ledger was empty")?.status(),
+        LedgerStatus::DiscoveryLimitExceeded
+    );
     Ok(())
 }
 

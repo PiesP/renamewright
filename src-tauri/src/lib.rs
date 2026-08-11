@@ -1219,6 +1219,7 @@ const fn ledger_status_name(status: LedgerStatus) -> &'static str {
         LedgerStatus::Damaged => "damaged",
         LedgerStatus::UnsupportedVersion => "unsupportedVersion",
         LedgerStatus::TooLarge => "tooLarge",
+        LedgerStatus::DiscoveryLimitExceeded => "discoveryLimitExceeded",
         LedgerStatus::Unreadable => "unreadable",
     }
 }
