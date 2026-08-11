@@ -38,10 +38,12 @@ struct RecoveryControl {
     active: bool,
     cancellable: bool,
     cancel_requested: bool,
+    generation: u64,
 }
 
 struct RecoverySession<'a> {
     control: &'a Mutex<RecoveryControl>,
+    generation: u64,
 }
 
 impl<'a> RecoverySession<'a> {
@@ -55,23 +57,30 @@ impl<'a> RecoverySession<'a> {
         if state.active {
             return Err(RecoveryCommandErrorKind::Busy);
         }
+        state.generation = state.generation.saturating_add(1);
         state.active = true;
         state.cancellable = cancellable;
         state.cancel_requested = false;
+        let generation = state.generation;
         drop(state);
-        Ok(Self { control })
+        Ok(Self {
+            control,
+            generation,
+        })
     }
 
     fn cancel_requested(&self) -> bool {
-        self.control
-            .lock()
-            .map_or(true, |state| state.cancel_requested)
+        self.control.lock().map_or(true, |state| {
+            !state.active || state.generation != self.generation || state.cancel_requested
+        })
     }
 }
 
 impl Drop for RecoverySession<'_> {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.control.lock() {
+        if let Ok(mut state) = self.control.lock()
+            && state.generation == self.generation
+        {
             state.active = false;
             state.cancellable = false;
             state.cancel_requested = false;
@@ -981,12 +990,15 @@ where
     Ok(inspection)
 }
 
-fn request_recovery_cancellation(state: &AppState) -> Result<bool, RecoveryCommandErrorKind> {
+fn request_recovery_cancellation(
+    state: &AppState,
+    generation: u64,
+) -> Result<bool, RecoveryCommandErrorKind> {
     let mut control = state
         .recovery_control
         .lock()
         .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
-    if !control.active || !control.cancellable {
+    if !control.active || !control.cancellable || control.generation != generation {
         return Ok(false);
     }
     control.cancel_requested = true;
@@ -1000,7 +1012,7 @@ fn request_confirmed_cancellation<C>(
 where
     C: FnOnce() -> bool,
 {
-    {
+    let generation = {
         let control = state
             .recovery_control
             .lock()
@@ -1008,11 +1020,12 @@ where
         if !control.active || !control.cancellable {
             return Ok(false);
         }
-    }
+        control.generation
+    };
     if !confirm() {
         return Ok(false);
     }
-    request_recovery_cancellation(state)
+    request_recovery_cancellation(state, generation)
 }
 
 const fn recovery_action_is_available(
@@ -1312,7 +1325,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::error::Error;
     use std::ffi::OsString;
     use std::fs;
@@ -1337,7 +1350,6 @@ mod tests {
         RecoveryExpectationDto, RecoveryInspectionDto, RecoveryRequestDto, RecoverySession,
         UndoCommandErrorKind, UndoInspectionDto, UndoRequestDto, perform_recovery_request,
         perform_undo_request, prepare_latest_execution, request_confirmed_cancellation,
-        request_recovery_cancellation,
     };
 
     #[test]
@@ -1728,7 +1740,28 @@ mod tests {
         );
         assert!(cancellable.cancel_requested());
         drop(cancellable);
-        assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
+
+        let prior = RecoverySession::begin(&state.recovery_control, true)
+            .map_err(|_| "recovery session unavailable")?;
+        let replacement = RefCell::new(None);
+        assert!(
+            !request_confirmed_cancellation(&state, || {
+                drop(prior);
+                let Ok(session) = RecoverySession::begin(&state.recovery_control, true) else {
+                    return false;
+                };
+                replacement.replace(Some(session));
+                true
+            })
+            .map_err(|_| "cancel state unavailable")?
+        );
+        assert!(
+            !replacement
+                .borrow()
+                .as_ref()
+                .ok_or("replacement session missing")?
+                .cancel_requested()
+        );
         Ok(())
     }
 
