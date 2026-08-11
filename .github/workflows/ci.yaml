@@ -42,7 +42,11 @@ jobs:
         run: pnpm install --frozen-lockfile --no-runtime
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt clippy
+        run: >-
+          rustup toolchain install 1.97.1
+          --profile minimal
+          --component rustfmt
+          --component clippy
 
       - name: Check frontend and Rust sources
         run: |

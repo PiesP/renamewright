@@ -15,12 +15,16 @@ fn registry_admits_existing_files_without_exposing_paths_in_snapshots() -> Resul
 
     let mut registry = SourceRegistry::new();
     let admitted = registry.admit_paths([alpha.clone(), beta])?;
+    let canonical_alpha = alpha.canonicalize()?;
 
     assert_eq!(admitted.len(), 2);
     assert_eq!(admitted[0].native_name(), OsStr::new("alpha.txt"));
     assert_eq!(registry.snapshots(), admitted);
     assert_eq!(registry.generation(), 1);
-    assert_eq!(registry.path_for(admitted[0].id()), Some(alpha.as_path()));
+    assert_eq!(
+        registry.path_for(admitted[0].id()),
+        Some(canonical_alpha.as_path())
+    );
     Ok(())
 }
 
