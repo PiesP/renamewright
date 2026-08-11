@@ -8,6 +8,7 @@ use renamewright_core::{
 use renamewright_platform::{
     LinuxExecutionFileSystem, PreparedStepDisposition, RecoveryLocation, RecoveryLocationState,
     RenameLedger, SourceRegistry, encode_journal, freeze_execution_plan, inspect_prepared_step,
+    reconcile_prepared_step,
 };
 
 fn interrupted_fixture(
@@ -145,5 +146,77 @@ fn reports_missing_unexpected_and_multiple_identity_locations()
         inspect_prepared_step(&ledger, ledger_id, &LinuxExecutionFileSystem::new())?.disposition(),
         PreparedStepDisposition::MultipleLocations
     );
+    Ok(())
+}
+
+#[test]
+fn explicit_reconciliation_durably_records_applied_and_not_applied_results()
+-> Result<(), Box<dyn std::error::Error>> {
+    let not_applied_directory = tempfile::tempdir()?;
+    let (ledger, _, _) = interrupted_fixture(&not_applied_directory)?;
+    let ledger_id = ledger
+        .entries()
+        .next()
+        .ok_or("ledger was empty")?
+        .ledger_id();
+
+    assert_eq!(
+        reconcile_prepared_step(&ledger, ledger_id, &LinuxExecutionFileSystem::new())?,
+        renamewright_core::JournalStatus::ForwardPending { next_step: 0 }
+    );
+    assert_eq!(
+        RenameLedger::discover(not_applied_directory.path())?
+            .entries()
+            .next()
+            .ok_or("ledger was empty")?
+            .status(),
+        renamewright_platform::LedgerStatus::ForwardPending
+    );
+
+    let applied_directory = tempfile::tempdir()?;
+    let (ledger, _, temporary) = interrupted_fixture(&applied_directory)?;
+    fs::rename(
+        applied_directory.path().join("source.txt"),
+        applied_directory.path().join(temporary),
+    )?;
+    let ledger_id = ledger
+        .entries()
+        .next()
+        .ok_or("ledger was empty")?
+        .ledger_id();
+
+    assert_eq!(
+        reconcile_prepared_step(&ledger, ledger_id, &LinuxExecutionFileSystem::new())?,
+        renamewright_core::JournalStatus::ForwardPending { next_step: 1 }
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_reconciliation_refuses_an_ambiguous_identity() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let (ledger, _, temporary) = interrupted_fixture(&directory)?;
+    fs::hard_link(
+        directory.path().join("source.txt"),
+        directory.path().join(temporary),
+    )?;
+    let ledger_id = ledger
+        .entries()
+        .next()
+        .ok_or("ledger was empty")?
+        .ledger_id();
+    let journal_path = directory.path().join("interrupted.rwj");
+    let before = fs::read(&journal_path)?;
+
+    let error = reconcile_prepared_step(&ledger, ledger_id, &LinuxExecutionFileSystem::new())
+        .err()
+        .ok_or("ambiguous identity was recorded")?;
+
+    assert_eq!(
+        error.kind(),
+        renamewright_platform::RecoveryActionErrorKind::DispositionNotDeterministic
+    );
+    assert_eq!(fs::read(journal_path)?, before);
     Ok(())
 }

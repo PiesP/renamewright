@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 
 use renamewright_core::{JournalRecord, JournalStatus, PlanId, replay_journal};
 
-use crate::{JournalCodecErrorKind, JournalInspection, inspect_journal};
+use crate::{JournalCodecErrorKind, JournalInspection, MAX_JOURNAL_FILE_BYTES, inspect_journal};
 
 pub const MAX_DISCOVERED_JOURNALS: usize = 1_024;
-pub const MAX_JOURNAL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LedgerId(u64);

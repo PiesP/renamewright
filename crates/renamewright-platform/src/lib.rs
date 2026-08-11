@@ -32,17 +32,17 @@ pub use executor::{
 pub use journal::{
     JOURNAL_SCHEMA_VERSION, JournalCodecError, JournalCodecErrorKind, JournalFrame,
     JournalInspection, JournalStorageError, JournalStorageErrorKind, JournalWriter,
-    MAX_JOURNAL_PAYLOAD_BYTES, MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION, decode_journal,
-    encode_journal, inspect_journal,
+    MAX_JOURNAL_FILE_BYTES, MAX_JOURNAL_PAYLOAD_BYTES, MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION,
+    decode_journal, encode_journal, inspect_journal,
 };
 pub use ledger::{
     LedgerDiscoveryError, LedgerDiscoveryErrorKind, LedgerEntry, LedgerId, LedgerStatus,
-    MAX_DISCOVERED_JOURNALS, MAX_JOURNAL_FILE_BYTES, RenameLedger,
+    MAX_DISCOVERED_JOURNALS, RenameLedger,
 };
 pub use recovery::{
-    PreparedStepDisposition, PreparedStepInspection, RecoveryInspectionError,
-    RecoveryInspectionErrorKind, RecoveryLocation, RecoveryLocationState, RecoveryObservation,
-    inspect_prepared_step,
+    PreparedStepDisposition, PreparedStepInspection, RecoveryActionError, RecoveryActionErrorKind,
+    RecoveryInspectionError, RecoveryInspectionErrorKind, RecoveryLocation, RecoveryLocationState,
+    RecoveryObservation, inspect_prepared_step, reconcile_prepared_step,
 };
 
 /// Filesystem mutation remains unavailable during the planning milestone.

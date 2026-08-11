@@ -2,17 +2,19 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 use renamewright_core::{
     EntryIdentitySignal, EntryKind, ExecutionIdentity, JournalEntry, JournalNameGraph,
-    JournalRecord, ParentId, PlanId, RollbackCause, SourceFingerprint, SourceId,
+    JournalRecord, JournalReplayErrorKind, JournalStatus, ParentId, PlanId, RollbackCause,
+    SourceFingerprint, SourceId, replay_journal,
 };
 
 pub const JOURNAL_SCHEMA_VERSION: u16 = 2;
 pub const MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION: u16 = 1;
 pub const MAX_JOURNAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_JOURNAL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 const MAGIC: [u8; 4] = *b"RWJR";
 const FRAME_HEADER_BYTES: usize = 24;
@@ -138,6 +140,13 @@ pub enum JournalStorageErrorKind {
     InvalidInitialRecord,
     AlreadyExists,
     OpenFailed { io_kind: io::ErrorKind },
+    LockFailed { io_kind: io::ErrorKind },
+    ResumeReadFailed { io_kind: io::ErrorKind },
+    ResumeTooLarge,
+    ResumeCodec { kind: JournalCodecErrorKind },
+    ResumeProtocol { kind: JournalReplayErrorKind },
+    ResumeVersion { version: u16 },
+    ResumeTerminal,
     HeaderAfterStart,
     RecordAfterTerminal,
     Codec { kind: JournalCodecErrorKind },
@@ -212,9 +221,118 @@ impl JournalWriter {
                 };
                 JournalStorageError::new(0, kind)
             })?;
+        file.try_lock().map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::LockFailed {
+                    io_kind: io::Error::from(error).kind(),
+                },
+            )
+        })?;
         let mut appender = DurableAppender::new(file);
         appender.append_initial(initial_record)?;
         Ok(Self { appender })
+    }
+
+    pub fn resume(path: &Path) -> Result<(Self, Vec<JournalRecord>), JournalStorageError> {
+        let mut file = open_existing_journal_no_follow(path).map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::OpenFailed {
+                    io_kind: error.kind(),
+                },
+            )
+        })?;
+        file.try_lock().map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::LockFailed {
+                    io_kind: io::Error::from(error).kind(),
+                },
+            )
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeReadFailed {
+                    io_kind: error.kind(),
+                },
+            )
+        })?;
+        if !metadata.is_file() || metadata.len() > MAX_JOURNAL_FILE_BYTES {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeTooLarge,
+            ));
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(MAX_JOURNAL_FILE_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                JournalStorageError::new(
+                    0,
+                    JournalStorageErrorKind::ResumeReadFailed {
+                        io_kind: error.kind(),
+                    },
+                )
+            })?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_JOURNAL_FILE_BYTES {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeTooLarge,
+            ));
+        }
+        let frames = decode_journal(&bytes).map_err(|error| {
+            JournalStorageError::new(
+                u64::try_from(error.frame_index()).unwrap_or(u64::MAX),
+                JournalStorageErrorKind::ResumeCodec { kind: error.kind() },
+            )
+        })?;
+        let Some(first) = frames.first() else {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeProtocol {
+                    kind: JournalReplayErrorKind::EmptyJournal,
+                },
+            ));
+        };
+        if first.schema_version() != JOURNAL_SCHEMA_VERSION {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeVersion {
+                    version: first.schema_version(),
+                },
+            ));
+        }
+        let records = frames
+            .into_iter()
+            .map(JournalFrame::into_record)
+            .collect::<Vec<_>>();
+        let status = replay_journal(&records).map_err(|error| {
+            JournalStorageError::new(
+                u64::try_from(error.record_index()).unwrap_or(u64::MAX),
+                JournalStorageErrorKind::ResumeProtocol { kind: error.kind() },
+            )
+        })?;
+        if matches!(
+            status,
+            JournalStatus::Completed | JournalStatus::RolledBack { .. }
+        ) {
+            return Err(JournalStorageError::new(
+                u64::try_from(records.len()).unwrap_or(u64::MAX),
+                JournalStorageErrorKind::ResumeTerminal,
+            ));
+        }
+        let next_sequence = u64::try_from(records.len()).map_err(|_| {
+            JournalStorageError::new(u64::MAX, JournalStorageErrorKind::SequenceExhausted)
+        })?;
+        Ok((
+            Self {
+                appender: DurableAppender::resume(file, next_sequence),
+            },
+            records,
+        ))
     }
 
     pub fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageError> {
@@ -260,6 +378,15 @@ impl<S: JournalSink> DurableAppender<S> {
         Self {
             sink,
             next_sequence: 0,
+            terminal: false,
+            poisoned: false,
+        }
+    }
+
+    const fn resume(sink: S, next_sequence: u64) -> Self {
+        Self {
+            sink,
+            next_sequence,
             terminal: false,
             poisoned: false,
         }
@@ -343,6 +470,36 @@ impl<S: JournalSink> DurableAppender<S> {
         );
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn open_existing_journal_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let flags = i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    OpenOptions::new()
+        .read(true)
+        .append(true)
+        .custom_flags(flags)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_existing_journal_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .append(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn open_existing_journal_no_follow(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).append(true).open(path)
 }
 
 pub fn encode_journal(records: &[JournalRecord]) -> Result<Vec<u8>, JournalCodecError> {
