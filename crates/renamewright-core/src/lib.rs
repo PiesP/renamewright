@@ -27,14 +27,14 @@ pub use rules::{
 pub use windows::windows_name_comparison_key;
 
 /// Version of the frontend/backend planning protocol.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[cfg(test)]
 mod tests {
     use super::PROTOCOL_VERSION;
 
     #[test]
-    fn protocol_starts_at_version_one() {
-        assert_eq!(PROTOCOL_VERSION, 1);
+    fn protocol_version_tracks_the_rule_pipeline_contract() {
+        assert_eq!(PROTOCOL_VERSION, 2);
     }
 }
