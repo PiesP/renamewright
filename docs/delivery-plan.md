@@ -95,11 +95,18 @@ inspectable and exported with create-new semantics; and occupied destinations,
 stale sources, and symlink entries have behavioural coverage. No source rename
 command exists.
 
-The next implementation request should review and freeze the execution-grade
-plan format, Windows entry-identity strategy, journal durability contract,
-no-replace primitive, rollback state machine, and startup recovery decisions.
-That review should produce accepted design records and failing behavioural
-fixtures before implementation of any real rename operation.
+The execution-grade plan format, Windows entry-identity strategy, journal
+durability contract, no-replace primitive, rollback state machine, and startup
+recovery decisions are frozen in
+[ADR 0001](decisions/0001-journaled-execution-contract.md). The staged
+[Milestone 2 implementation plan](milestone-2-plan.md) keeps actual filesystem
+mutation behind journal replay, codec, platform, failure-injection, Windows, and
+recovery gates.
+
+Stage 2A is complete: the pure execution and recovery state model has behavioural
+fixtures while the Tauri surface remains read-only. The active implementation
+stage is Stage 2B, the versioned framed journal codec. No real rename operation is
+introduced until the later platform and executor gates pass.
 
 The completed Milestone 1 commit series is:
 

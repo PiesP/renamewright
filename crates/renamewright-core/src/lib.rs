@@ -1,9 +1,15 @@
 #![forbid(unsafe_code)]
 
+mod execution;
 mod model;
 mod planner;
 mod windows;
 
+pub use execution::{
+    ExecutionDirection, ExecutionIdentity, ExecutionPhase, ExecutionStep, JournalEntry,
+    JournalNameGraph, JournalRecord, JournalReplayError, JournalReplayErrorKind, JournalStatus,
+    RollbackCause, ScheduleError, build_two_phase_schedule, replay_journal,
+};
 pub use model::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, EntryIdentitySignal, EntryKind, NameStatus,
     OccupiedName, ParentId, PlanId, PlanRow, RenamePlan, RenameRule, SourceFingerprint, SourceId,
