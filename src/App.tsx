@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from 'solid-js';
+import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { APP_NAME } from './app-meta';
 import { createPlanningClient, type Plan, type PlanningClient } from './planning/client';
 
@@ -63,6 +63,17 @@ export function App(props: AppProps) {
       ? planningClient.selectSources(prefix())
       : planningClient.loadSample(prefix());
 
+  onMount(() => {
+    const stopWatching = planningClient.watchSourceChanges((change) => {
+      if (change.error) {
+        setError(change.error);
+        return;
+      }
+      void run(() => planningClient.previewPrefix(prefix()));
+    });
+    onCleanup(stopWatching);
+  });
+
   const statusMessage = () => {
     const current = plan();
     if (error()) {
@@ -95,6 +106,9 @@ export function App(props: AppProps) {
         </div>
         <div class="source-actions">
           <span class="read-only-badge">Read-only milestone</span>
+          <span class="drop-hint">
+            {planningClient.nativeSelectionAvailable ? 'Drop files anywhere' : 'Desktop drop ready'}
+          </span>
           <button
             class="button button-secondary"
             type="button"
@@ -112,7 +126,7 @@ export function App(props: AppProps) {
           when={planningClient.nativeSelectionAvailable}
           fallback="File selection is available in the desktop app. Use the sample in this browser preview."
         >
-          Native paths stay inside the Rust process.
+          Native picker and drop paths stay inside the Rust process.
         </Show>
       </p>
 
@@ -176,7 +190,8 @@ export function App(props: AppProps) {
                 </span>
                 <h2>No sources in this plan</h2>
                 <p>
-                  Load the local sample to test a prefix, or open the desktop app to select files.
+                  Load the local sample to test a prefix, or select and drop files in the desktop
+                  app.
                 </p>
                 <button
                   class="button button-primary"

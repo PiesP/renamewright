@@ -22,5 +22,8 @@ rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 tauri = { version = "2.11.5", features = [] }
 
+[dev-dependencies]
+tempfile = "3.27.0"
+
 [lints]
 workspace = true

@@ -2,7 +2,7 @@ import { cleanup, render, screen } from '@solidjs/testing-library';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../src/App';
-import type { Plan, PlanningClient } from '../../src/planning/client';
+import type { Plan, PlanningClient, SourceChange } from '../../src/planning/client';
 
 const sources = ['invoice.pdf', 'CON.txt', 'notes.txt'];
 
@@ -36,6 +36,7 @@ function fakeClient(): PlanningClient {
     loadSample: async (prefix) => makePlan(prefix),
     selectSources: async (prefix) => makePlan(prefix),
     previewPrefix: async (prefix) => makePlan(prefix),
+    watchSourceChanges: () => () => undefined,
   };
 }
 
@@ -85,5 +86,23 @@ test('uses the native picker instead of browser samples in the desktop shell', a
   await user.click(addButtons.at(-1) as HTMLButtonElement);
 
   expect(selectSources).toHaveBeenCalledWith('');
+  expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
+});
+
+test('refreshes the plan after Rust admits dropped sources', async () => {
+  let notify: ((change: SourceChange) => void) | undefined;
+  const client = fakeClient();
+  client.nativeSelectionAvailable = true;
+  client.watchSourceChanges = (onChange) => {
+    notify = onChange;
+    return () => undefined;
+  };
+  const previewPrefix = vi.fn(client.previewPrefix);
+  client.previewPrefix = previewPrefix;
+  render(() => <App client={client} />);
+
+  notify?.({ revision: 1, error: null });
+
+  expect(previewPrefix).toHaveBeenCalledWith('');
   expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
 });

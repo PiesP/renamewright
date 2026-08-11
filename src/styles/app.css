@@ -130,6 +130,12 @@ input:focus-visible {
   white-space: nowrap;
 }
 
+.drop-hint {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
 .button {
   min-height: var(--control-height);
   padding-inline: var(--space-4);

@@ -2508,6 +2508,7 @@ dependencies = [
  "serde",
  "tauri",
  "tauri-build",
+ "tempfile",
 ]
 
 [[package]]

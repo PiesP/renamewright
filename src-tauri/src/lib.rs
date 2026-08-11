@@ -7,12 +7,19 @@ use renamewright_core::{
 };
 use renamewright_platform::SourceRegistry;
 use serde::Serialize;
-use tauri::State;
+use tauri::{DragDropEvent, Manager, State, WindowEvent};
 
 #[derive(Debug)]
 struct AppState {
     registry: Mutex<SourceRegistry>,
     next_plan_id: Mutex<u64>,
+    source_changes: Mutex<SourceChanges>,
+}
+
+#[derive(Debug, Default)]
+struct SourceChanges {
+    revision: u64,
+    error: Option<String>,
 }
 
 impl Default for AppState {
@@ -20,8 +27,16 @@ impl Default for AppState {
         Self {
             registry: Mutex::new(SourceRegistry::new()),
             next_plan_id: Mutex::new(1),
+            source_changes: Mutex::new(SourceChanges::default()),
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceChangeDto {
+    revision: u64,
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -78,6 +93,43 @@ fn preview_prefix(prefix: String, state: State<'_, AppState>) -> Result<PlanDto,
         .lock()
         .map_err(|_| "the source registry is unavailable".to_owned())?;
     plan_from_registry(&mut registry, &prefix, &state)
+}
+
+#[tauri::command]
+fn poll_source_changes(
+    since: u64,
+    state: State<'_, AppState>,
+) -> Result<Option<SourceChangeDto>, String> {
+    let changes = state
+        .source_changes
+        .lock()
+        .map_err(|_| "the source change tracker is unavailable".to_owned())?;
+    if changes.revision <= since {
+        return Ok(None);
+    }
+
+    Ok(Some(SourceChangeDto {
+        revision: changes.revision,
+        error: changes.error.clone(),
+    }))
+}
+
+fn admit_dropped_sources(state: &AppState, paths: &[std::path::PathBuf]) {
+    let outcome = state
+        .registry
+        .lock()
+        .map_err(|_| "the source registry is unavailable".to_owned())
+        .and_then(|mut registry| {
+            registry
+                .admit_paths(paths.iter().cloned())
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        });
+
+    if let Ok(mut changes) = state.source_changes.lock() {
+        changes.revision = changes.revision.saturating_add(1);
+        changes.error = outcome.err();
+    }
 }
 
 fn plan_from_registry(
@@ -148,10 +200,51 @@ const fn diagnostic_name(code: DiagnosticCode) -> &'static str {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![select_sources, preview_prefix])
+        .on_window_event(|window, event| {
+            if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+                let app_handle = window.app_handle().clone();
+                let paths = paths.clone();
+                std::thread::spawn(move || {
+                    admit_dropped_sources(&app_handle.state::<AppState>(), &paths);
+                });
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            select_sources,
+            preview_prefix,
+            poll_source_changes
+        ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
             eprintln!("failed to run Renamewright: {error}");
             std::process::exit(1);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::fs;
+
+    use super::{AppState, admit_dropped_sources};
+
+    #[test]
+    fn dropped_sources_update_only_the_rust_owned_registry() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("drop.txt");
+        fs::write(&source, b"drop")?;
+        let state = AppState::default();
+
+        admit_dropped_sources(&state, &[source]);
+
+        let registry = state.registry.lock().map_err(|_| "registry lock failed")?;
+        let changes = state
+            .source_changes
+            .lock()
+            .map_err(|_| "change lock failed")?;
+        assert_eq!(registry.snapshots().len(), 1);
+        assert_eq!(changes.revision, 1);
+        assert_eq!(changes.error, None);
+        Ok(())
+    }
 }

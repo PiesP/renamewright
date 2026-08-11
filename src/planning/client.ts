@@ -18,11 +18,17 @@ export interface Plan {
   canApply: boolean;
 }
 
+export interface SourceChange {
+  revision: number;
+  error: string | null;
+}
+
 export interface PlanningClient {
   nativeSelectionAvailable: boolean;
   loadSample(prefix: string): Promise<Plan>;
   selectSources(prefix: string): Promise<Plan | null>;
   previewPrefix(prefix: string): Promise<Plan>;
+  watchSourceChanges(onChange: (change: SourceChange) => void): () => void;
 }
 
 declare global {
@@ -80,5 +86,37 @@ export function createPlanningClient(): PlanningClient {
     selectSources: async (prefix) => invoke<Plan | null>('select_sources', { prefix }),
     previewPrefix: async (prefix) =>
       nativeSelectionAvailable ? invoke<Plan>('preview_prefix', { prefix }) : browserPlan(prefix),
+    watchSourceChanges: (onChange) => {
+      if (!nativeSelectionAvailable) {
+        return () => undefined;
+      }
+
+      let revision = 0;
+      let inFlight = false;
+      const poll = async () => {
+        if (inFlight) {
+          return;
+        }
+        inFlight = true;
+        try {
+          const change = await invoke<SourceChange | null>('poll_source_changes', {
+            since: revision,
+          });
+          if (change) {
+            revision = change.revision;
+            onChange(change);
+          }
+        } catch (cause) {
+          onChange({
+            revision,
+            error: cause instanceof Error ? cause.message : 'Dropped sources could not be checked.',
+          });
+        } finally {
+          inFlight = false;
+        }
+      };
+      const interval = window.setInterval(() => void poll(), 400);
+      return () => window.clearInterval(interval);
+    },
   };
 }
