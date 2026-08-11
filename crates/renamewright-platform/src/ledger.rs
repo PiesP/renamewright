@@ -137,6 +137,7 @@ struct CatalogItem {
 
 #[derive(Debug, Default)]
 pub struct RenameLedger {
+    root: Option<PathBuf>,
     items: Vec<CatalogItem>,
 }
 
@@ -144,7 +145,12 @@ impl RenameLedger {
     pub fn discover(root: &Path) -> Result<Self, LedgerDiscoveryError> {
         let entries = match fs::read_dir(root) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    root: Some(root.to_path_buf()),
+                    items: Vec::new(),
+                });
+            }
             Err(error) => {
                 return Err(LedgerDiscoveryError {
                     kind: LedgerDiscoveryErrorKind::RootUnavailable {
@@ -187,12 +193,25 @@ impl RenameLedger {
                 inspection,
             });
         }
-        Ok(Self { items })
+        Ok(Self {
+            root: Some(root.to_path_buf()),
+            items,
+        })
     }
 
     #[must_use]
     pub fn entries(&self) -> impl ExactSizeIterator<Item = LedgerEntry> + '_ {
         self.items.iter().map(|item| item.projection)
+    }
+
+    pub fn refresh(&mut self) -> Result<(), LedgerDiscoveryError> {
+        let root = self.root.clone().ok_or(LedgerDiscoveryError {
+            kind: LedgerDiscoveryErrorKind::RootUnavailable {
+                io_kind: io::ErrorKind::InvalidInput,
+            },
+        })?;
+        *self = Self::discover(&root)?;
+        Ok(())
     }
 
     pub(crate) fn item(&self, ledger_id: LedgerId) -> Option<(&Path, &JournalInspection)> {

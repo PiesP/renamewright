@@ -125,3 +125,41 @@ fn a_missing_directory_is_an_empty_ledger() -> Result<(), Box<dyn std::error::Er
     assert_eq!(ledger.entries().len(), 0);
     Ok(())
 }
+
+#[test]
+fn refresh_reprojects_the_same_journal_root() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let journal = directory.path().join("transaction.rwj");
+    fs::write(&journal, encode_journal(&[header()])?)?;
+    let mut ledger = RenameLedger::discover(directory.path())?;
+    assert_eq!(
+        ledger.entries().next().ok_or("ledger was empty")?.status(),
+        LedgerStatus::ForwardPending
+    );
+
+    fs::write(
+        &journal,
+        encode_journal(&[
+            header(),
+            JournalRecord::ForwardStepPrepared { step_index: 0 },
+            JournalRecord::ForwardStepCompleted {
+                step_index: 0,
+                observed_identity: ExecutionIdentity::new(23, [29; 16]),
+            },
+            JournalRecord::ForwardStepPrepared { step_index: 1 },
+            JournalRecord::ForwardStepCompleted {
+                step_index: 1,
+                observed_identity: ExecutionIdentity::new(23, [29; 16]),
+            },
+            JournalRecord::TransactionCompleted,
+        ])?,
+    )?;
+
+    ledger.refresh()?;
+
+    assert_eq!(
+        ledger.entries().next().ok_or("ledger was empty")?.status(),
+        LedgerStatus::Completed
+    );
+    Ok(())
+}

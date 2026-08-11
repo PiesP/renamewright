@@ -12,11 +12,13 @@ use renamewright_core::{
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
     FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, NativeExecutionFileSystem,
-    PreparedStepDisposition, RecoveryReadiness, RecoveryTransactionInspection, RenameLedger,
-    SourceRegistry, execute_frozen_plan, freeze_execution_plan, inspect_recovery_transaction,
+    PreparedStepDisposition, RecoveryAction, RecoveryReadiness, RecoveryTransactionInspection,
+    RenameLedger, SourceRegistry, execute_frozen_plan, freeze_execution_plan,
+    inspect_recovery_transaction, reconcile_prepared_step, recover_transaction,
 };
-use serde::Serialize;
-use tauri::{DragDropEvent, Manager, State, WindowEvent};
+use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, DragDropEvent, Manager, State, WindowEvent};
 
 #[derive(Debug)]
 pub struct AppState {
@@ -25,7 +27,54 @@ pub struct AppState {
     source_changes: Mutex<SourceChanges>,
     latest_plan: Mutex<Option<StoredPlan>>,
     mutation_lock: Mutex<()>,
+    recovery_control: Mutex<RecoveryControl>,
     ledger: Mutex<RenameLedger>,
+}
+
+#[derive(Debug, Default)]
+struct RecoveryControl {
+    active: bool,
+    cancellable: bool,
+    cancel_requested: bool,
+}
+
+struct RecoverySession<'a> {
+    control: &'a Mutex<RecoveryControl>,
+}
+
+impl<'a> RecoverySession<'a> {
+    fn begin(
+        control: &'a Mutex<RecoveryControl>,
+        cancellable: bool,
+    ) -> Result<Self, RecoveryCommandErrorKind> {
+        let mut state = control
+            .lock()
+            .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
+        if state.active {
+            return Err(RecoveryCommandErrorKind::Busy);
+        }
+        state.active = true;
+        state.cancellable = cancellable;
+        state.cancel_requested = false;
+        drop(state);
+        Ok(Self { control })
+    }
+
+    fn cancel_requested(&self) -> bool {
+        self.control
+            .lock()
+            .map_or(true, |state| state.cancel_requested)
+    }
+}
+
+impl Drop for RecoverySession<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.control.lock() {
+            state.active = false;
+            state.cancellable = false;
+            state.cancel_requested = false;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -95,6 +144,7 @@ impl Default for AppState {
             source_changes: Mutex::new(SourceChanges::default()),
             latest_plan: Mutex::new(None),
             mutation_lock: Mutex::new(()),
+            recovery_control: Mutex::new(RecoveryControl::default()),
             ledger: Mutex::new(RenameLedger::default()),
         }
     }
@@ -107,7 +157,7 @@ struct SourceChangeDto {
     error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LedgerEntryDto {
     ledger_id: u64,
@@ -131,6 +181,76 @@ struct RecoveryInspectionDto {
     resume_available: bool,
     rollback_available: bool,
     reconcile_available: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum RecoveryCommandAction {
+    Resume,
+    Rollback,
+    Reconcile,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryExpectationDto {
+    ledger_id: u64,
+    direction: String,
+    step_index: Option<usize>,
+    readiness: String,
+    disposition: Option<String>,
+    resume_available: bool,
+    rollback_available: bool,
+    reconcile_available: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryRequestDto {
+    action: RecoveryCommandAction,
+    inspection: RecoveryExpectationDto,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryCommandResultDto {
+    performed: bool,
+    outcome: &'static str,
+    ledger: Vec<LedgerEntryDto>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryCommandErrorKind {
+    Busy,
+    StateUnavailable,
+    InspectionChanged,
+    ActionUnavailable,
+    RecoveryFailed,
+    LedgerRefreshFailed,
+}
+
+impl RecoveryCommandErrorKind {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::StateUnavailable => "stateUnavailable",
+            Self::InspectionChanged => "inspectionChanged",
+            Self::ActionUnavailable => "actionUnavailable",
+            Self::RecoveryFailed => "recoveryFailed",
+            Self::LedgerRefreshFailed => "ledgerRefreshFailed",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RecoveryCommandErrorDto {
+    code: &'static str,
+}
+
+impl From<RecoveryCommandErrorKind> for RecoveryCommandErrorDto {
+    fn from(kind: RecoveryCommandErrorKind) -> Self {
+        Self { code: kind.code() }
+    }
 }
 
 #[derive(Serialize)]
@@ -258,10 +378,13 @@ fn poll_source_changes(
 
 #[tauri::command]
 fn list_ledger(state: State<'_, AppState>) -> Result<Vec<LedgerEntryDto>, String> {
-    let ledger = state
+    let mut ledger = state
         .ledger
         .lock()
         .map_err(|_| "the rename ledger is unavailable".to_owned())?;
+    ledger
+        .refresh()
+        .map_err(|_| "the rename ledger could not be refreshed".to_owned())?;
     Ok(ledger.entries().map(LedgerEntryDto::from).collect())
 }
 
@@ -270,10 +393,13 @@ fn inspect_recovery(
     ledger_id: u64,
     state: State<'_, AppState>,
 ) -> Result<RecoveryInspectionDto, String> {
-    let ledger = state
+    let mut ledger = state
         .ledger
         .lock()
         .map_err(|_| "the rename ledger is unavailable".to_owned())?;
+    ledger
+        .refresh()
+        .map_err(|_| "the rename ledger could not be refreshed".to_owned())?;
     inspect_recovery_transaction(
         &ledger,
         LedgerId::from_value(ledger_id),
@@ -281,6 +407,30 @@ fn inspect_recovery(
     )
     .map(RecoveryInspectionDto::from)
     .map_err(|_| "the recovery state could not be inspected".to_owned())
+}
+
+#[tauri::command]
+async fn apply_recovery_action(
+    request: RecoveryRequestDto,
+    app: AppHandle,
+) -> Result<RecoveryCommandResultDto, RecoveryCommandErrorDto> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        perform_recovery_request(
+            &state,
+            &request,
+            &NativeExecutionFileSystem::new(),
+            |action, inspection| confirm_recovery_action(&app, action, inspection),
+        )
+        .map_err(RecoveryCommandErrorDto::from)
+    })
+    .await
+    .map_err(|_| RecoveryCommandErrorDto::from(RecoveryCommandErrorKind::StateUnavailable))?
+}
+
+#[tauri::command]
+fn cancel_recovery(state: State<'_, AppState>) -> Result<bool, RecoveryCommandErrorDto> {
+    request_recovery_cancellation(&state).map_err(RecoveryCommandErrorDto::from)
 }
 
 #[tauri::command]
@@ -460,6 +610,187 @@ impl From<RecoveryTransactionInspection> for RecoveryInspectionDto {
     }
 }
 
+impl From<RecoveryTransactionInspection> for RecoveryExpectationDto {
+    fn from(inspection: RecoveryTransactionInspection) -> Self {
+        let dto = RecoveryInspectionDto::from(inspection);
+        Self {
+            ledger_id: dto.ledger_id,
+            direction: dto.direction.to_owned(),
+            step_index: dto.step_index,
+            readiness: dto.readiness.to_owned(),
+            disposition: dto.disposition.map(str::to_owned),
+            resume_available: dto.resume_available,
+            rollback_available: dto.rollback_available,
+            reconcile_available: dto.reconcile_available,
+        }
+    }
+}
+
+fn perform_recovery_request<F, C>(
+    state: &AppState,
+    request: &RecoveryRequestDto,
+    filesystem: &F,
+    confirm: C,
+) -> Result<RecoveryCommandResultDto, RecoveryCommandErrorKind>
+where
+    F: ExecutionFileSystem + ?Sized,
+    C: FnOnce(RecoveryCommandAction, RecoveryTransactionInspection) -> bool,
+{
+    let _mutation_guard = match state.mutation_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => return Err(RecoveryCommandErrorKind::Busy),
+        Err(TryLockError::Poisoned(_)) => {
+            return Err(RecoveryCommandErrorKind::StateUnavailable);
+        }
+    };
+    let ledger_id = LedgerId::from_value(request.inspection.ledger_id);
+    let inspection = {
+        let mut ledger = state
+            .ledger
+            .lock()
+            .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
+        validate_recovery_expectation(&mut ledger, request, ledger_id, filesystem)?
+    };
+    if !confirm(request.action, inspection) {
+        let mut ledger = state
+            .ledger
+            .lock()
+            .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
+        ledger
+            .refresh()
+            .map_err(|_| RecoveryCommandErrorKind::LedgerRefreshFailed)?;
+        return Ok(RecoveryCommandResultDto {
+            performed: false,
+            outcome: "cancelled",
+            ledger: ledger.entries().map(LedgerEntryDto::from).collect(),
+        });
+    }
+
+    let mut ledger = state
+        .ledger
+        .lock()
+        .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
+    validate_recovery_expectation(&mut ledger, request, ledger_id, filesystem)?;
+    let recovery_session = RecoverySession::begin(
+        &state.recovery_control,
+        request.action == RecoveryCommandAction::Resume
+            && inspection.direction() == ExecutionDirection::Forward,
+    )?;
+    let action_result = match request.action {
+        RecoveryCommandAction::Resume => recover_transaction(
+            &ledger,
+            ledger_id,
+            filesystem,
+            RecoveryAction::Resume,
+            || recovery_session.cancel_requested(),
+        )
+        .map(recovery_outcome_name),
+        RecoveryCommandAction::Rollback => recover_transaction(
+            &ledger,
+            ledger_id,
+            filesystem,
+            RecoveryAction::Rollback,
+            || false,
+        )
+        .map(recovery_outcome_name),
+        RecoveryCommandAction::Reconcile => {
+            reconcile_prepared_step(&ledger, ledger_id, filesystem).map(|_| "reconciled")
+        }
+    };
+    let refresh_result = ledger.refresh();
+    let outcome = action_result.map_err(|_| RecoveryCommandErrorKind::RecoveryFailed)?;
+    refresh_result.map_err(|_| RecoveryCommandErrorKind::LedgerRefreshFailed)?;
+    Ok(RecoveryCommandResultDto {
+        performed: true,
+        outcome,
+        ledger: ledger.entries().map(LedgerEntryDto::from).collect(),
+    })
+}
+
+fn validate_recovery_expectation<F>(
+    ledger: &mut RenameLedger,
+    request: &RecoveryRequestDto,
+    ledger_id: LedgerId,
+    filesystem: &F,
+) -> Result<RecoveryTransactionInspection, RecoveryCommandErrorKind>
+where
+    F: ExecutionFileSystem + ?Sized,
+{
+    ledger
+        .refresh()
+        .map_err(|_| RecoveryCommandErrorKind::LedgerRefreshFailed)?;
+    let inspection = inspect_recovery_transaction(ledger, ledger_id, filesystem)
+        .map_err(|_| RecoveryCommandErrorKind::InspectionChanged)?;
+    if RecoveryExpectationDto::from(inspection) != request.inspection {
+        return Err(RecoveryCommandErrorKind::InspectionChanged);
+    }
+    if !recovery_action_is_available(request.action, inspection) {
+        return Err(RecoveryCommandErrorKind::ActionUnavailable);
+    }
+    Ok(inspection)
+}
+
+fn request_recovery_cancellation(state: &AppState) -> Result<bool, RecoveryCommandErrorKind> {
+    let mut control = state
+        .recovery_control
+        .lock()
+        .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
+    if !control.active || !control.cancellable {
+        return Ok(false);
+    }
+    control.cancel_requested = true;
+    Ok(true)
+}
+
+const fn recovery_action_is_available(
+    action: RecoveryCommandAction,
+    inspection: RecoveryTransactionInspection,
+) -> bool {
+    match action {
+        RecoveryCommandAction::Resume => inspection.resume_available(),
+        RecoveryCommandAction::Rollback => inspection.rollback_available(),
+        RecoveryCommandAction::Reconcile => inspection.reconcile_available(),
+    }
+}
+
+const fn recovery_outcome_name(outcome: ExecutionOutcome) -> &'static str {
+    match outcome {
+        ExecutionOutcome::Completed => "completed",
+        ExecutionOutcome::RolledBack { .. } => "rolledBack",
+        ExecutionOutcome::RecoveryRequired(_) => "recoveryRequired",
+    }
+}
+
+fn confirm_recovery_action(
+    app: &AppHandle,
+    action: RecoveryCommandAction,
+    inspection: RecoveryTransactionInspection,
+) -> bool {
+    let description = match action {
+        RecoveryCommandAction::Resume if inspection.direction() == ExecutionDirection::Forward => {
+            "Continue this interrupted rename transaction? Renamewright will recheck every file identity and will not replace existing destinations."
+        }
+        RecoveryCommandAction::Resume => {
+            "Continue rolling back this interrupted transaction? Renamewright will recheck every file identity before each step."
+        }
+        RecoveryCommandAction::Rollback => {
+            "Roll back this interrupted rename transaction? Renamewright will recheck every file identity and will not replace existing destinations."
+        }
+        RecoveryCommandAction::Reconcile => {
+            "Record the inspected step observation in the local journal? Inspect the transaction again before any rename continues."
+        }
+    };
+    let mut dialog = MessageDialog::new()
+        .set_level(MessageLevel::Warning)
+        .set_title("Confirm Renamewright recovery")
+        .set_description(description)
+        .set_buttons(MessageButtons::YesNo);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    dialog.show() == MessageDialogResult::Yes
+}
+
 fn plan_document_json(plan_id: u64, state: &AppState) -> Result<String, String> {
     let latest_plan = state
         .latest_plan
@@ -629,6 +960,8 @@ pub fn run() {
             poll_source_changes,
             list_ledger,
             inspect_recovery,
+            apply_recovery_action,
+            cancel_recovery,
             inspect_plan,
             export_plan
         ])
@@ -641,6 +974,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use std::cell::Cell;
     use std::error::Error;
     use std::ffi::OsString;
     use std::fs;
@@ -656,9 +991,14 @@ mod tests {
     };
 
     use super::{
-        AppState, LedgerEntryDto, PrepareExecutionError, RecoveryInspectionDto, StoredPlan,
-        admit_dropped_sources, export_write_error, plan_document_json, prepare_latest_execution,
-        write_new_document,
+        AppState, LedgerEntryDto, StoredPlan, admit_dropped_sources, export_write_error,
+        plan_document_json, write_new_document,
+    };
+    #[cfg(target_os = "linux")]
+    use super::{
+        PrepareExecutionError, RecoveryCommandAction, RecoveryCommandErrorKind,
+        RecoveryExpectationDto, RecoveryInspectionDto, RecoveryRequestDto, RecoverySession,
+        perform_recovery_request, prepare_latest_execution, request_recovery_cancellation,
     };
 
     #[test]
@@ -810,6 +1150,120 @@ mod tests {
         assert!(!serialized.contains("private-final"));
         assert!(!serialized.contains("private-journal"));
         assert!(!serialized.contains(&directory.path().display().to_string()));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_command_requires_a_current_inspection_and_confirmation()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("private-source.txt");
+        fs::write(&source, b"source")?;
+        let mut registry = renamewright_platform::SourceRegistry::new();
+        registry.admit_paths([source.clone()])?;
+        let plan = build_plan_with_environment(
+            PlanId::new(69),
+            registry.generation(),
+            &registry.snapshots(),
+            &[RenameRule::prefix("private-final-")],
+            TargetPolicy::windows(),
+            &registry.validation_environment(),
+        );
+        let filesystem = LinuxExecutionFileSystem::new();
+        let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
+        fs::write(
+            directory.path().join("private-journal.rwj"),
+            renamewright_platform::encode_journal(&[frozen.initial_record()])?,
+        )?;
+        let state = AppState::default();
+        *state.ledger.lock().map_err(|_| "ledger lock failed")? =
+            renamewright_platform::RenameLedger::discover(directory.path())?;
+        let inspection = {
+            let ledger = state.ledger.lock().map_err(|_| "ledger lock failed")?;
+            let ledger_id = ledger
+                .entries()
+                .next()
+                .ok_or("ledger was empty")?
+                .ledger_id();
+            inspect_recovery_transaction(&ledger, ledger_id, &filesystem)?
+        };
+        let request = RecoveryRequestDto {
+            action: RecoveryCommandAction::Resume,
+            inspection: RecoveryExpectationDto::from(inspection),
+        };
+
+        let cancelled = perform_recovery_request(&state, &request, &filesystem, |_, _| false)
+            .map_err(|_| "cancelled request failed")?;
+        assert!(!cancelled.performed);
+        assert_eq!(cancelled.outcome, "cancelled");
+        assert!(source.exists());
+
+        let mut stale = request.clone();
+        stale.inspection.step_index = Some(usize::MAX);
+        let confirmation_called = Cell::new(false);
+        let error = perform_recovery_request(&state, &stale, &filesystem, |_, _| {
+            confirmation_called.set(true);
+            true
+        })
+        .err()
+        .ok_or("a stale inspection was accepted")?;
+        assert_eq!(error, RecoveryCommandErrorKind::InspectionChanged);
+        assert!(!confirmation_called.get());
+
+        let moved_source = directory.path().join("moved-during-confirmation.txt");
+        let ledger_available_during_confirmation = Cell::new(false);
+        let move_succeeded = Cell::new(false);
+        let result = perform_recovery_request(&state, &request, &filesystem, |_, _| {
+            ledger_available_during_confirmation.set(state.ledger.try_lock().is_ok());
+            move_succeeded.set(fs::rename(&source, &moved_source).is_ok());
+            move_succeeded.get()
+        });
+        assert!(ledger_available_during_confirmation.get());
+        assert!(move_succeeded.get());
+        let error = result
+            .err()
+            .ok_or("a changed post-confirmation inspection was accepted")?;
+        assert_eq!(error, RecoveryCommandErrorKind::InspectionChanged);
+        fs::rename(&moved_source, &source)?;
+
+        let completed = perform_recovery_request(&state, &request, &filesystem, |_, _| true)
+            .map_err(|_| "confirmed request failed")?;
+        assert!(completed.performed);
+        assert_eq!(completed.outcome, "completed");
+        assert!(!source.exists());
+        assert!(
+            directory
+                .path()
+                .join("private-final-private-source.txt")
+                .exists()
+        );
+        let serialized = serde_json::to_string(&completed)?;
+        assert!(serialized.contains("\"status\":\"completed\""));
+        assert!(!serialized.contains("private-source"));
+        assert!(!serialized.contains("private-final"));
+        assert!(!serialized.contains("private-journal"));
+        assert!(!serialized.contains(&directory.path().display().to_string()));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_cancellation_control_is_active_only_for_forward_sessions()
+    -> Result<(), Box<dyn Error>> {
+        let state = AppState::default();
+        assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
+        let non_cancellable = RecoverySession::begin(&state.recovery_control, false)
+            .map_err(|_| "recovery session unavailable")?;
+        assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
+        drop(non_cancellable);
+
+        let cancellable = RecoverySession::begin(&state.recovery_control, true)
+            .map_err(|_| "recovery session unavailable")?;
+        assert!(request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
+        assert!(cancellable.cancel_requested());
+        drop(cancellable);
+        assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
         Ok(())
     }
 
