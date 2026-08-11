@@ -551,3 +551,186 @@ fn available_temporary_name<F: ExecutionFileSystem + ?Sized>(
         FreezeExecutionErrorKind::TemporaryNameExhausted,
     ))
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::ffi::OsStr;
+    use std::io;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use renamewright_core::{
+        ExecutionIdentity, JournalRecord, JournalStatus, PlanId, RenameRule, TargetPolicy,
+        build_plan_with_environment, replay_journal,
+    };
+
+    use super::{
+        ExecutionJournal, ExecutionOutcome, ExecutionRecoveryReason, execute_with_journal,
+        freeze_execution_plan,
+    };
+    use crate::{
+        ExecutionFileSystem, ExecutionFsError, ExecutionFsErrorKind, JournalStorageErrorKind,
+        LinuxExecutionFileSystem, SourceRegistry,
+    };
+
+    struct FaultingFileSystem {
+        inner: LinuxExecutionFileSystem,
+        calls: AtomicUsize,
+        faults: Vec<(usize, ExecutionFsErrorKind)>,
+    }
+
+    impl FaultingFileSystem {
+        fn new(faults: Vec<(usize, ExecutionFsErrorKind)>) -> Self {
+            Self {
+                inner: LinuxExecutionFileSystem::new(),
+                calls: AtomicUsize::new(0),
+                faults,
+            }
+        }
+    }
+
+    impl ExecutionFileSystem for FaultingFileSystem {
+        fn identity(
+            &self,
+            parent: &Path,
+            native_name: &OsStr,
+        ) -> Result<ExecutionIdentity, ExecutionFsError> {
+            self.inner.identity(parent, native_name)
+        }
+
+        fn rename_no_replace(
+            &self,
+            parent: &Path,
+            source_name: &OsStr,
+            target_name: &OsStr,
+            expected_identity: ExecutionIdentity,
+        ) -> Result<ExecutionIdentity, ExecutionFsError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some((_, kind)) = self.faults.iter().find(|(index, _)| *index == call) {
+                return Err(ExecutionFsError::from_kind(*kind));
+            }
+            self.inner
+                .rename_no_replace(parent, source_name, target_name, expected_identity)
+        }
+    }
+
+    struct FaultingJournal {
+        records: Vec<JournalRecord>,
+        attempts: usize,
+        fail_at: usize,
+        failure: JournalStorageErrorKind,
+    }
+
+    impl FaultingJournal {
+        fn new(initial: JournalRecord, fail_at: usize, failure: JournalStorageErrorKind) -> Self {
+            Self {
+                records: vec![initial],
+                attempts: 0,
+                fail_at,
+                failure,
+            }
+        }
+    }
+
+    impl ExecutionJournal for FaultingJournal {
+        fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageErrorKind> {
+            let attempt = self.attempts;
+            self.attempts = self.attempts.saturating_add(1);
+            if attempt == self.fail_at {
+                Err(self.failure)
+            } else {
+                self.records.push(record.clone());
+                Ok(())
+            }
+        }
+    }
+
+    fn frozen_fixture(
+        plan_id: u64,
+        filesystem: &FaultingFileSystem,
+    ) -> Result<(tempfile::TempDir, super::FrozenExecutionPlan), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("a.txt"), b"a")?;
+        std::fs::write(directory.path().join("b.txt"), b"b")?;
+        let mut registry = SourceRegistry::new();
+        registry.admit_paths([
+            directory.path().join("a.txt"),
+            directory.path().join("b.txt"),
+        ])?;
+        let plan = build_plan_with_environment(
+            PlanId::new(plan_id),
+            registry.generation(),
+            &registry.snapshots(),
+            &[RenameRule::prefix("final-")],
+            TargetPolicy::windows(),
+            &registry.validation_environment(),
+        );
+        let frozen = freeze_execution_plan(&registry, &plan, filesystem)?;
+        Ok((directory, frozen))
+    }
+
+    fn assert_journal_failure_at_every_append(
+        append_count: usize,
+        filesystem_faults: &[(usize, ExecutionFsErrorKind)],
+        failure: JournalStorageErrorKind,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for fail_at in 0..append_count {
+            let filesystem = FaultingFileSystem::new(filesystem_faults.to_vec());
+            let (_directory, frozen) = frozen_fixture(100 + fail_at as u64, &filesystem)?;
+            let mut journal = FaultingJournal::new(frozen.initial_record(), fail_at, failure);
+
+            let outcome = execute_with_journal(&frozen, &filesystem, &mut journal, &|| false);
+
+            let ExecutionOutcome::RecoveryRequired(recovery) = outcome else {
+                return Err(
+                    format!("journal failure at append {fail_at} was not recoverable").into(),
+                );
+            };
+            assert_eq!(
+                recovery.reason(),
+                ExecutionRecoveryReason::Journal { kind: failure }
+            );
+            assert!(
+                !matches!(
+                    replay_journal(&journal.records)?,
+                    JournalStatus::Completed | JournalStatus::RolledBack { .. }
+                ),
+                "a failed journal append must not appear terminal"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_forward_and_rollback_journal_append_failure_requires_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let failures = [
+            JournalStorageErrorKind::WriteFailed {
+                io_kind: io::ErrorKind::WriteZero,
+            },
+            JournalStorageErrorKind::SyncFailed {
+                io_kind: io::ErrorKind::Other,
+            },
+        ];
+        for failure in failures {
+            // Four prepared/completed pairs plus the forward terminal record.
+            assert_journal_failure_at_every_append(9, &[], failure)?;
+            // Failure at forward step 3, then three reverse prepared/completed pairs.
+            assert_journal_failure_at_every_append(
+                15,
+                &[(3, ExecutionFsErrorKind::DestinationExists)],
+                failure,
+            )?;
+            // The first rollback step also fails, exercising RollbackStepFailed.
+            assert_journal_failure_at_every_append(
+                10,
+                &[
+                    (3, ExecutionFsErrorKind::DestinationExists),
+                    (4, ExecutionFsErrorKind::SharingViolation),
+                ],
+                failure,
+            )?;
+        }
+        Ok(())
+    }
+}
