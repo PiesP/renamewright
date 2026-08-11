@@ -8,6 +8,9 @@ WebView.
 The normative execution decisions are in
 [ADR 0001](decisions/0001-journaled-execution-contract.md).
 
+Current status: Stage 2A is complete. Stage 2B is next; filesystem mutation
+remains unavailable.
+
 ## Stage 2A — protocol model
 
 - model forward, rollback, terminal, and reconciliation states in pure Rust;

@@ -103,9 +103,10 @@ recovery decisions are frozen in
 mutation behind journal replay, codec, platform, failure-injection, Windows, and
 recovery gates.
 
-The active implementation stage is Stage 2A: add the pure execution and recovery
-state model with behavioural fixtures while retaining the read-only Tauri surface.
-No real rename operation is introduced in this stage.
+Stage 2A is complete: the pure execution and recovery state model has behavioural
+fixtures while the Tauri surface remains read-only. The active implementation
+stage is Stage 2B, the versioned framed journal codec. No real rename operation is
+introduced until the later platform and executor gates pass.
 
 The completed Milestone 1 commit series is:
 
