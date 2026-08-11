@@ -360,6 +360,60 @@ test('explains why a fresh Undo inspection is blocked', async () => {
   expect(screen.queryByRole('button', { name: 'Undo rename' })).not.toBeInTheDocument();
 });
 
+test('refreshes the ledger after an Undo command error', async () => {
+  const user = userEvent.setup();
+  const client = fakeClient();
+  const original = {
+    ledgerId: 6,
+    planId: 84,
+    sourceGeneration: 8,
+    schemaVersion: 3,
+    sourceCount: 1,
+    status: 'completed' as const,
+    attentionStep: null,
+    recoveryAvailable: false,
+    undoOfPlanId: null,
+    undoAvailable: true,
+  };
+  const interruptedUndo = {
+    ledgerId: 7,
+    planId: 85,
+    sourceGeneration: 8,
+    schemaVersion: 3,
+    sourceCount: 1,
+    status: 'recoveryRequired' as const,
+    attentionStep: 0,
+    recoveryAvailable: true,
+    undoOfPlanId: 84,
+    undoAvailable: false,
+  };
+  client.listLedger = vi
+    .fn()
+    .mockResolvedValueOnce([original])
+    .mockResolvedValueOnce([{ ...original, undoAvailable: false }, interruptedUndo]);
+  client.inspectUndo = async () => ({
+    ledgerId: 6,
+    originalPlanId: 84,
+    sourceCount: 1,
+    readiness: 'ready',
+    blockReason: null,
+    undoAvailable: true,
+  });
+  client.applyUndo = async () => {
+    throw new Error('Undo stopped safely. Inspect the Rename Ledger before continuing.');
+  };
+
+  render(() => <App client={client} />);
+
+  await user.click(await screen.findByRole('button', { name: 'Inspect plan 84 Undo' }));
+  await user.click(await screen.findByRole('button', { name: 'Undo rename' }));
+
+  expect(await screen.findByText('Undo of plan 84')).toBeInTheDocument();
+  expect(screen.getByText('Recovery required')).toBeInTheDocument();
+  expect(screen.queryByText('Undo checks passed')).not.toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent('Undo stopped safely');
+});
+
 test('loads sample sources and previews a prefix rule', async () => {
   const user = userEvent.setup();
   render(() => <App client={fakeClient()} />);

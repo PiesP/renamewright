@@ -272,6 +272,12 @@ export function App(props: AppProps) {
       queueMicrotask(() => ledgerHeading?.focus({ preventScroll: true }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Undo could not run.');
+      setUndoInspection(undefined);
+      try {
+        setLedger(await planningClient.listLedger());
+      } catch {
+        // Preserve the original Undo error; a later ledger load can be retried.
+      }
     } finally {
       setUndoCancellationState(undefined);
       setUndoBusy(false);
