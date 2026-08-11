@@ -532,14 +532,29 @@ async fn apply_undo(
 }
 
 #[tauri::command]
-fn cancel_recovery(state: State<'_, AppState>) -> Result<bool, RecoveryCommandErrorDto> {
-    request_recovery_cancellation(&state).map_err(RecoveryCommandErrorDto::from)
+async fn cancel_recovery(app: AppHandle) -> Result<bool, RecoveryCommandErrorDto> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        request_confirmed_cancellation(&state, || {
+            confirm_cancellation(&app, CancellationKind::Recovery)
+        })
+        .map_err(RecoveryCommandErrorDto::from)
+    })
+    .await
+    .map_err(|_| RecoveryCommandErrorDto::from(RecoveryCommandErrorKind::StateUnavailable))?
 }
 
 #[tauri::command]
-fn cancel_undo(state: State<'_, AppState>) -> Result<bool, UndoCommandErrorDto> {
-    request_recovery_cancellation(&state)
+async fn cancel_undo(app: AppHandle) -> Result<bool, UndoCommandErrorDto> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        request_confirmed_cancellation(&state, || {
+            confirm_cancellation(&app, CancellationKind::Undo)
+        })
         .map_err(|_| UndoCommandErrorDto::from(UndoCommandErrorKind::StateUnavailable))
+    })
+    .await
+    .map_err(|_| UndoCommandErrorDto::from(UndoCommandErrorKind::StateUnavailable))?
 }
 
 #[tauri::command]
@@ -978,6 +993,28 @@ fn request_recovery_cancellation(state: &AppState) -> Result<bool, RecoveryComma
     Ok(true)
 }
 
+fn request_confirmed_cancellation<C>(
+    state: &AppState,
+    confirm: C,
+) -> Result<bool, RecoveryCommandErrorKind>
+where
+    C: FnOnce() -> bool,
+{
+    {
+        let control = state
+            .recovery_control
+            .lock()
+            .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
+        if !control.active || !control.cancellable {
+            return Ok(false);
+        }
+    }
+    if !confirm() {
+        return Ok(false);
+    }
+    request_recovery_cancellation(state)
+}
+
 const fn recovery_action_is_available(
     action: RecoveryCommandAction,
     inspection: RecoveryTransactionInspection,
@@ -1035,6 +1072,32 @@ fn confirm_undo(app: &AppHandle, inspection: UndoTransactionInspection) -> bool 
     let mut dialog = MessageDialog::new()
         .set_level(MessageLevel::Warning)
         .set_title("Confirm Renamewright Undo")
+        .set_description(description)
+        .set_buttons(MessageButtons::YesNo);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    dialog.show() == MessageDialogResult::Yes
+}
+
+#[derive(Clone, Copy)]
+enum CancellationKind {
+    Recovery,
+    Undo,
+}
+
+fn confirm_cancellation(app: &AppHandle, kind: CancellationKind) -> bool {
+    let description = match kind {
+        CancellationKind::Recovery => {
+            "Cancel this active forward recovery and roll back its completed steps? Renamewright will stop only at a safe step boundary."
+        }
+        CancellationKind::Undo => {
+            "Cancel this active Undo and roll back its completed steps? Renamewright will stop only at a safe step boundary."
+        }
+    };
+    let mut dialog = MessageDialog::new()
+        .set_level(MessageLevel::Warning)
+        .set_title("Confirm Renamewright cancellation")
         .set_description(description)
         .set_buttons(MessageButtons::YesNo);
     if let Some(window) = app.get_webview_window("main") {
@@ -1272,7 +1335,8 @@ mod tests {
         PrepareExecutionError, RecoveryCommandAction, RecoveryCommandErrorKind,
         RecoveryExpectationDto, RecoveryInspectionDto, RecoveryRequestDto, RecoverySession,
         UndoCommandErrorKind, UndoInspectionDto, UndoRequestDto, perform_recovery_request,
-        perform_undo_request, prepare_latest_execution, request_recovery_cancellation,
+        perform_undo_request, prepare_latest_execution, request_confirmed_cancellation,
+        request_recovery_cancellation,
     };
 
     #[test]
@@ -1629,15 +1693,38 @@ mod tests {
     fn recovery_cancellation_control_is_active_only_for_forward_sessions()
     -> Result<(), Box<dyn Error>> {
         let state = AppState::default();
-        assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
+        let confirmation_called = Cell::new(false);
+        assert!(
+            !request_confirmed_cancellation(&state, || {
+                confirmation_called.set(true);
+                true
+            })
+            .map_err(|_| "cancel state unavailable")?
+        );
+        assert!(!confirmation_called.get());
         let non_cancellable = RecoverySession::begin(&state.recovery_control, false)
             .map_err(|_| "recovery session unavailable")?;
-        assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
+        assert!(
+            !request_confirmed_cancellation(&state, || {
+                confirmation_called.set(true);
+                true
+            })
+            .map_err(|_| "cancel state unavailable")?
+        );
+        assert!(!confirmation_called.get());
         drop(non_cancellable);
 
         let cancellable = RecoverySession::begin(&state.recovery_control, true)
             .map_err(|_| "recovery session unavailable")?;
-        assert!(request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
+        assert!(
+            !request_confirmed_cancellation(&state, || false)
+                .map_err(|_| "cancel state unavailable")?
+        );
+        assert!(!cancellable.cancel_requested());
+        assert!(
+            request_confirmed_cancellation(&state, || true)
+                .map_err(|_| "cancel state unavailable")?
+        );
         assert!(cancellable.cancel_requested());
         drop(cancellable);
         assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);

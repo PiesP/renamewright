@@ -212,7 +212,7 @@ test('requests cancellation only while forward recovery is active', async () => 
 
   expect(
     screen.getByText(
-      'Cancellation was not accepted because forward recovery is not active yet. Try again after confirmation.',
+      'Cancellation was not confirmed, or forward recovery is no longer active. Try again if the operation is still running.',
       { selector: '.live-status' }
     )
   ).toBeInTheDocument();
