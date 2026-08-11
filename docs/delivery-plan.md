@@ -12,6 +12,8 @@ Deliverables:
   window, with `rustfmt` and `clippy`;
 - align Node and pnpm with repository-local pins rather than the host defaults;
 - scaffold Tauri 2 + Solid/TypeScript without example/demo features;
+- set `Renamewright` as the product, window, executable, and package identity,
+  using lowercase `renamewright` for machine-facing identifiers;
 - create the Cargo workspace and crate boundaries from the architecture;
 - add format, lint, test, dependency-policy, and build scripts;
 - add Windows CI for the shell and Linux/Windows CI for Rust core tests.
@@ -42,6 +44,7 @@ This slice validates the framework choice and the “preview is the product” m
 - stream progress and cancellation state;
 - inject failures at every step and test rollback;
 - recover or inspect incomplete journals at startup;
+- project completed transactions and recovery state through the Rename Ledger;
 - generate and execute validated Undo plans.
 
 Exit criteria: swaps, cycles, case-only changes, interruption, stale sources, and
