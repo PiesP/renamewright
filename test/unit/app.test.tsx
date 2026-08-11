@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@solidjs/testing-library';
+import { cleanup, render, screen, within } from '@solidjs/testing-library';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../src/App';
@@ -8,20 +8,35 @@ import type {
   RecoveryCommandResult,
   SourceChange,
 } from '../../src/planning/client';
+import {
+  applyBrowserRules,
+  createRule,
+  RULE_PIPELINE_SCHEMA_VERSION,
+  type RulePipelineRequest,
+} from '../../src/planning/rules';
 
 const sources = ['invoice.pdf', 'CON.txt', 'notes.txt'];
 
 afterEach(cleanup);
 
-function makePlan(prefix: string): Plan {
+const emptyRequest = (): RulePipelineRequest => ({
+  schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+  rules: [createRule(1, 'prefix')],
+});
+
+function makePlan(request: RulePipelineRequest): Plan {
   const rows = sources.map((originalName, index) => {
-    const proposedName = `${prefix}${originalName}`;
+    const { proposedName } = applyBrowserRules(originalName, request);
     const blocked = proposedName.includes('?') || proposedName.toUpperCase() === 'CON.TXT';
     return {
       sourceId: index + 1,
       originalName,
       proposedName,
-      status: blocked ? ('blocked' as const) : ('changed' as const),
+      status: blocked
+        ? ('blocked' as const)
+        : proposedName === originalName
+          ? ('unchanged' as const)
+          : ('changed' as const),
       diagnostics: blocked ? ['illegalCharacter'] : [],
     };
   });
@@ -39,11 +54,11 @@ function makePlan(prefix: string): Plan {
 function fakeClient(): PlanningClient {
   return {
     nativeSelectionAvailable: false,
-    loadSample: async (prefix) => makePlan(prefix),
-    selectSources: async (prefix) => makePlan(prefix),
-    previewPrefix: async (prefix) => makePlan(prefix),
+    loadSample: async (request) => makePlan(request),
+    selectSources: async (request) => makePlan(request),
+    previewRules: async (request) => makePlan(request),
     inspectPlan: async (planId) =>
-      JSON.stringify({ schemaVersion: 1, planId, rows: makePlan('').rows }, null, 2),
+      JSON.stringify({ schemaVersion: 2, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
     exportPlan: async () => false,
     listLedger: async () => [],
     inspectRecovery: async () => {
@@ -432,6 +447,62 @@ test('loads sample sources and previews a prefix rule', async () => {
   expect(screen.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
 });
 
+test('adds, reorders, and disables rules without losing stable editing state', async () => {
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  await user.type(screen.getByRole('textbox', { name: 'Prefix' }), 'draft-');
+  await user.selectOptions(screen.getByRole('combobox', { name: 'New rule' }), 'literalReplace');
+  await user.click(screen.getByRole('button', { name: 'Add rule' }));
+
+  const replaceEditor = screen.getByRole('heading', { name: 'Replace text' }).closest('section');
+  if (!replaceEditor) {
+    throw new Error('Replace editor was not rendered.');
+  }
+  await user.type(within(replaceEditor).getByRole('textbox', { name: 'Find' }), 'draft');
+  await user.type(within(replaceEditor).getByRole('textbox', { name: 'Replace with' }), 'final');
+  expect(await screen.findByText('final-invoice.pdf')).toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: 'Move Replace text up' }));
+  expect(await screen.findByText('draft-invoice.pdf')).toBeInTheDocument();
+
+  const prefixEditor = screen.getByRole('heading', { name: 'Add prefix' }).closest('section');
+  if (!prefixEditor) {
+    throw new Error('Prefix editor was not rendered.');
+  }
+  await user.click(within(prefixEditor).getByRole('checkbox', { name: 'Enabled' }));
+  expect(prefixEditor).toHaveAttribute('data-disabled', 'true');
+  expect(within(prefixEditor).getByRole('checkbox', { name: 'Enabled' })).not.toBeChecked();
+  expect(await screen.findByRole('button', { name: 'Unchanged 2' })).toBeInTheDocument();
+  expect(screen.getAllByRole('cell', { name: /Unchanged/u })).toHaveLength(2);
+});
+
+test('associates an invalid regex error with its rule editor', async () => {
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  await user.selectOptions(screen.getByRole('combobox', { name: 'New rule' }), 'regexReplace');
+  await user.click(screen.getByRole('button', { name: 'Add rule' }));
+  const regexEditor = screen
+    .getByRole('heading', { name: 'Replace by pattern' })
+    .closest('section');
+  if (!regexEditor) {
+    throw new Error('Regex editor was not rendered.');
+  }
+  await user.type(within(regexEditor).getByRole('textbox', { name: 'Rust regex' }), '(');
+
+  expect(
+    await within(regexEditor).findByText('Rule 2 uses an invalid regular expression.')
+  ).toBeInTheDocument();
+  expect(within(regexEditor).getByRole('textbox', { name: 'Rust regex' })).toHaveAttribute(
+    'aria-invalid',
+    'true'
+  );
+  expect(screen.getByRole('status')).not.toHaveTextContent('/home/');
+});
+
 test('reports blocked destinations without enabling execution', async () => {
   const user = userEvent.setup();
   render(() => <App client={fakeClient()} />);
@@ -444,7 +515,6 @@ test('reports blocked destinations without enabling execution', async () => {
     await screen.findByText((_, element) => element?.textContent === '3 blocked')
   ).toBeInTheDocument();
   expect(screen.getAllByRole('cell', { name: /Blocked/u })).toHaveLength(3);
-  expect(prefix).toHaveAttribute('aria-invalid', 'true');
   expect(screen.getByRole('status')).toHaveTextContent('3 names are blocked');
 });
 
@@ -459,7 +529,7 @@ test('uses the native picker instead of browser samples in the desktop shell', a
   const addButtons = screen.getAllByRole('button', { name: 'Add files' });
   await user.click(addButtons.at(-1) as HTMLButtonElement);
 
-  expect(selectSources).toHaveBeenCalledWith('');
+  expect(selectSources).toHaveBeenCalledWith(emptyRequest());
   expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
 });
 
@@ -471,13 +541,13 @@ test('refreshes the plan after Rust admits dropped sources', async () => {
     notify = onChange;
     return () => undefined;
   };
-  const previewPrefix = vi.fn(client.previewPrefix);
-  client.previewPrefix = previewPrefix;
+  const previewRules = vi.fn(client.previewRules);
+  client.previewRules = previewRules;
   render(() => <App client={client} />);
 
   notify?.({ revision: 1, error: null });
 
-  expect(previewPrefix).toHaveBeenCalledWith('');
+  expect(previewRules).toHaveBeenCalledWith(emptyRequest());
   expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
 });
 
@@ -498,7 +568,7 @@ test('inspects and exports only the current opaque plan ID', async () => {
   await user.click(inspectButton);
 
   expect(inspectPlan).toHaveBeenCalledWith(9);
-  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 1');
+  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 2');
   await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
   expect(exportPlan).toHaveBeenCalledWith(9);
   expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');

@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
 import { APP_NAME } from './app-meta';
 import {
   createPlanningClient,
@@ -12,15 +12,58 @@ import {
   type UndoBlockReason,
   type UndoInspection,
 } from './planning/client';
+import {
+  createRule,
+  MAX_RULES,
+  PlanningError,
+  RULE_PIPELINE_SCHEMA_VERSION,
+  type RuleKind,
+  type RulePipelineRequest,
+  type RuleRequest,
+  ruleLabel,
+} from './planning/rules';
 import { VirtualPlanTable } from './planning/VirtualPlanTable';
 
 interface AppProps {
   client?: PlanningClient;
 }
 
+interface RuleTextInputProps {
+  id: string;
+  label: string;
+  value: string;
+  placeholder: string;
+  invalid: boolean;
+  onInput: (value: string) => void;
+}
+
+function RuleTextInput(props: RuleTextInputProps) {
+  return (
+    <div class="rule-field">
+      <label for={props.id}>{props.label}</label>
+      <div class="input-shell" data-invalid={props.invalid ? 'true' : 'false'}>
+        <input
+          id={props.id}
+          type="text"
+          value={props.value}
+          placeholder={props.placeholder}
+          aria-invalid={props.invalid ? 'true' : 'false'}
+          onInput={(event) => props.onInput(event.currentTarget.value)}
+        />
+        <span aria-hidden="true">{props.invalid ? '!' : ''}</span>
+      </div>
+    </div>
+  );
+}
+
 export function App(props: AppProps) {
   const planningClient = props.client ?? createPlanningClient();
-  const [prefix, setPrefix] = createSignal('');
+  const [rules, setRules] = createSignal<RuleRequest[]>([createRule(1, 'prefix')]);
+  const [newRuleKind, setNewRuleKind] = createSignal<RuleKind>('suffix');
+  const [ruleError, setRuleError] = createSignal<{
+    code: string;
+    ruleId: number | undefined;
+  }>();
   const [plan, setPlan] = createSignal<Plan>();
   const [planDocument, setPlanDocument] = createSignal<string>();
   const [busy, setBusy] = createSignal(false);
@@ -46,6 +89,12 @@ export function App(props: AppProps) {
   let undoInspectionPanel: HTMLDivElement | undefined;
   let ledgerHeading: HTMLHeadingElement | undefined;
   let previewTimer: number | undefined;
+  let nextRuleId = 2;
+
+  const currentRuleRequest = (): RulePipelineRequest => ({
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    rules: rules(),
+  });
 
   const dismissPlanInspector = () => {
     const inspector = planInspector;
@@ -76,6 +125,7 @@ export function App(props: AppProps) {
     const sequence = ++requestSequence;
     setBusy(true);
     setError('');
+    setRuleError(undefined);
     setNotice('');
     try {
       const result = await operation();
@@ -84,6 +134,9 @@ export function App(props: AppProps) {
       }
     } catch (cause) {
       if (sequence === requestSequence) {
+        if (cause instanceof PlanningError) {
+          setRuleError({ code: cause.code, ruleId: cause.ruleId });
+        }
         setError(cause instanceof Error ? cause.message : 'The rename plan could not be updated.');
       }
     } finally {
@@ -93,23 +146,68 @@ export function App(props: AppProps) {
     }
   };
 
-  const updatePrefix = (value: string) => {
-    setPrefix(value);
+  const schedulePreview = () => {
     if (plan()) {
       if (previewTimer !== undefined) {
         window.clearTimeout(previewTimer);
       }
       previewTimer = window.setTimeout(() => {
         previewTimer = undefined;
-        void run(() => planningClient.previewPrefix(value));
+        void run(() => planningClient.previewRules(currentRuleRequest()));
       }, 120);
     }
   };
 
+  const replaceRule = (ruleId: number, update: (rule: RuleRequest) => RuleRequest) => {
+    setRules((current) =>
+      current.map((rule) => {
+        if (rule.ruleId !== ruleId) {
+          return rule;
+        }
+        Object.assign(rule, update(rule));
+        return rule;
+      })
+    );
+    schedulePreview();
+  };
+
+  const addRule = () => {
+    if (rules().length >= MAX_RULES) {
+      return;
+    }
+    setRules((current) => [...current, createRule(nextRuleId++, newRuleKind())]);
+    schedulePreview();
+  };
+
+  const removeRule = (ruleId: number) => {
+    setRules((current) => current.filter((rule) => rule.ruleId !== ruleId));
+    schedulePreview();
+  };
+
+  const moveRule = (ruleId: number, offset: -1 | 1) => {
+    setRules((current) => {
+      const index = current.findIndex((rule) => rule.ruleId === ruleId);
+      const destination = index + offset;
+      if (index < 0 || destination < 0 || destination >= current.length) {
+        return current;
+      }
+      const reordered = [...current];
+      const currentRule = reordered[index];
+      const destinationRule = reordered[destination];
+      if (!currentRule || !destinationRule) {
+        return current;
+      }
+      reordered[index] = destinationRule;
+      reordered[destination] = currentRule;
+      return reordered;
+    });
+    schedulePreview();
+  };
+
   const loadInitialSources = () =>
     planningClient.nativeSelectionAvailable
-      ? planningClient.selectSources(prefix())
-      : planningClient.loadSample(prefix());
+      ? planningClient.selectSources(currentRuleRequest())
+      : planningClient.loadSample(currentRuleRequest());
 
   const inspectCurrentPlan = async () => {
     const current = plan();
@@ -321,7 +419,7 @@ export function App(props: AppProps) {
         setError(change.error);
         return;
       }
-      void run(() => planningClient.previewPrefix(prefix()));
+      void run(() => planningClient.previewRules(currentRuleRequest()));
     });
     onCleanup(() => {
       stopWatching();
@@ -473,7 +571,7 @@ export function App(props: AppProps) {
             type="button"
             disabled={!planningClient.nativeSelectionAvailable || busy()}
             aria-describedby="native-selection-note"
-            onClick={() => void run(() => planningClient.selectSources(prefix()))}
+            onClick={() => void run(() => planningClient.selectSources(currentRuleRequest()))}
           >
             Add files
           </button>
@@ -493,38 +591,206 @@ export function App(props: AppProps) {
         <aside class="rule-rail" aria-labelledby="rule-heading">
           <div class="rail-heading">
             <h1 id="rule-heading">Rename rules</h1>
-            <span>1 active</span>
+            <span>{rules().filter((rule) => rule.enabled).length} active</span>
           </div>
-          <section class="rule-editor" aria-labelledby="prefix-heading">
-            <div class="rule-title">
-              <span class="rule-order">01</span>
-              <h2 id="prefix-heading">Add prefix</h2>
-            </div>
-            <label for="prefix">Prefix</label>
-            <div class="input-shell" data-invalid={plan()?.blockedCount ? 'true' : 'false'}>
-              <input
-                id="prefix"
-                type="text"
-                value={prefix()}
-                placeholder="2026-"
-                aria-invalid={plan()?.blockedCount ? 'true' : 'false'}
-                aria-describedby="prefix-help"
-                onInput={(event) => updatePrefix(event.currentTarget.value)}
-              />
-              <span aria-hidden="true">{plan()?.blockedCount ? '!' : ''}</span>
-            </div>
-            <p
-              id="prefix-help"
-              class={plan()?.blockedCount ? 'field-help field-help-error' : 'field-help'}
+          <div class="rule-list">
+            <For
+              each={rules()}
+              fallback={<p class="empty-rules">No rules. Add one to build a rename pipeline.</p>}
             >
-              <Show
-                when={plan()?.blockedCount}
-                fallback="Added before every source name. The preview updates as you type."
+              {(rule, index) => {
+                const inputId = (field: string) => `rule-${rule.ruleId}-${field}`;
+                const invalid = () => ruleError()?.ruleId === rule.ruleId;
+                const enabled = () =>
+                  rules().find((candidate) => candidate.ruleId === rule.ruleId)?.enabled ?? false;
+                return (
+                  <section
+                    class="rule-editor"
+                    aria-labelledby={inputId('heading')}
+                    data-disabled={enabled() ? 'false' : 'true'}
+                    data-invalid={invalid() ? 'true' : 'false'}
+                  >
+                    <div class="rule-title">
+                      <div>
+                        <span class="rule-order">{String(index() + 1).padStart(2, '0')}</span>
+                        <h2 id={inputId('heading')}>{ruleLabel(rule.kind)}</h2>
+                      </div>
+                      <div class="rule-actions">
+                        <button
+                          class="rule-icon-button"
+                          type="button"
+                          disabled={index() === 0}
+                          aria-label={`Move ${ruleLabel(rule.kind)} up`}
+                          onClick={() => moveRule(rule.ruleId, -1)}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          class="rule-icon-button"
+                          type="button"
+                          disabled={index() === rules().length - 1}
+                          aria-label={`Move ${ruleLabel(rule.kind)} down`}
+                          onClick={() => moveRule(rule.ruleId, 1)}
+                        >
+                          ↓
+                        </button>
+                        <button
+                          class="rule-icon-button rule-remove-button"
+                          type="button"
+                          aria-label={`Remove ${ruleLabel(rule.kind)}`}
+                          onClick={() => removeRule(rule.ruleId)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                    <label class="rule-toggle">
+                      <input
+                        type="checkbox"
+                        checked={enabled()}
+                        onChange={(event) =>
+                          replaceRule(rule.ruleId, (current) => ({
+                            ...current,
+                            enabled: event.currentTarget.checked,
+                          }))
+                        }
+                      />
+                      Enabled
+                    </label>
+                    <Switch>
+                      <Match when={rule.kind === 'prefix' && rule}>
+                        {(current) => (
+                          <RuleTextInput
+                            id={inputId('value')}
+                            label="Prefix"
+                            value={current().value}
+                            placeholder="2026-"
+                            invalid={invalid()}
+                            onInput={(value) =>
+                              replaceRule(rule.ruleId, (candidate) =>
+                                candidate.kind === 'prefix' ? { ...candidate, value } : candidate
+                              )
+                            }
+                          />
+                        )}
+                      </Match>
+                      <Match when={rule.kind === 'suffix' && rule}>
+                        {(current) => (
+                          <RuleTextInput
+                            id={inputId('value')}
+                            label="Suffix"
+                            value={current().value}
+                            placeholder="-final"
+                            invalid={invalid()}
+                            onInput={(value) =>
+                              replaceRule(rule.ruleId, (candidate) =>
+                                candidate.kind === 'suffix' ? { ...candidate, value } : candidate
+                              )
+                            }
+                          />
+                        )}
+                      </Match>
+                      <Match when={rule.kind === 'literalReplace' && rule}>
+                        {(current) => (
+                          <>
+                            <RuleTextInput
+                              id={inputId('search')}
+                              label="Find"
+                              value={current().search}
+                              placeholder="draft"
+                              invalid={invalid()}
+                              onInput={(search) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'literalReplace'
+                                    ? { ...candidate, search }
+                                    : candidate
+                                )
+                              }
+                            />
+                            <RuleTextInput
+                              id={inputId('replacement')}
+                              label="Replace with"
+                              value={current().replacement}
+                              placeholder="final"
+                              invalid={invalid()}
+                              onInput={(replacement) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'literalReplace'
+                                    ? { ...candidate, replacement }
+                                    : candidate
+                                )
+                              }
+                            />
+                          </>
+                        )}
+                      </Match>
+                      <Match when={rule.kind === 'regexReplace' && rule}>
+                        {(current) => (
+                          <>
+                            <RuleTextInput
+                              id={inputId('pattern')}
+                              label="Rust regex"
+                              value={current().pattern}
+                              placeholder="^(.*)\\.txt$"
+                              invalid={invalid()}
+                              onInput={(pattern) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'regexReplace'
+                                    ? { ...candidate, pattern }
+                                    : candidate
+                                )
+                              }
+                            />
+                            <RuleTextInput
+                              id={inputId('replacement')}
+                              label="Replace with"
+                              value={current().replacement}
+                              placeholder="$1.md"
+                              invalid={invalid()}
+                              onInput={(replacement) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'regexReplace'
+                                    ? { ...candidate, replacement }
+                                    : candidate
+                                )
+                              }
+                            />
+                          </>
+                        )}
+                      </Match>
+                    </Switch>
+                    <Show when={invalid()}>
+                      <p class="field-help field-help-error">{error()}</p>
+                    </Show>
+                  </section>
+                );
+              }}
+            </For>
+          </div>
+          <div class="add-rule-controls">
+            <label for="new-rule-kind">New rule</label>
+            <div>
+              <select
+                id="new-rule-kind"
+                value={newRuleKind()}
+                onChange={(event) => setNewRuleKind(event.currentTarget.value as RuleKind)}
               >
-                One or more destinations are blocked. Review the row diagnostics before continuing.
-              </Show>
-            </p>
-          </section>
+                <option value="prefix">Prefix</option>
+                <option value="suffix">Suffix</option>
+                <option value="literalReplace">Replace text</option>
+                <option value="regexReplace">Regular expression</option>
+              </select>
+              <button
+                class="button button-secondary"
+                type="button"
+                disabled={rules().length >= MAX_RULES}
+                onClick={addRule}
+              >
+                Add rule
+              </button>
+            </div>
+            <p class="field-help">Rules run from top to bottom. Up to {MAX_RULES} are allowed.</p>
+          </div>
           <div class="scope-note">
             <strong>Current scope</strong>
             <p>
@@ -782,8 +1048,8 @@ export function App(props: AppProps) {
                 </span>
                 <h2>No sources in this plan</h2>
                 <p>
-                  Load the local sample to test a prefix, or select and drop files in the desktop
-                  app.
+                  Load the local sample to test this rule pipeline, or select and drop files in the
+                  desktop app.
                 </p>
                 <button
                   class="button button-primary"

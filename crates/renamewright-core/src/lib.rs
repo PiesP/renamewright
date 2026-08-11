@@ -3,6 +3,7 @@
 mod execution;
 mod model;
 mod planner;
+mod rules;
 mod windows;
 
 pub use execution::{
@@ -12,21 +13,28 @@ pub use execution::{
 };
 pub use model::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, EntryIdentitySignal, EntryKind, NameStatus,
-    OccupiedName, ParentId, PlanId, PlanRow, RenamePlan, RenameRule, SourceFingerprint, SourceId,
+    OccupiedName, ParentId, PlanId, PlanRow, RenamePlan, SourceFingerprint, SourceId,
     SourceSnapshot, TargetPolicy, TraceStep, ValidationEnvironment,
 };
-pub use planner::{build_plan, build_plan_with_environment};
+pub use planner::{
+    build_plan, build_plan_with_environment, build_plan_with_rule_pipeline,
+    build_plan_with_rule_pipeline_and_environment,
+};
+pub use rules::{
+    MAX_RULE_TEXT_BYTES, MAX_RULES, RenameRule, RulePipeline, RuleValidationError,
+    RuleValidationErrorKind,
+};
 pub use windows::windows_name_comparison_key;
 
 /// Version of the frontend/backend planning protocol.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[cfg(test)]
 mod tests {
     use super::PROTOCOL_VERSION;
 
     #[test]
-    fn protocol_starts_at_version_one() {
-        assert_eq!(PROTOCOL_VERSION, 1);
+    fn protocol_version_tracks_the_rule_pipeline_contract() {
+        assert_eq!(PROTOCOL_VERSION, 2);
     }
 }

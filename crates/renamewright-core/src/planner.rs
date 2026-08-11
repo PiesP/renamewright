@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use crate::model::{
-    Diagnostic, DiagnosticCode, PlanId, PlanRow, RenamePlan, RenameRule, SourceSnapshot,
-    TargetPolicy, TraceStep, ValidationEnvironment,
+    Diagnostic, DiagnosticCode, PlanId, PlanRow, RenamePlan, SourceSnapshot, TargetPolicy,
+    TraceStep, ValidationEnvironment,
 };
+use crate::rules::{RenameRule, RulePipeline};
 use crate::windows::{comparison_key, validate_name};
 
 #[must_use]
@@ -33,9 +34,49 @@ pub fn build_plan_with_environment(
     policy: TargetPolicy,
     environment: &ValidationEnvironment,
 ) -> RenamePlan {
+    let Ok(pipeline) = RulePipeline::compile(rules.to_vec()) else {
+        return invalid_rule_plan(plan_id, generation, sources);
+    };
+    build_plan_with_rule_pipeline_and_environment(
+        plan_id,
+        generation,
+        sources,
+        &pipeline,
+        policy,
+        environment,
+    )
+}
+
+#[must_use]
+pub fn build_plan_with_rule_pipeline(
+    plan_id: PlanId,
+    generation: u64,
+    sources: &[SourceSnapshot],
+    pipeline: &RulePipeline,
+    policy: TargetPolicy,
+) -> RenamePlan {
+    build_plan_with_rule_pipeline_and_environment(
+        plan_id,
+        generation,
+        sources,
+        pipeline,
+        policy,
+        &ValidationEnvironment::default(),
+    )
+}
+
+#[must_use]
+pub fn build_plan_with_rule_pipeline_and_environment(
+    plan_id: PlanId,
+    generation: u64,
+    sources: &[SourceSnapshot],
+    pipeline: &RulePipeline,
+    policy: TargetPolicy,
+    environment: &ValidationEnvironment,
+) -> RenamePlan {
     let mut rows = sources
         .iter()
-        .map(|source| build_row(source, rules, policy))
+        .map(|source| build_row(source, pipeline, policy))
         .collect::<Vec<_>>();
 
     mark_stale_sources(&mut rows, environment);
@@ -45,13 +86,21 @@ pub fn build_plan_with_environment(
     RenamePlan::new(plan_id, generation, rows)
 }
 
-fn build_row(source: &SourceSnapshot, rules: &[RenameRule], policy: TargetPolicy) -> PlanRow {
+fn build_row(source: &SourceSnapshot, pipeline: &RulePipeline, policy: TargetPolicy) -> PlanRow {
     let mut proposed = source.native_name().to_os_string();
-    let mut trace = Vec::with_capacity(rules.len());
+    let mut trace = Vec::with_capacity(pipeline.rules().len());
 
-    for (rule_index, rule) in rules.iter().enumerate() {
+    for rule_index in 0..pipeline.rules().len() {
         let before = proposed.to_string_lossy().into_owned();
-        proposed = rule.apply(&proposed);
+        let Ok(after) = pipeline.apply_rule(rule_index, &proposed) else {
+            return PlanRow::new(
+                source,
+                proposed,
+                trace,
+                vec![Diagnostic::blocked(DiagnosticCode::UnsupportedEncoding)],
+            );
+        };
+        proposed = after;
         let after = proposed.to_string_lossy().into_owned();
         trace.push(TraceStep::new(rule_index, before, after));
     }
@@ -62,6 +111,21 @@ fn build_row(source: &SourceSnapshot, rules: &[RenameRule], policy: TargetPolicy
     }
 
     PlanRow::new(source, proposed, trace, diagnostics)
+}
+
+fn invalid_rule_plan(plan_id: PlanId, generation: u64, sources: &[SourceSnapshot]) -> RenamePlan {
+    let rows = sources
+        .iter()
+        .map(|source| {
+            PlanRow::new(
+                source,
+                source.native_name().to_os_string(),
+                Vec::new(),
+                vec![Diagnostic::blocked(DiagnosticCode::InvalidRule)],
+            )
+        })
+        .collect();
+    RenamePlan::new(plan_id, generation, rows)
 }
 
 fn validate(name: &std::ffi::OsStr, policy: TargetPolicy) -> Vec<Diagnostic> {

@@ -1,13 +1,15 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
-    DiagnosticCode, ExecutionDirection, NameStatus, PROTOCOL_VERSION, PlanId, RenamePlan,
-    RenameRule, TargetPolicy, build_plan_with_environment,
+    DiagnosticCode, ExecutionDirection, MAX_RULE_TEXT_BYTES, MAX_RULES, NameStatus,
+    PROTOCOL_VERSION, PlanId, RenamePlan, RenameRule, RulePipeline, RuleValidationErrorKind,
+    TargetPolicy, build_plan_with_rule_pipeline_and_environment,
 };
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
@@ -97,7 +99,195 @@ struct SourceChanges {
 #[derive(Clone, Debug)]
 struct StoredPlan {
     plan: RenamePlan,
-    prefix: String,
+    rule_request: RulePipelineRequestDto,
+    active_rule_ids: Vec<u64>,
+}
+
+impl StoredPlan {
+    #[cfg(all(test, target_os = "linux"))]
+    fn prefix(plan: RenamePlan, prefix: impl Into<String>) -> Self {
+        Self {
+            plan,
+            rule_request: prefix_rule_request(prefix),
+            active_rule_ids: vec![1],
+        }
+    }
+}
+
+const RULE_PIPELINE_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RulePipelineRequestDto {
+    schema_version: u16,
+    rules: Vec<RuleRequestDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum RuleRequestDto {
+    Prefix {
+        rule_id: u64,
+        enabled: bool,
+        value: String,
+    },
+    Suffix {
+        rule_id: u64,
+        enabled: bool,
+        value: String,
+    },
+    LiteralReplace {
+        rule_id: u64,
+        enabled: bool,
+        search: String,
+        replacement: String,
+    },
+    RegexReplace {
+        rule_id: u64,
+        enabled: bool,
+        pattern: String,
+        replacement: String,
+    },
+}
+
+impl RuleRequestDto {
+    const fn rule_id(&self) -> u64 {
+        match self {
+            Self::Prefix { rule_id, .. }
+            | Self::Suffix { rule_id, .. }
+            | Self::LiteralReplace { rule_id, .. }
+            | Self::RegexReplace { rule_id, .. } => *rule_id,
+        }
+    }
+
+    const fn enabled(&self) -> bool {
+        match self {
+            Self::Prefix { enabled, .. }
+            | Self::Suffix { enabled, .. }
+            | Self::LiteralReplace { enabled, .. }
+            | Self::RegexReplace { enabled, .. } => *enabled,
+        }
+    }
+
+    fn has_oversized_text(&self) -> bool {
+        match self {
+            Self::Prefix { value, .. } | Self::Suffix { value, .. } => {
+                value.len() > MAX_RULE_TEXT_BYTES
+            }
+            Self::LiteralReplace {
+                search,
+                replacement,
+                ..
+            } => search.len() > MAX_RULE_TEXT_BYTES || replacement.len() > MAX_RULE_TEXT_BYTES,
+            Self::RegexReplace {
+                pattern,
+                replacement,
+                ..
+            } => pattern.len() > MAX_RULE_TEXT_BYTES || replacement.len() > MAX_RULE_TEXT_BYTES,
+        }
+    }
+
+    fn to_core_rule(&self) -> RenameRule {
+        match self {
+            Self::Prefix { value, .. } => RenameRule::prefix(value),
+            Self::Suffix { value, .. } => RenameRule::suffix(value),
+            Self::LiteralReplace {
+                search,
+                replacement,
+                ..
+            } => RenameRule::literal_replace(search, replacement),
+            Self::RegexReplace {
+                pattern,
+                replacement,
+                ..
+            } => RenameRule::regex_replace(pattern, replacement),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuleRequestErrorKind {
+    UnsupportedSchema,
+    TooManyRules,
+    InvalidRuleId,
+    DuplicateRuleId,
+    RuleTextTooLong,
+    EmptyLiteralSearch,
+    InvalidRegex,
+}
+
+impl RuleRequestErrorKind {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::UnsupportedSchema => "unsupportedRuleSchema",
+            Self::TooManyRules => "tooManyRules",
+            Self::InvalidRuleId => "invalidRuleId",
+            Self::DuplicateRuleId => "duplicateRuleId",
+            Self::RuleTextTooLong => "ruleTextTooLong",
+            Self::EmptyLiteralSearch => "emptyLiteralSearch",
+            Self::InvalidRegex => "invalidRegex",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuleRequestError {
+    rule_id: Option<u64>,
+    kind: RuleRequestErrorKind,
+}
+
+impl std::fmt::Display for RuleRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.rule_id {
+            Some(rule_id) => write!(
+                formatter,
+                "the rule pipeline was rejected ({}; rule {rule_id})",
+                self.kind.code()
+            ),
+            None => write!(
+                formatter,
+                "the rule pipeline was rejected ({})",
+                self.kind.code()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RuleRequestError {}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanningCommandErrorDto {
+    code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule_id: Option<u64>,
+}
+
+impl PlanningCommandErrorDto {
+    const fn new(code: &'static str) -> Self {
+        Self {
+            code,
+            rule_id: None,
+        }
+    }
+}
+
+impl From<RuleRequestError> for PlanningCommandErrorDto {
+    fn from(error: RuleRequestError) -> Self {
+        Self {
+            code: error.kind.code(),
+            rule_id: error.rule_id,
+        }
+    }
+}
+
+struct CompiledRuleRequest {
+    pipeline: RulePipeline,
+    active_rule_ids: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,18 +541,13 @@ struct PlanRowDto {
 struct PlanDocument<'a> {
     schema_version: u16,
     protocol_version: u16,
+    rule_schema_version: u16,
     product: &'static str,
     plan_id: u64,
     source_generation: u64,
-    rules: Vec<RuleDocument<'a>>,
+    rules: &'a [RuleRequestDto],
     summary: PlanSummaryDocument,
     rows: Vec<PlanRowDocument<'a>>,
-}
-
-#[derive(Serialize)]
-struct RuleDocument<'a> {
-    kind: &'static str,
-    value: &'a str,
 }
 
 #[derive(Serialize)]
@@ -389,6 +574,7 @@ struct PlanRowDocument<'a> {
 #[serde(rename_all = "camelCase")]
 struct TraceStepDocument<'a> {
     rule_index: usize,
+    rule_id: u64,
     before: &'a str,
     after: &'a str,
 }
@@ -398,13 +584,31 @@ async fn select_sources(
     prefix: String,
     state: State<'_, AppState>,
 ) -> Result<Option<PlanDto>, String> {
+    select_sources_for_rules(prefix_rule_request(prefix), state)
+        .await
+        .map_err(|error| error.code.to_owned())
+}
+
+#[tauri::command]
+async fn select_sources_with_rules(
+    request: RulePipelineRequestDto,
+    state: State<'_, AppState>,
+) -> Result<Option<PlanDto>, PlanningCommandErrorDto> {
+    select_sources_for_rules(request, state).await
+}
+
+async fn select_sources_for_rules(
+    request: RulePipelineRequestDto,
+    state: State<'_, AppState>,
+) -> Result<Option<PlanDto>, PlanningCommandErrorDto> {
+    let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
     let paths = tauri::async_runtime::spawn_blocking(|| {
         rfd::FileDialog::new()
             .set_title("Add sources to Renamewright")
             .pick_files()
     })
     .await
-    .map_err(|error| format!("the file picker did not complete: {error}"))?;
+    .map_err(|_| PlanningCommandErrorDto::new("pickerUnavailable"))?;
 
     let Some(paths) = paths else {
         return Ok(None);
@@ -413,20 +617,28 @@ async fn select_sources(
     let mut registry = state
         .registry
         .lock()
-        .map_err(|_| "the source registry is unavailable".to_owned())?;
+        .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
     registry
         .admit_paths(paths)
-        .map_err(|error| error.to_string())?;
-    plan_from_registry(&mut registry, &prefix, &state).map(Some)
+        .map_err(|_| PlanningCommandErrorDto::new("sourceAdmissionFailed"))?;
+    plan_from_registry_with_compiled(&mut registry, request, compiled, &state).map(Some)
 }
 
 #[tauri::command]
 fn preview_prefix(prefix: String, state: State<'_, AppState>) -> Result<PlanDto, String> {
+    preview_rules(prefix_rule_request(prefix), state).map_err(|error| error.code.to_owned())
+}
+
+#[tauri::command]
+fn preview_rules(
+    request: RulePipelineRequestDto,
+    state: State<'_, AppState>,
+) -> Result<PlanDto, PlanningCommandErrorDto> {
     let mut registry = state
         .registry
         .lock()
-        .map_err(|_| "the source registry is unavailable".to_owned())?;
-    plan_from_registry(&mut registry, &prefix, &state)
+        .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
+    plan_from_registry(&mut registry, request, &state)
 }
 
 #[tauri::command]
@@ -610,21 +822,31 @@ fn admit_dropped_sources(state: &AppState, paths: &[std::path::PathBuf]) {
 
 fn plan_from_registry(
     registry: &mut SourceRegistry,
-    prefix: &str,
-    state: &State<'_, AppState>,
-) -> Result<PlanDto, String> {
+    request: RulePipelineRequestDto,
+    state: &AppState,
+) -> Result<PlanDto, PlanningCommandErrorDto> {
+    let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
+    plan_from_registry_with_compiled(registry, request, compiled, state)
+}
+
+fn plan_from_registry_with_compiled(
+    registry: &mut SourceRegistry,
+    request: RulePipelineRequestDto,
+    compiled: CompiledRuleRequest,
+    state: &AppState,
+) -> Result<PlanDto, PlanningCommandErrorDto> {
     let mut next_plan_id = state
         .next_plan_id
         .lock()
-        .map_err(|_| "the plan sequence is unavailable".to_owned())?;
+        .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
     let plan_id = PlanId::new(*next_plan_id);
     *next_plan_id = next_plan_id.saturating_add(1);
     let environment = registry.validation_environment();
-    let plan = build_plan_with_environment(
+    let plan = build_plan_with_rule_pipeline_and_environment(
         plan_id,
         registry.generation(),
         &registry.snapshots(),
-        &[RenameRule::prefix(prefix)],
+        &compiled.pipeline,
         TargetPolicy::windows(),
         &environment,
     );
@@ -632,12 +854,93 @@ fn plan_from_registry(
     let mut latest_plan = state
         .latest_plan
         .lock()
-        .map_err(|_| "the latest plan is unavailable".to_owned())?;
+        .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
     *latest_plan = Some(StoredPlan {
         plan,
-        prefix: prefix.to_owned(),
+        rule_request: request,
+        active_rule_ids: compiled.active_rule_ids,
     });
     Ok(dto)
+}
+
+fn prefix_rule_request(prefix: impl Into<String>) -> RulePipelineRequestDto {
+    RulePipelineRequestDto {
+        schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+        rules: vec![RuleRequestDto::Prefix {
+            rule_id: 1,
+            enabled: true,
+            value: prefix.into(),
+        }],
+    }
+}
+
+fn compile_rule_request(
+    request: &RulePipelineRequestDto,
+) -> Result<CompiledRuleRequest, RuleRequestError> {
+    if request.schema_version != RULE_PIPELINE_SCHEMA_VERSION {
+        return Err(RuleRequestError {
+            rule_id: None,
+            kind: RuleRequestErrorKind::UnsupportedSchema,
+        });
+    }
+    if request.rules.len() > MAX_RULES {
+        return Err(RuleRequestError {
+            rule_id: None,
+            kind: RuleRequestErrorKind::TooManyRules,
+        });
+    }
+
+    let mut rule_ids = BTreeSet::new();
+    for rule in &request.rules {
+        if rule.rule_id() == 0 {
+            return Err(RuleRequestError {
+                rule_id: Some(0),
+                kind: RuleRequestErrorKind::InvalidRuleId,
+            });
+        }
+        if !rule_ids.insert(rule.rule_id()) {
+            return Err(RuleRequestError {
+                rule_id: Some(rule.rule_id()),
+                kind: RuleRequestErrorKind::DuplicateRuleId,
+            });
+        }
+        if rule.has_oversized_text() {
+            return Err(RuleRequestError {
+                rule_id: Some(rule.rule_id()),
+                kind: RuleRequestErrorKind::RuleTextTooLong,
+            });
+        }
+    }
+
+    let active = request
+        .rules
+        .iter()
+        .filter(|rule| rule.enabled())
+        .map(|rule| (rule.rule_id(), rule.to_core_rule()))
+        .collect::<Vec<_>>();
+    let active_rule_ids = active
+        .iter()
+        .map(|(rule_id, _)| *rule_id)
+        .collect::<Vec<_>>();
+    let pipeline = RulePipeline::compile(active.into_iter().map(|(_, rule)| rule).collect())
+        .map_err(|error| {
+            let rule_id = error
+                .rule_index()
+                .and_then(|index| active_rule_ids.get(index).copied());
+            let kind = match error.kind() {
+                RuleValidationErrorKind::TooManyRules => RuleRequestErrorKind::TooManyRules,
+                RuleValidationErrorKind::RuleTextTooLong => RuleRequestErrorKind::RuleTextTooLong,
+                RuleValidationErrorKind::EmptyLiteralSearch => {
+                    RuleRequestErrorKind::EmptyLiteralSearch
+                }
+                RuleValidationErrorKind::InvalidRegex => RuleRequestErrorKind::InvalidRegex,
+            };
+            RuleRequestError { rule_id, kind }
+        })?;
+    Ok(CompiledRuleRequest {
+        pipeline,
+        active_rule_ids,
+    })
 }
 
 pub fn prepare_latest_execution<'a, F: ExecutionFileSystem + ?Sized>(
@@ -1136,15 +1439,13 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     fn from(stored: &'a StoredPlan) -> Self {
         let plan = &stored.plan;
         Self {
-            schema_version: 1,
+            schema_version: 2,
             protocol_version: PROTOCOL_VERSION,
+            rule_schema_version: stored.rule_request.schema_version,
             product: "Renamewright",
             plan_id: plan.id().value(),
             source_generation: plan.generation(),
-            rules: vec![RuleDocument {
-                kind: "prefix",
-                value: &stored.prefix,
-            }],
+            rules: &stored.rule_request.rules,
             summary: PlanSummaryDocument {
                 source_count: plan.rows().len(),
                 changed_count: plan.changed_count(),
@@ -1169,6 +1470,11 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
                         .iter()
                         .map(|step| TraceStepDocument {
                             rule_index: step.rule_index(),
+                            rule_id: stored
+                                .active_rule_ids
+                                .get(step.rule_index())
+                                .copied()
+                                .map_or(0, |rule_id| rule_id),
                             before: step.before(),
                             after: step.after(),
                         })
@@ -1214,6 +1520,7 @@ const fn diagnostic_name(code: DiagnosticCode) -> &'static str {
         DiagnosticCode::OccupiedDestination => "occupiedDestination",
         DiagnosticCode::StaleSource => "staleSource",
         DiagnosticCode::ParentUnavailable => "parentUnavailable",
+        DiagnosticCode::InvalidRule => "invalidRule",
     }
 }
 
@@ -1303,7 +1610,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             select_sources,
+            select_sources_with_rules,
             preview_prefix,
+            preview_rules,
             poll_source_changes,
             list_ledger,
             inspect_recovery,
@@ -1331,9 +1640,10 @@ mod tests {
     use std::fs;
 
     use renamewright_core::{
-        ParentId, PlanId, RenameRule, SourceId, SourceSnapshot, TargetPolicy, build_plan,
-        build_plan_with_environment,
+        ParentId, PlanId, SourceId, SourceSnapshot, TargetPolicy, build_plan_with_rule_pipeline,
     };
+    #[cfg(target_os = "linux")]
+    use renamewright_core::{RenameRule, build_plan_with_environment};
     #[cfg(target_os = "linux")]
     use renamewright_platform::{
         ExecutionOutcome, LinuxExecutionFileSystem, execute_frozen_plan, freeze_execution_plan,
@@ -1341,8 +1651,9 @@ mod tests {
     };
 
     use super::{
-        AppState, LedgerEntryDto, StoredPlan, admit_dropped_sources, export_write_error,
-        plan_document_json, write_new_document,
+        AppState, LedgerEntryDto, RULE_PIPELINE_SCHEMA_VERSION, RulePipelineRequestDto,
+        RuleRequestDto, RuleRequestErrorKind, StoredPlan, admit_dropped_sources,
+        compile_rule_request, export_write_error, plan_document_json, write_new_document,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -1380,27 +1691,116 @@ mod tests {
             ParentId::new(3),
             OsString::from("report.txt"),
         );
-        let plan = build_plan(
+        let request = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: vec![
+                RuleRequestDto::Prefix {
+                    rule_id: 7,
+                    enabled: true,
+                    value: "final-".to_owned(),
+                },
+                RuleRequestDto::Suffix {
+                    rule_id: 9,
+                    enabled: true,
+                    value: ".bak".to_owned(),
+                },
+            ],
+        };
+        let compiled = compile_rule_request(&request)?;
+        let plan = build_plan_with_rule_pipeline(
             PlanId::new(11),
             4,
             &[source],
-            &[RenameRule::prefix("final-")],
+            &compiled.pipeline,
             TargetPolicy::windows(),
         );
         *state.latest_plan.lock().map_err(|_| "plan lock failed")? = Some(StoredPlan {
             plan,
-            prefix: "final-".to_owned(),
+            rule_request: request,
+            active_rule_ids: compiled.active_rule_ids,
         });
 
         let document = plan_document_json(11, &state)?;
         let value: serde_json::Value = serde_json::from_str(&document)?;
 
-        assert_eq!(value["schemaVersion"], 1);
-        assert_eq!(value["protocolVersion"], 1);
+        assert_eq!(value["schemaVersion"], 2);
+        assert_eq!(value["protocolVersion"], 2);
+        assert_eq!(value["ruleSchemaVersion"], 1);
         assert_eq!(value["planId"], 11);
+        assert_eq!(value["rules"][0]["ruleId"], 7);
+        assert_eq!(value["rules"][1]["kind"], "suffix");
         assert_eq!(value["rows"][0]["sourceId"], 7);
-        assert_eq!(value["rows"][0]["proposedDisplay"], "final-report.txt");
+        assert_eq!(value["rows"][0]["proposedDisplay"], "final-report.txt.bak");
+        assert_eq!(value["rows"][0]["trace"][0]["ruleId"], 7);
+        assert_eq!(value["rows"][0]["trace"][1]["ruleId"], 9);
         assert!(!document.contains('/'));
+        Ok(())
+    }
+
+    #[test]
+    fn rule_request_validation_is_versioned_and_pathless() -> Result<(), Box<dyn Error>> {
+        let invalid_regex = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: vec![RuleRequestDto::RegexReplace {
+                rule_id: 41,
+                enabled: true,
+                pattern: "(".to_owned(),
+                replacement: "x".to_owned(),
+            }],
+        };
+        let duplicate = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: vec![
+                RuleRequestDto::Prefix {
+                    rule_id: 5,
+                    enabled: true,
+                    value: "a".to_owned(),
+                },
+                RuleRequestDto::Suffix {
+                    rule_id: 5,
+                    enabled: false,
+                    value: "b".to_owned(),
+                },
+            ],
+        };
+        let oversized_disabled = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: vec![RuleRequestDto::Prefix {
+                rule_id: 73,
+                enabled: false,
+                value: "x".repeat(renamewright_core::MAX_RULE_TEXT_BYTES + 1),
+            }],
+        };
+
+        let regex_error = compile_rule_request(&invalid_regex).err();
+        let duplicate_error = compile_rule_request(&duplicate).err();
+        let oversized_error = compile_rule_request(&oversized_disabled).err();
+
+        assert_eq!(
+            regex_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(41), RuleRequestErrorKind::InvalidRegex))
+        );
+        assert_eq!(
+            duplicate_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(5), RuleRequestErrorKind::DuplicateRuleId))
+        );
+        assert_eq!(
+            oversized_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(73), RuleRequestErrorKind::RuleTextTooLong))
+        );
+        assert!(
+            !regex_error
+                .map_or(String::new(), |error| error.to_string())
+                .contains('/')
+        );
+        let error_json = serde_json::to_value(
+            regex_error
+                .map(super::PlanningCommandErrorDto::from)
+                .ok_or("expected rule error")?,
+        )?;
+        assert_eq!(error_json["code"], "invalidRegex");
+        assert_eq!(error_json["ruleId"], 41);
+        assert_eq!(error_json.as_object().map(serde_json::Map::len), Some(2));
         Ok(())
     }
 
@@ -1785,10 +2185,8 @@ mod tests {
                 &registry.validation_environment(),
             )
         };
-        *state.latest_plan.lock().map_err(|_| "plan lock failed")? = Some(StoredPlan {
-            plan,
-            prefix: "final-".to_owned(),
-        });
+        *state.latest_plan.lock().map_err(|_| "plan lock failed")? =
+            Some(StoredPlan::prefix(plan, "final-"));
         let filesystem = LinuxExecutionFileSystem::new();
 
         let mismatch = prepare_latest_execution(&state, PlanId::new(70), &filesystem)
@@ -1839,10 +2237,8 @@ mod tests {
                 &registry.validation_environment(),
             )
         };
-        *state.latest_plan.lock().map_err(|_| "plan lock failed")? = Some(StoredPlan {
-            plan,
-            prefix: "final-".to_owned(),
-        });
+        *state.latest_plan.lock().map_err(|_| "plan lock failed")? =
+            Some(StoredPlan::prefix(plan, "final-"));
         fs::hard_link(&source, &retained_original)?;
         fs::remove_file(&source)?;
         fs::write(&source, b"replacement")?;

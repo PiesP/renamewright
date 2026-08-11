@@ -28,7 +28,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   color: inherit;
   font: inherit;
 }
@@ -38,7 +39,8 @@ button {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
@@ -239,24 +241,120 @@ input:focus-visible {
 
 .rule-editor {
   padding-block: var(--space-6);
+  border-block-end: var(--rule-thin) solid var(--color-rule);
 }
 
 .rule-title {
-  flex-direction: column;
   align-items: flex-start;
+  flex-direction: row;
+  gap: var(--space-3);
+  margin-block-end: var(--space-3);
+}
+
+.rule-title > div:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
   gap: var(--space-1);
-  margin-block-end: var(--space-5);
 }
 
 .rule-title h2 {
   font-size: 1rem;
 }
 
-.rule-editor label {
+.rule-editor label,
+.add-rule-controls > label {
   display: block;
   margin-block-end: var(--space-2);
   font-size: 0.75rem;
   font-weight: 700;
+}
+
+.rule-list {
+  display: grid;
+}
+
+.rule-editor[data-disabled="true"] {
+  opacity: 0.65;
+}
+
+.rule-editor[data-invalid="true"] {
+  border-inline-start: 3px solid var(--color-error);
+  padding-inline-start: var(--space-3);
+}
+
+.rule-actions {
+  display: flex;
+  flex: none;
+  gap: var(--space-1);
+}
+
+.rule-icon-button {
+  display: grid;
+  width: 2rem;
+  min-height: 2rem;
+  padding: 0;
+  place-items: center;
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-raised);
+  color: var(--color-ink-soft);
+  cursor: pointer;
+}
+
+.rule-icon-button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.rule-remove-button {
+  color: var(--color-error);
+}
+
+.rule-editor .rule-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 2rem;
+  margin-block-end: var(--space-3);
+  cursor: pointer;
+}
+
+.rule-toggle input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--color-accent);
+}
+
+.rule-field + .rule-field {
+  margin-block-start: var(--space-3);
+}
+
+.empty-rules {
+  margin: 0;
+  padding-block: var(--space-6);
+  border-block-end: var(--rule-thin) solid var(--color-rule);
+  color: var(--color-muted);
+  font-size: 0.875rem;
+}
+
+.add-rule-controls {
+  padding-block: var(--space-5);
+}
+
+.add-rule-controls > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+}
+
+.add-rule-controls select {
+  min-width: 0;
+  min-height: var(--control-height);
+  padding-inline: var(--space-3);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-raised);
 }
 
 .input-shell {
