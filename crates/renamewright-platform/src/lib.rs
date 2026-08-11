@@ -118,8 +118,14 @@ impl SourceRegistry {
 
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         candidates.dedup_by(|left, right| left.0 == right.0);
-        let mut changed = false;
+        self.admit_candidates(candidates)
+    }
 
+    fn admit_candidates(
+        &mut self,
+        candidates: Vec<(PathBuf, SourceFingerprint)>,
+    ) -> Result<Vec<SourceSnapshot>, AdmissionError> {
+        let mut prepared = Vec::with_capacity(candidates.len());
         for (path, fingerprint) in candidates {
             if self.source_ids.contains_key(&path) {
                 continue;
@@ -132,6 +138,12 @@ impl SourceRegistry {
             if current_fingerprint.as_ref() != Some(&fingerprint) {
                 return Err(AdmissionError::Unavailable(path));
             }
+            prepared.push((path, fingerprint, execution_identity));
+        }
+
+        let mut changed = false;
+
+        for (path, fingerprint, execution_identity) in prepared {
             let source_id = SourceId::new(self.next_source_id);
             self.next_source_id = self.next_source_id.saturating_add(1);
             let parent = path
@@ -323,7 +335,10 @@ mod tests {
     use renamewright_core::EntryKind;
     use renamewright_core::SourceId;
 
-    use super::{SourceRegistry, plan_execution_is_enabled, recovery_execution_is_enabled};
+    use super::{
+        SourceRegistry, normalize_entry_path, plan_execution_is_enabled,
+        recovery_execution_is_enabled,
+    };
 
     #[test]
     fn plan_execution_remains_locked_while_recovery_is_available() {
@@ -417,6 +432,30 @@ mod tests {
             environment.stale_sources(),
             &std::collections::BTreeSet::from([SourceId::new(1)])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn admission_failure_does_not_commit_earlier_candidates() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("a.txt");
+        let second = directory.path().join("b.txt");
+        fs::write(&first, b"first")?;
+        fs::write(&second, b"second")?;
+        let candidates = vec![
+            normalize_entry_path(first)?,
+            normalize_entry_path(second.clone())?,
+        ];
+        fs::write(second, b"changed-after-normalization")?;
+        let mut registry = SourceRegistry::new();
+
+        let result = registry.admit_candidates(candidates);
+
+        assert!(matches!(result, Err(super::AdmissionError::Unavailable(_))));
+        assert_eq!(registry.generation(), 0);
+        assert!(registry.snapshots().is_empty());
+        assert!(registry.paths.is_empty());
+        assert!(registry.execution_identities.is_empty());
         Ok(())
     }
 
