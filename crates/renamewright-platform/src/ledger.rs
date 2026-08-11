@@ -16,6 +16,11 @@ pub struct LedgerId(u64);
 
 impl LedgerId {
     #[must_use]
+    pub const fn from_value(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
     pub const fn value(self) -> u64 {
         self.0
     }

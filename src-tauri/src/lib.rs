@@ -6,13 +6,14 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
-    DiagnosticCode, NameStatus, PROTOCOL_VERSION, PlanId, RenamePlan, RenameRule, TargetPolicy,
-    build_plan_with_environment,
+    DiagnosticCode, ExecutionDirection, NameStatus, PROTOCOL_VERSION, PlanId, RenamePlan,
+    RenameRule, TargetPolicy, build_plan_with_environment,
 };
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
-    FrozenExecutionPlan, LedgerEntry, LedgerStatus, RenameLedger, SourceRegistry,
-    execute_frozen_plan, freeze_execution_plan,
+    FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, NativeExecutionFileSystem,
+    PreparedStepDisposition, RecoveryReadiness, RecoveryTransactionInspection, RenameLedger,
+    SourceRegistry, execute_frozen_plan, freeze_execution_plan, inspect_recovery_transaction,
 };
 use serde::Serialize;
 use tauri::{DragDropEvent, Manager, State, WindowEvent};
@@ -117,6 +118,19 @@ struct LedgerEntryDto {
     status: &'static str,
     attention_step: Option<usize>,
     recovery_available: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryInspectionDto {
+    ledger_id: u64,
+    direction: &'static str,
+    step_index: Option<usize>,
+    readiness: &'static str,
+    disposition: Option<&'static str>,
+    resume_available: bool,
+    rollback_available: bool,
+    reconcile_available: bool,
 }
 
 #[derive(Serialize)]
@@ -249,6 +263,24 @@ fn list_ledger(state: State<'_, AppState>) -> Result<Vec<LedgerEntryDto>, String
         .lock()
         .map_err(|_| "the rename ledger is unavailable".to_owned())?;
     Ok(ledger.entries().map(LedgerEntryDto::from).collect())
+}
+
+#[tauri::command]
+fn inspect_recovery(
+    ledger_id: u64,
+    state: State<'_, AppState>,
+) -> Result<RecoveryInspectionDto, String> {
+    let ledger = state
+        .ledger
+        .lock()
+        .map_err(|_| "the rename ledger is unavailable".to_owned())?;
+    inspect_recovery_transaction(
+        &ledger,
+        LedgerId::from_value(ledger_id),
+        &NativeExecutionFileSystem::new(),
+    )
+    .map(RecoveryInspectionDto::from)
+    .map_err(|_| "the recovery state could not be inspected".to_owned())
 }
 
 #[tauri::command]
@@ -405,6 +437,29 @@ impl From<LedgerEntry> for LedgerEntryDto {
     }
 }
 
+impl From<RecoveryTransactionInspection> for RecoveryInspectionDto {
+    fn from(inspection: RecoveryTransactionInspection) -> Self {
+        let (readiness, disposition) = match inspection.readiness() {
+            RecoveryReadiness::Ready => ("ready", None),
+            RecoveryReadiness::ReconciliationRequired { disposition } => (
+                "reconciliationRequired",
+                Some(disposition_name(disposition)),
+            ),
+            RecoveryReadiness::Blocked => ("blocked", None),
+        };
+        Self {
+            ledger_id: inspection.ledger_id().value(),
+            direction: execution_direction_name(inspection.direction()),
+            step_index: inspection.step_index(),
+            readiness,
+            disposition,
+            resume_available: inspection.resume_available(),
+            rollback_available: inspection.rollback_available(),
+            reconcile_available: inspection.reconcile_available(),
+        }
+    }
+}
+
 fn plan_document_json(plan_id: u64, state: &AppState) -> Result<String, String> {
     let latest_plan = state
         .latest_plan
@@ -522,6 +577,23 @@ const fn ledger_status_name(status: LedgerStatus) -> &'static str {
     }
 }
 
+const fn execution_direction_name(direction: ExecutionDirection) -> &'static str {
+    match direction {
+        ExecutionDirection::Forward => "forward",
+        ExecutionDirection::Rollback => "rollback",
+    }
+}
+
+const fn disposition_name(disposition: PreparedStepDisposition) -> &'static str {
+    match disposition {
+        PreparedStepDisposition::NotApplied => "notApplied",
+        PreparedStepDisposition::Applied => "applied",
+        PreparedStepDisposition::Missing => "missing",
+        PreparedStepDisposition::MultipleLocations => "multipleLocations",
+        PreparedStepDisposition::UnexpectedLocation => "unexpectedLocation",
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -556,6 +628,7 @@ pub fn run() {
             preview_prefix,
             poll_source_changes,
             list_ledger,
+            inspect_recovery,
             inspect_plan,
             export_plan
         ])
@@ -577,11 +650,15 @@ mod tests {
         build_plan_with_environment,
     };
     #[cfg(target_os = "linux")]
-    use renamewright_platform::{ExecutionOutcome, LinuxExecutionFileSystem};
+    use renamewright_platform::{
+        ExecutionOutcome, LinuxExecutionFileSystem, freeze_execution_plan,
+        inspect_recovery_transaction,
+    };
 
     use super::{
-        AppState, LedgerEntryDto, PrepareExecutionError, StoredPlan, admit_dropped_sources,
-        export_write_error, plan_document_json, prepare_latest_execution, write_new_document,
+        AppState, LedgerEntryDto, PrepareExecutionError, RecoveryInspectionDto, StoredPlan,
+        admit_dropped_sources, export_write_error, plan_document_json, prepare_latest_execution,
+        write_new_document,
     };
 
     #[test]
@@ -692,6 +769,47 @@ mod tests {
         assert!(!serialized.contains(native_marker));
         assert!(!serialized.contains("secret-original"));
         assert!(!serialized.contains("private-journal-name"));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_inspection_projection_contains_no_native_journal_data() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("private-source.txt");
+        fs::write(&source, b"source")?;
+        let mut registry = renamewright_platform::SourceRegistry::new();
+        registry.admit_paths([source])?;
+        let plan = build_plan_with_environment(
+            PlanId::new(68),
+            registry.generation(),
+            &registry.snapshots(),
+            &[RenameRule::prefix("private-final-")],
+            TargetPolicy::windows(),
+            &registry.validation_environment(),
+        );
+        let filesystem = LinuxExecutionFileSystem::new();
+        let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
+        fs::write(
+            directory.path().join("private-journal.rwj"),
+            renamewright_platform::encode_journal(&[frozen.initial_record()])?,
+        )?;
+        let ledger = renamewright_platform::RenameLedger::discover(directory.path())?;
+        let ledger_id = ledger
+            .entries()
+            .next()
+            .ok_or("ledger was empty")?
+            .ledger_id();
+        let inspection = inspect_recovery_transaction(&ledger, ledger_id, &filesystem)?;
+        let serialized = serde_json::to_string(&RecoveryInspectionDto::from(inspection))?;
+
+        assert!(serialized.contains("\"readiness\":\"ready\""));
+        assert!(serialized.contains("\"resumeAvailable\":true"));
+        assert!(!serialized.contains("private-source"));
+        assert!(!serialized.contains("private-final"));
+        assert!(!serialized.contains("private-journal"));
+        assert!(!serialized.contains(&directory.path().display().to_string()));
         Ok(())
     }
 
