@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use renamewright_core::{
-    EntryIdentity, EntryKind, OccupiedName, ParentId, SourceFingerprint, SourceId, SourceSnapshot,
-    ValidationEnvironment,
+    EntryIdentitySignal, EntryKind, OccupiedName, ParentId, SourceFingerprint, SourceId,
+    SourceSnapshot, ValidationEnvironment,
 };
 
 /// Filesystem mutation remains unavailable during the planning milestone.
@@ -36,25 +36,6 @@ impl Display for AdmissionError {
 }
 
 impl Error for AdmissionError {}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ValidationError {
-    ParentUnavailable(ParentId),
-}
-
-impl Display for ValidationError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ParentUnavailable(parent_id) => write!(
-                formatter,
-                "source directory {} could not be validated",
-                parent_id.value()
-            ),
-        }
-    }
-}
-
-impl Error for ValidationError {}
 
 #[derive(Debug, Default)]
 pub struct SourceRegistry {
@@ -146,7 +127,8 @@ impl SourceRegistry {
         self.paths.get(&source_id).map(PathBuf::as_path)
     }
 
-    pub fn validation_environment(&self) -> Result<ValidationEnvironment, ValidationError> {
+    #[must_use]
+    pub fn validation_environment(&self) -> ValidationEnvironment {
         let stale_sources = self
             .paths
             .iter()
@@ -159,23 +141,32 @@ impl SourceRegistry {
             })
             .collect::<BTreeSet<_>>();
         let source_paths = self.paths.values().cloned().collect::<BTreeSet<_>>();
+        let mut unavailable_parents = BTreeSet::new();
         let mut occupied_names = Vec::new();
 
         for (parent, parent_id) in &self.parent_ids {
-            let entries =
-                fs::read_dir(parent).map_err(|_| ValidationError::ParentUnavailable(*parent_id))?;
+            let Ok(entries) = fs::read_dir(parent) else {
+                unavailable_parents.insert(*parent_id);
+                continue;
+            };
+            let mut parent_names = Vec::new();
             for entry in entries {
-                let entry = entry.map_err(|_| ValidationError::ParentUnavailable(*parent_id))?;
+                let Ok(entry) = entry else {
+                    unavailable_parents.insert(*parent_id);
+                    parent_names.clear();
+                    break;
+                };
                 if !source_paths.contains(&entry.path()) {
-                    occupied_names.push(OccupiedName::new(*parent_id, entry.file_name()));
+                    parent_names.push(OccupiedName::new(*parent_id, entry.file_name()));
                 }
             }
+            occupied_names.extend(parent_names);
         }
         occupied_names.sort_by(|left, right| {
             (left.parent_id(), left.native_name()).cmp(&(right.parent_id(), right.native_name()))
         });
 
-        Ok(ValidationEnvironment::new(stale_sources, occupied_names))
+        ValidationEnvironment::new(stale_sources, unavailable_parents, occupied_names)
     }
 }
 
@@ -212,31 +203,31 @@ fn fingerprint_for(metadata: &Metadata) -> Option<SourceFingerprint> {
         .map(|duration| duration.as_nanos());
     Some(SourceFingerprint::new(
         entry_kind,
-        entry_identity(metadata),
+        entry_identity_signal(metadata),
         metadata.len(),
         modified_nanos,
     ))
 }
 
 #[cfg(unix)]
-fn entry_identity(metadata: &Metadata) -> Option<EntryIdentity> {
+fn entry_identity_signal(metadata: &Metadata) -> Option<EntryIdentitySignal> {
     use std::os::unix::fs::MetadataExt;
 
-    Some(EntryIdentity::new(metadata.dev(), metadata.ino()))
+    Some(EntryIdentitySignal::new(metadata.dev(), metadata.ino()))
 }
 
 #[cfg(windows)]
-fn entry_identity(metadata: &Metadata) -> Option<EntryIdentity> {
+fn entry_identity_signal(metadata: &Metadata) -> Option<EntryIdentitySignal> {
     use std::os::windows::fs::MetadataExt;
 
-    Some(EntryIdentity::new(
+    Some(EntryIdentitySignal::new(
         metadata.creation_time(),
         u64::from(metadata.file_attributes()),
     ))
 }
 
 #[cfg(not(any(unix, windows)))]
-const fn entry_identity(_metadata: &Metadata) -> Option<EntryIdentity> {
+const fn entry_identity_signal(_metadata: &Metadata) -> Option<EntryIdentitySignal> {
     None
 }
 
@@ -265,12 +256,12 @@ mod tests {
         let mut registry = SourceRegistry::new();
         registry.admit_paths([first.clone(), second])?;
 
-        let initial = registry.validation_environment()?;
+        let initial = registry.validation_environment();
         assert!(initial.stale_sources().is_empty());
         assert!(initial.occupied_names().is_empty());
 
         fs::write(first, b"changed-size")?;
-        let changed = registry.validation_environment()?;
+        let changed = registry.validation_environment();
         assert_eq!(
             changed.stale_sources(),
             &std::collections::BTreeSet::from([SourceId::new(1)])
@@ -287,12 +278,37 @@ mod tests {
         let mut registry = SourceRegistry::new();
         registry.admit_paths([source])?;
 
-        let environment = registry.validation_environment()?;
+        let environment = registry.validation_environment();
 
         assert_eq!(environment.occupied_names().len(), 1);
         assert_eq!(
             environment.occupied_names()[0].native_name(),
             "final-report.txt"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validation_degrades_an_unavailable_parent_to_plan_data() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let parent = directory.path().join("removed");
+        fs::create_dir(&parent)?;
+        let source = parent.join("report.txt");
+        fs::write(&source, b"source")?;
+        let mut registry = SourceRegistry::new();
+        registry.admit_paths([source.clone()])?;
+
+        fs::remove_file(source)?;
+        fs::remove_dir(parent)?;
+        let environment = registry.validation_environment();
+
+        assert_eq!(
+            environment.unavailable_parents(),
+            &std::collections::BTreeSet::from([renamewright_core::ParentId::new(1)])
+        );
+        assert_eq!(
+            environment.stale_sources(),
+            &std::collections::BTreeSet::from([SourceId::new(1)])
         );
         Ok(())
     }
@@ -309,7 +325,7 @@ mod tests {
 
         fs::rename(&source, prior_entry)?;
         fs::write(&source, b"same-size")?;
-        let environment = registry.validation_environment()?;
+        let environment = registry.validation_environment();
 
         assert_eq!(
             environment.stale_sources(),

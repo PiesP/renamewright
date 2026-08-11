@@ -17,11 +17,31 @@ export function App(props: AppProps) {
   const [notice, setNotice] = createSignal('');
   let requestSequence = 0;
   let planInspector: HTMLDialogElement | undefined;
+  let planInspectorOpener: HTMLButtonElement | undefined;
+  let previewTimer: number | undefined;
+
+  const dismissPlanInspector = () => {
+    const inspector = planInspector;
+    const opener = planInspectorOpener;
+    planInspector = undefined;
+    planInspectorOpener = undefined;
+    if (inspector?.open && typeof inspector.close === 'function') {
+      inspector.close();
+    }
+    setPlanDocument(undefined);
+    queueMicrotask(() => {
+      if (opener?.isConnected) {
+        opener.focus();
+      }
+    });
+  };
 
   const setResult = (result: Plan | null) => {
     if (result) {
+      if (planDocument()) {
+        dismissPlanInspector();
+      }
       setPlan(result);
-      setPlanDocument(undefined);
     }
   };
 
@@ -49,7 +69,13 @@ export function App(props: AppProps) {
   const updatePrefix = (value: string) => {
     setPrefix(value);
     if (plan()) {
-      void run(() => planningClient.previewPrefix(value));
+      if (previewTimer !== undefined) {
+        window.clearTimeout(previewTimer);
+      }
+      previewTimer = window.setTimeout(() => {
+        previewTimer = undefined;
+        void run(() => planningClient.previewPrefix(value));
+      }, 120);
     }
   };
 
@@ -69,6 +95,7 @@ export function App(props: AppProps) {
     try {
       setPlanDocument(await planningClient.inspectPlan(current.planId));
     } catch (cause) {
+      planInspectorOpener = undefined;
       setError(cause instanceof Error ? cause.message : 'The plan document could not be opened.');
     } finally {
       setBusy(false);
@@ -93,14 +120,6 @@ export function App(props: AppProps) {
     }
   };
 
-  const closePlanInspector = () => {
-    if (planInspector && typeof planInspector.close === 'function') {
-      planInspector.close();
-    } else {
-      setPlanDocument(undefined);
-    }
-  };
-
   onMount(() => {
     const stopWatching = planningClient.watchSourceChanges((change) => {
       if (change.error) {
@@ -109,7 +128,12 @@ export function App(props: AppProps) {
       }
       void run(() => planningClient.previewPrefix(prefix()));
     });
-    onCleanup(stopWatching);
+    onCleanup(() => {
+      stopWatching();
+      if (previewTimer !== undefined) {
+        window.clearTimeout(previewTimer);
+      }
+    });
   });
 
   const statusMessage = () => {
@@ -201,7 +225,7 @@ export function App(props: AppProps) {
             >
               <Show
                 when={plan()?.blockedCount}
-                fallback="Added before every source name. The preview updates immediately."
+                fallback="Added before every source name. The preview updates as you type."
               >
                 One or more destinations are blocked. Review the row diagnostics before continuing.
               </Show>
@@ -228,7 +252,10 @@ export function App(props: AppProps) {
                 class="button button-secondary button-compact"
                 type="button"
                 disabled={!plan() || busy()}
-                onClick={() => void inspectCurrentPlan()}
+                onClick={(event) => {
+                  planInspectorOpener = event.currentTarget;
+                  void inspectCurrentPlan();
+                }}
               >
                 Inspect JSON
               </button>
@@ -306,8 +333,11 @@ export function App(props: AppProps) {
                 element.setAttribute('open', '');
               }
             }}
-            onCancel={() => setPlanDocument(undefined)}
-            onClose={() => setPlanDocument(undefined)}
+            onCancel={(event) => {
+              event.preventDefault();
+              dismissPlanInspector();
+            }}
+            onClose={dismissPlanInspector}
           >
             <div class="inspector-heading">
               <div>
@@ -317,7 +347,7 @@ export function App(props: AppProps) {
               <button
                 class="button button-secondary button-compact"
                 type="button"
-                onClick={closePlanInspector}
+                onClick={dismissPlanInspector}
               >
                 Close
               </button>

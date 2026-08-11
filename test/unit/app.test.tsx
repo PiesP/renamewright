@@ -124,11 +124,14 @@ test('inspects and exports only the current opaque plan ID', async () => {
   await user.click(
     screen.getAllByRole('button', { name: 'Add files' }).at(-1) as HTMLButtonElement
   );
-  await user.click(screen.getByRole('button', { name: 'Inspect JSON' }));
+  const inspectButton = screen.getByRole('button', { name: 'Inspect JSON' });
+  await user.click(inspectButton);
 
   expect(inspectPlan).toHaveBeenCalledWith(9);
   expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 1');
   await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
   expect(exportPlan).toHaveBeenCalledWith(9);
   expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');
+  await user.click(screen.getByRole('button', { name: 'Close' }));
+  expect(inspectButton).toHaveFocus();
 });

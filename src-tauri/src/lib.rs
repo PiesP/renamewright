@@ -191,8 +191,7 @@ async fn export_plan(plan_id: u64, state: State<'_, AppState>) -> Result<bool, S
         let Some(path) = path else {
             return Ok(false);
         };
-        write_new_document(&path, &document)
-            .map_err(|error| format!("the plan could not be exported: {error}"))?;
+        write_new_document(&path, &document).map_err(export_write_error)?;
         Ok(true)
     })
     .await
@@ -228,9 +227,7 @@ fn plan_from_registry(
         .map_err(|_| "the plan sequence is unavailable".to_owned())?;
     let plan_id = PlanId::new(*next_plan_id);
     *next_plan_id = next_plan_id.saturating_add(1);
-    let environment = registry
-        .validation_environment()
-        .map_err(|error| error.to_string())?;
+    let environment = registry.validation_environment();
     let plan = build_plan_with_environment(
         plan_id,
         registry.generation(),
@@ -344,6 +341,14 @@ fn write_new_document(path: &Path, document: &str) -> std::io::Result<()> {
     file.sync_all()
 }
 
+fn export_write_error(error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        "the export file already exists; choose a new file name".to_owned()
+    } else {
+        format!("the plan could not be exported: {error}")
+    }
+}
+
 const fn status_name(status: NameStatus) -> &'static str {
     match status {
         NameStatus::Changed => "changed",
@@ -364,6 +369,7 @@ const fn diagnostic_name(code: DiagnosticCode) -> &'static str {
         DiagnosticCode::UnsupportedEncoding => "unsupportedEncoding",
         DiagnosticCode::OccupiedDestination => "occupiedDestination",
         DiagnosticCode::StaleSource => "staleSource",
+        DiagnosticCode::ParentUnavailable => "parentUnavailable",
     }
 }
 
@@ -405,7 +411,8 @@ mod tests {
     };
 
     use super::{
-        AppState, StoredPlan, admit_dropped_sources, plan_document_json, write_new_document,
+        AppState, StoredPlan, admit_dropped_sources, export_write_error, plan_document_json,
+        write_new_document,
     };
 
     #[test]
@@ -466,7 +473,13 @@ mod tests {
         let export = directory.path().join("plan.json");
 
         write_new_document(&export, "first")?;
-        assert!(write_new_document(&export, "second").is_err());
+        let Err(error) = write_new_document(&export, "second") else {
+            return Err("create-new must reject reuse".into());
+        };
+        assert_eq!(
+            export_write_error(error),
+            "the export file already exists; choose a new file name"
+        );
         assert_eq!(fs::read_to_string(export)?, "first");
         Ok(())
     }

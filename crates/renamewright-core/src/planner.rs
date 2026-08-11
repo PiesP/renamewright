@@ -39,6 +39,7 @@ pub fn build_plan_with_environment(
         .collect::<Vec<_>>();
 
     mark_stale_sources(&mut rows, environment);
+    mark_unavailable_parents(&mut rows, environment);
     mark_duplicates(&mut rows, policy);
     mark_occupied_destinations(&mut rows, policy, environment);
     RenamePlan::new(plan_id, generation, rows)
@@ -108,6 +109,14 @@ fn mark_stale_sources(rows: &mut [PlanRow], environment: &ValidationEnvironment)
     for row in rows {
         if environment.stale_sources().contains(&row.source_id()) {
             row.block(DiagnosticCode::StaleSource);
+        }
+    }
+}
+
+fn mark_unavailable_parents(rows: &mut [PlanRow], environment: &ValidationEnvironment) {
+    for row in rows {
+        if environment.unavailable_parents().contains(&row.parent_id()) {
+            row.block(DiagnosticCode::ParentUnavailable);
         }
     }
 }

@@ -22,6 +22,7 @@ const diagnosticLabels: Record<string, string> = {
   unsupportedEncoding: 'Unsupported name encoding',
   occupiedDestination: 'Destination already exists',
   staleSource: 'Source changed since admission',
+  parentUnavailable: 'Source directory could not be validated',
 };
 
 const filterLabels: Record<PlanFilter, string> = {

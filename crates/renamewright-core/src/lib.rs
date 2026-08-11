@@ -5,7 +5,7 @@ mod planner;
 mod windows;
 
 pub use model::{
-    Diagnostic, DiagnosticCode, DiagnosticSeverity, EntryIdentity, EntryKind, NameStatus,
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, EntryIdentitySignal, EntryKind, NameStatus,
     OccupiedName, ParentId, PlanId, PlanRow, RenamePlan, RenameRule, SourceFingerprint, SourceId,
     SourceSnapshot, TargetPolicy, TraceStep, ValidationEnvironment,
 };

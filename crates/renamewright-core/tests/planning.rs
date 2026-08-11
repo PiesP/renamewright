@@ -167,6 +167,7 @@ fn stale_sources_and_occupied_destinations_block_the_plan() {
     let sources = [source(1, 10, "report.txt"), source(2, 10, "notes.txt")];
     let environment = ValidationEnvironment::new(
         BTreeSet::from([SourceId::new(1)]),
+        BTreeSet::new(),
         vec![OccupiedName::new(
             ParentId::new(10),
             OsString::from("final-notes.txt"),
@@ -201,6 +202,7 @@ fn stale_sources_and_occupied_destinations_block_the_plan() {
 fn occupied_names_use_windows_comparison_per_parent() {
     let environment = ValidationEnvironment::new(
         BTreeSet::new(),
+        BTreeSet::new(),
         vec![OccupiedName::new(
             ParentId::new(10),
             OsString::from("FINAL-REPORT.TXT"),
@@ -216,5 +218,30 @@ fn occupied_names_use_windows_comparison_per_parent() {
     );
 
     assert_eq!(plan.rows()[0].status(), NameStatus::Blocked);
+    assert_eq!(plan.rows()[1].status(), NameStatus::Changed);
+}
+
+#[test]
+fn unavailable_parent_blocks_only_its_rows() {
+    let environment = ValidationEnvironment::new(
+        BTreeSet::new(),
+        BTreeSet::from([ParentId::new(10)]),
+        Vec::new(),
+    );
+    let plan = build_plan_with_environment(
+        PlanId::new(1),
+        1,
+        &[source(1, 10, "report.txt"), source(2, 20, "notes.txt")],
+        &[RenameRule::prefix("final-")],
+        TargetPolicy::windows(),
+        &environment,
+    );
+
+    assert!(
+        plan.rows()[0]
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::ParentUnavailable)
+    );
     assert_eq!(plan.rows()[1].status(), NameStatus::Changed);
 }

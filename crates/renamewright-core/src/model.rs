@@ -88,21 +88,21 @@ pub enum EntryKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceFingerprint {
     entry_kind: EntryKind,
-    entry_identity: Option<EntryIdentity>,
+    entry_identity_signal: Option<EntryIdentitySignal>,
     byte_len: u64,
     modified_nanos: Option<u128>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EntryIdentity {
-    volume: u64,
-    file: u64,
+pub struct EntryIdentitySignal {
+    primary: u64,
+    secondary: u64,
 }
 
-impl EntryIdentity {
+impl EntryIdentitySignal {
     #[must_use]
-    pub const fn new(volume: u64, file: u64) -> Self {
-        Self { volume, file }
+    pub const fn new(primary: u64, secondary: u64) -> Self {
+        Self { primary, secondary }
     }
 }
 
@@ -110,13 +110,13 @@ impl SourceFingerprint {
     #[must_use]
     pub const fn new(
         entry_kind: EntryKind,
-        entry_identity: Option<EntryIdentity>,
+        entry_identity_signal: Option<EntryIdentitySignal>,
         byte_len: u64,
         modified_nanos: Option<u128>,
     ) -> Self {
         Self {
             entry_kind,
-            entry_identity,
+            entry_identity_signal,
             byte_len,
             modified_nanos,
         }
@@ -157,14 +157,20 @@ impl OccupiedName {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ValidationEnvironment {
     stale_sources: BTreeSet<SourceId>,
+    unavailable_parents: BTreeSet<ParentId>,
     occupied_names: Vec<OccupiedName>,
 }
 
 impl ValidationEnvironment {
     #[must_use]
-    pub fn new(stale_sources: BTreeSet<SourceId>, occupied_names: Vec<OccupiedName>) -> Self {
+    pub fn new(
+        stale_sources: BTreeSet<SourceId>,
+        unavailable_parents: BTreeSet<ParentId>,
+        occupied_names: Vec<OccupiedName>,
+    ) -> Self {
         Self {
             stale_sources,
+            unavailable_parents,
             occupied_names,
         }
     }
@@ -172,6 +178,11 @@ impl ValidationEnvironment {
     #[must_use]
     pub fn stale_sources(&self) -> &BTreeSet<SourceId> {
         &self.stale_sources
+    }
+
+    #[must_use]
+    pub fn unavailable_parents(&self) -> &BTreeSet<ParentId> {
+        &self.unavailable_parents
     }
 
     #[must_use]
@@ -222,6 +233,7 @@ pub enum DiagnosticCode {
     UnsupportedEncoding,
     OccupiedDestination,
     StaleSource,
+    ParentUnavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
