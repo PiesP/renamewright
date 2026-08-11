@@ -1,0 +1,38 @@
+import { expect, test } from '@playwright/test';
+
+test('previews a safe prefix and blocks invalid Windows names', async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') {
+      consoleErrors.push(message.text());
+    }
+  });
+
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'No sources in this plan' })).toBeVisible();
+  await page.getByRole('button', { name: 'Load sample' }).click();
+  await page.getByRole('textbox', { name: 'Prefix' }).fill('2026-');
+  await expect(page.getByText('2026-Quarterly review.pdf')).toBeVisible();
+  await expect(page.getByText('3 changes')).toBeVisible();
+
+  await page.getByRole('textbox', { name: 'Prefix' }).fill('?');
+  await expect(page.getByText('3 blocked')).toBeVisible();
+  await expect(page.getByRole('status')).toContainText('3 names are blocked');
+  await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
+  expect(consoleErrors).toEqual([]);
+});
+
+test('keeps the workbench inside narrow viewports', async ({ page }) => {
+  for (const width of [320, 375, 414, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Load sample' }).click();
+
+    const sizes = await page.evaluate(() => ({
+      client: document.documentElement.clientWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(sizes.scroll, `horizontal overflow at ${width}px`).toBeLessThanOrEqual(sizes.client);
+    await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeVisible();
+  }
+});

@@ -1,0 +1,18 @@
+[package]
+name = "renamewright-platform"
+description = "Native platform boundary for Renamewright"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+renamewright-core = { path = "../renamewright-core" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

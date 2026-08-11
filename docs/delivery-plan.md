@@ -89,16 +89,22 @@ without a separate explicit request.
 
 ## Immediate next implementation stage
 
-The next authorised implementation request should execute Milestone 0 and the
-read-only portion of Milestone 1. It should not begin real rename execution until
-the planning UI and diagnostics have been reviewed in a rendered prototype.
+Milestone 0 and the first read-only Milestone 1 slice are complete: native file
+selection, backend-only path retention, prefix preview, Windows name diagnostics,
+and the responsive Workbench are implemented and tested. Drag/drop,
+virtualisation, plan JSON inspection, occupied-destination checks, and stale
+source validation remain in Milestone 1.
+
+The next implementation request should finish those read-only planning gaps. It
+must not begin real rename execution until the complete plan format and recovery
+design have been reviewed.
 
 The expected first commit series is:
 
-1. `chore: scaffold reproducible desktop workspace`
-2. `feat: model sources and deterministic rename plans`
-3. `feat: preview prefix rules in the desktop workbench`
-4. `test: cover planning diagnostics and keyboard workflow`
+1. `feat: admit dropped sources without exposing native paths`
+2. `feat: virtualise and filter large rename plans`
+3. `feat: inspect and export versioned plan JSON`
+4. `test: cover occupied destinations and stale source snapshots`
 
 Commit boundaries may be combined only when the resulting change is genuinely
 atomic and independently testable.

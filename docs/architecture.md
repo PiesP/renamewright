@@ -17,7 +17,7 @@ it is not maintained as a parallel implementation.
 
 ## Repository shape
 
-The implementation phase will introduce this structure incrementally:
+The implementation follows this structure:
 
 ```text
 crates/
@@ -58,6 +58,11 @@ Important types include:
 
 The UI may request a new proposal, but only the backend creates a plan and only a
 current validated plan ID can be executed.
+
+The current IPC surface is deliberately smaller than the eventual protocol. It
+exposes `select_sources` and `preview_prefix`; neither command accepts a path from
+the WebView, and no execution command is registered. The browser-only sample is
+a presentation fixture and does not cross the native admission boundary.
 
 ## Admission boundary
 

@@ -1,0 +1,15 @@
+{
+  "date": "2026-08-11",
+  "framework": "Solid 1.9 with Vite 8 in a Tauri 2 shell",
+  "fontStack": "none",
+  "palette": "none",
+  "motion": "motion-cut; no animation library",
+  "spacing": "none",
+  "preserve": ["Solid and Tauri application structure"],
+  "introduce": [
+    "Workbench macrostructure",
+    "Cobalt design tokens",
+    "accessible interaction states",
+    "slop-test gates"
+  ]
+}

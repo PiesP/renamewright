@@ -1,0 +1,11 @@
+allowBuilds:
+  esbuild: true
+
+strictDepBuilds: true
+blockExoticSubdeps: true
+engineStrict: true
+
+minimumReleaseAge: 1440
+minimumReleaseAgeIgnoreMissingTime: false
+trustPolicy: no-downgrade
+trustPolicyIgnoreAfter: 525600
