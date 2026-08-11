@@ -22,6 +22,7 @@ function makePlan(prefix: string): Plan {
   });
 
   return {
+    planId: 9,
     generation: 1,
     rows,
     changedCount: rows.filter((row) => row.status === 'changed').length,
@@ -36,6 +37,9 @@ function fakeClient(): PlanningClient {
     loadSample: async (prefix) => makePlan(prefix),
     selectSources: async (prefix) => makePlan(prefix),
     previewPrefix: async (prefix) => makePlan(prefix),
+    inspectPlan: async (planId) =>
+      JSON.stringify({ schemaVersion: 1, planId, rows: makePlan('').rows }, null, 2),
+    exportPlan: async () => false,
     watchSourceChanges: () => () => undefined,
   };
 }
@@ -105,4 +109,26 @@ test('refreshes the plan after Rust admits dropped sources', async () => {
 
   expect(previewPrefix).toHaveBeenCalledWith('');
   expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
+});
+
+test('inspects and exports only the current opaque plan ID', async () => {
+  const user = userEvent.setup();
+  const client = fakeClient();
+  client.nativeSelectionAvailable = true;
+  const inspectPlan = vi.fn(client.inspectPlan);
+  const exportPlan = vi.fn(async () => true);
+  client.inspectPlan = inspectPlan;
+  client.exportPlan = exportPlan;
+  render(() => <App client={client} />);
+
+  await user.click(
+    screen.getAllByRole('button', { name: 'Add files' }).at(-1) as HTMLButtonElement
+  );
+  await user.click(screen.getByRole('button', { name: 'Inspect JSON' }));
+
+  expect(inspectPlan).toHaveBeenCalledWith(9);
+  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 1');
+  await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
+  expect(exportPlan).toHaveBeenCalledWith(9);
+  expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');
 });

@@ -14,6 +14,10 @@ test('previews a safe prefix and blocks invalid Windows names', async ({ page })
   await page.getByRole('textbox', { name: 'Prefix' }).fill('2026-');
   await expect(page.getByText('2026-Quarterly review.pdf')).toBeVisible();
   await expect(page.getByText('3 changes')).toBeVisible();
+  await page.getByRole('button', { name: 'Inspect JSON' }).click();
+  await expect(page.getByRole('dialog')).toContainText('"schemaVersion": 1');
+  await expect(page.getByRole('dialog')).not.toContainText('/home/');
+  await page.getByRole('button', { name: 'Close' }).click();
 
   await page.getByRole('textbox', { name: 'Prefix' }).fill('?');
   await expect(page.getByText('3 blocked')).toBeVisible();

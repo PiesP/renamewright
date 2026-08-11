@@ -11,13 +11,16 @@ export function App(props: AppProps) {
   const planningClient = props.client ?? createPlanningClient();
   const [prefix, setPrefix] = createSignal('');
   const [plan, setPlan] = createSignal<Plan>();
+  const [planDocument, setPlanDocument] = createSignal<string>();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal('');
+  const [notice, setNotice] = createSignal('');
   let requestSequence = 0;
 
   const setResult = (result: Plan | null) => {
     if (result) {
       setPlan(result);
+      setPlanDocument(undefined);
     }
   };
 
@@ -25,6 +28,7 @@ export function App(props: AppProps) {
     const sequence = ++requestSequence;
     setBusy(true);
     setError('');
+    setNotice('');
     try {
       const result = await operation();
       if (sequence === requestSequence) {
@@ -53,6 +57,41 @@ export function App(props: AppProps) {
       ? planningClient.selectSources(prefix())
       : planningClient.loadSample(prefix());
 
+  const inspectCurrentPlan = async () => {
+    const current = plan();
+    if (!current) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      setPlanDocument(await planningClient.inspectPlan(current.planId));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The plan document could not be opened.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportCurrentPlan = async () => {
+    const current = plan();
+    if (!current) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const exported = await planningClient.exportPlan(current.planId);
+      setNotice(exported ? 'Plan JSON exported.' : 'Plan export cancelled.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The plan document could not be exported.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   onMount(() => {
     const stopWatching = planningClient.watchSourceChanges((change) => {
       if (change.error) {
@@ -71,6 +110,9 @@ export function App(props: AppProps) {
     }
     if (busy()) {
       return 'Updating the rename plan…';
+    }
+    if (notice()) {
+      return notice();
     }
     if (!current) {
       return 'No sources are loaded.';
@@ -168,7 +210,17 @@ export function App(props: AppProps) {
               <h2 id="preview-heading">Proposed names</h2>
               <p>Original names remain untouched while you inspect this plan.</p>
             </div>
-            <span class="generation">Generation {plan()?.generation ?? 0}</span>
+            <div class="plan-heading-actions">
+              <span class="generation">Generation {plan()?.generation ?? 0}</span>
+              <button
+                class="button button-secondary button-compact"
+                type="button"
+                disabled={!plan() || busy()}
+                onClick={() => void inspectCurrentPlan()}
+              >
+                Inspect JSON
+              </button>
+            </div>
           </div>
 
           <Show
@@ -225,8 +277,60 @@ export function App(props: AppProps) {
         </div>
       </footer>
 
+      <Show when={planDocument()}>
+        {(document) => (
+          <dialog
+            class="plan-inspector"
+            open
+            aria-labelledby="plan-inspector-heading"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                setPlanDocument(undefined);
+              }
+            }}
+          >
+            <div class="inspector-heading">
+              <div>
+                <span class="inspector-kicker">Versioned plan document</span>
+                <h2 id="plan-inspector-heading">Plan {plan()?.planId}</h2>
+              </div>
+              <button
+                class="button button-secondary button-compact"
+                type="button"
+                onClick={() => setPlanDocument(undefined)}
+              >
+                Close
+              </button>
+            </div>
+            <p>Display projections and opaque IDs only. Native paths are never included.</p>
+            <pre>{document()}</pre>
+            <div class="inspector-actions">
+              <button
+                class="button button-primary"
+                type="button"
+                disabled={!planningClient.nativeSelectionAvailable || busy()}
+                title={
+                  planningClient.nativeSelectionAvailable
+                    ? undefined
+                    : 'Export is available in the desktop app.'
+                }
+                onClick={() => void exportCurrentPlan()}
+              >
+                Export JSON…
+              </button>
+            </div>
+          </dialog>
+        )}
+      </Show>
+
       <p
-        class={error() ? 'live-status live-status-error' : 'live-status'}
+        class={
+          error()
+            ? 'live-status live-status-error'
+            : notice()
+              ? 'live-status live-status-active'
+              : 'live-status'
+        }
         role="status"
         aria-live="polite"
       >
