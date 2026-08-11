@@ -138,16 +138,18 @@ fn inspects_and_executes_undo_as_a_new_lineaged_transaction()
 fn blocks_undo_when_the_source_identity_changes_or_destination_is_occupied()
 -> Result<(), Box<dyn std::error::Error>> {
     let (changed_directory, changed_ledger) = completed_fixture()?;
-    fs::remove_file(changed_directory.path().join("final-source.txt"))?;
-    fs::write(
-        changed_directory.path().join("final-source.txt"),
-        b"replacement",
-    )?;
+    let changed_source = changed_directory.path().join("final-source.txt");
+    // Keep the original inode allocated so an immediate replacement cannot
+    // reuse the identity that the completed journal recorded.
+    let original_file = fs::File::open(&changed_source)?;
+    fs::remove_file(&changed_source)?;
+    fs::write(&changed_source, b"replacement")?;
     let changed = inspect_undo_transaction(
         &changed_ledger,
         first_ledger_id(&changed_ledger)?,
         &LinuxExecutionFileSystem::new(),
     )?;
+    drop(original_file);
     assert_eq!(
         changed.readiness(),
         UndoReadiness::Blocked {
