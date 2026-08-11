@@ -9,6 +9,10 @@ use renamewright_platform::{
     encode_journal,
 };
 
+const GOLDEN_V1_TRANSACTION_COMPLETED: [u8; 24] = [
+    b'R', b'W', b'J', b'R', 1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf2, 0xc4, 0x8a, 0x71,
+];
+
 fn identity(seed: u8) -> ExecutionIdentity {
     ExecutionIdentity::new(u64::from(seed), [seed; 16])
 }
@@ -75,6 +79,20 @@ fn round_trips_records_and_preserves_replay_semantics() -> Result<(), Box<dyn st
             .map(|frame| frame.sequence())
             .collect::<Vec<_>>(),
         vec![0, 1, 2, 3, 4, 5]
+    );
+    Ok(())
+}
+
+#[test]
+fn reads_and_reproduces_the_version_one_golden_frame() -> Result<(), Box<dyn std::error::Error>> {
+    let frames = decode_journal(&GOLDEN_V1_TRANSACTION_COMPLETED)?;
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].sequence(), 0);
+    assert_eq!(frames[0].record(), &JournalRecord::TransactionCompleted);
+    assert_eq!(
+        encode_journal(&[JournalRecord::TransactionCompleted])?,
+        GOLDEN_V1_TRANSACTION_COMPLETED
     );
     Ok(())
 }

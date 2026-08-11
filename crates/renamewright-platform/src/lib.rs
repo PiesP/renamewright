@@ -16,7 +16,8 @@ use renamewright_core::{
 
 pub use journal::{
     JOURNAL_SCHEMA_VERSION, JournalCodecError, JournalCodecErrorKind, JournalFrame,
-    MAX_JOURNAL_PAYLOAD_BYTES, decode_journal, encode_journal,
+    JournalStorageError, JournalStorageErrorKind, JournalWriter, MAX_JOURNAL_PAYLOAD_BYTES,
+    decode_journal, encode_journal,
 };
 
 /// Filesystem mutation remains unavailable during the planning milestone.
@@ -243,7 +244,9 @@ mod tests {
     use std::error::Error;
     use std::fs;
 
-    use renamewright_core::{EntryKind, SourceId};
+    #[cfg(unix)]
+    use renamewright_core::EntryKind;
+    use renamewright_core::SourceId;
 
     use super::{SourceRegistry, mutation_is_enabled};
 

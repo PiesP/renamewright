@@ -1,6 +1,9 @@
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::path::Path;
 
 use renamewright_core::{
     EntryIdentitySignal, EntryKind, ExecutionIdentity, JournalEntry, JournalNameGraph,
@@ -88,6 +91,218 @@ impl JournalFrame {
     #[must_use]
     pub fn into_record(self) -> JournalRecord {
         self.record
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalStorageErrorKind {
+    InvalidInitialRecord,
+    AlreadyExists,
+    OpenFailed { io_kind: io::ErrorKind },
+    HeaderAfterStart,
+    RecordAfterTerminal,
+    Codec { kind: JournalCodecErrorKind },
+    WriteFailed { io_kind: io::ErrorKind },
+    SyncFailed { io_kind: io::ErrorKind },
+    WriterPoisoned,
+    SequenceExhausted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JournalStorageError {
+    sequence: u64,
+    kind: JournalStorageErrorKind,
+}
+
+impl JournalStorageError {
+    const fn new(sequence: u64, kind: JournalStorageErrorKind) -> Self {
+        Self { sequence, kind }
+    }
+
+    #[must_use]
+    pub const fn sequence(self) -> u64 {
+        self.sequence
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> JournalStorageErrorKind {
+        self.kind
+    }
+}
+
+impl Display for JournalStorageError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "journal storage operation at sequence {} failed ({:?})",
+            self.sequence, self.kind
+        )
+    }
+}
+
+impl Error for JournalStorageError {}
+
+#[derive(Debug)]
+pub struct JournalWriter {
+    appender: DurableAppender<File>,
+}
+
+impl JournalWriter {
+    pub fn create_new(
+        path: &Path,
+        initial_record: &JournalRecord,
+    ) -> Result<Self, JournalStorageError> {
+        if !matches!(initial_record, JournalRecord::TransactionStarted { .. }) {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::InvalidInitialRecord,
+            ));
+        }
+
+        let file = OpenOptions::new()
+            .append(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| {
+                let kind = if error.kind() == io::ErrorKind::AlreadyExists {
+                    JournalStorageErrorKind::AlreadyExists
+                } else {
+                    JournalStorageErrorKind::OpenFailed {
+                        io_kind: error.kind(),
+                    }
+                };
+                JournalStorageError::new(0, kind)
+            })?;
+        let mut appender = DurableAppender::new(file);
+        appender.append_initial(initial_record)?;
+        Ok(Self { appender })
+    }
+
+    pub fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageError> {
+        self.appender.append(record)
+    }
+
+    #[must_use]
+    pub const fn next_sequence(&self) -> u64 {
+        self.appender.next_sequence
+    }
+
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        self.appender.terminal
+    }
+}
+
+trait JournalSink {
+    fn write_frame(&mut self, frame: &[u8]) -> io::Result<()>;
+    fn sync_all(&self) -> io::Result<()>;
+}
+
+impl JournalSink for File {
+    fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.write_all(frame)
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        File::sync_all(self)
+    }
+}
+
+#[derive(Debug)]
+struct DurableAppender<S> {
+    sink: S,
+    next_sequence: u64,
+    terminal: bool,
+    poisoned: bool,
+}
+
+impl<S: JournalSink> DurableAppender<S> {
+    const fn new(sink: S) -> Self {
+        Self {
+            sink,
+            next_sequence: 0,
+            terminal: false,
+            poisoned: false,
+        }
+    }
+
+    fn append_initial(&mut self, record: &JournalRecord) -> Result<(), JournalStorageError> {
+        if !matches!(record, JournalRecord::TransactionStarted { .. }) {
+            return Err(JournalStorageError::new(
+                self.next_sequence,
+                JournalStorageErrorKind::InvalidInitialRecord,
+            ));
+        }
+        self.append_durable(record)
+    }
+
+    fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageError> {
+        if self.poisoned {
+            return Err(JournalStorageError::new(
+                self.next_sequence,
+                JournalStorageErrorKind::WriterPoisoned,
+            ));
+        }
+        if matches!(record, JournalRecord::TransactionStarted { .. }) {
+            return Err(JournalStorageError::new(
+                self.next_sequence,
+                JournalStorageErrorKind::HeaderAfterStart,
+            ));
+        }
+        if self.terminal {
+            return Err(JournalStorageError::new(
+                self.next_sequence,
+                JournalStorageErrorKind::RecordAfterTerminal,
+            ));
+        }
+        self.append_durable(record)
+    }
+
+    fn append_durable(&mut self, record: &JournalRecord) -> Result<(), JournalStorageError> {
+        let following_sequence = self.next_sequence.checked_add(1).ok_or_else(|| {
+            JournalStorageError::new(
+                self.next_sequence,
+                JournalStorageErrorKind::SequenceExhausted,
+            )
+        })?;
+        let frame_index = usize::try_from(self.next_sequence).map_err(|_| {
+            JournalStorageError::new(
+                self.next_sequence,
+                JournalStorageErrorKind::SequenceExhausted,
+            )
+        })?;
+        let frame = encode_frame(self.next_sequence, record, frame_index).map_err(|error| {
+            JournalStorageError::new(
+                self.next_sequence,
+                JournalStorageErrorKind::Codec { kind: error.kind() },
+            )
+        })?;
+
+        if let Err(error) = self.sink.write_frame(&frame) {
+            self.poisoned = true;
+            return Err(JournalStorageError::new(
+                self.next_sequence,
+                JournalStorageErrorKind::WriteFailed {
+                    io_kind: error.kind(),
+                },
+            ));
+        }
+        if let Err(error) = self.sink.sync_all() {
+            self.poisoned = true;
+            return Err(JournalStorageError::new(
+                self.next_sequence,
+                JournalStorageErrorKind::SyncFailed {
+                    io_kind: error.kind(),
+                },
+            ));
+        }
+
+        self.next_sequence = following_sequence;
+        self.terminal = matches!(
+            record,
+            JournalRecord::TransactionCompleted | JournalRecord::TransactionRolledBack
+        );
+        Ok(())
     }
 }
 
@@ -541,7 +756,7 @@ fn decode_native_name(cursor: &mut PayloadCursor<'_>) -> Result<OsString, Journa
         return Err(cursor.error(JournalCodecErrorKind::InvalidNativeNameEncoding));
     }
     let byte_length = cursor.read_u32()? as usize;
-    if byte_length % 2 != 0 {
+    if !byte_length.is_multiple_of(2) {
         return Err(cursor.error(JournalCodecErrorKind::InvalidNativeNameEncoding));
     }
     let bytes = cursor.take(byte_length)?;
@@ -669,10 +884,156 @@ impl<'a> PayloadCursor<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::crc32_parts;
+    use std::cell::Cell;
+    use std::io;
+
+    use renamewright_core::JournalRecord;
+
+    use super::{DurableAppender, JournalSink, JournalStorageErrorKind, crc32_parts};
+
+    #[derive(Debug, Default)]
+    struct TestSink {
+        frames: Vec<Vec<u8>>,
+        sync_attempts: Cell<usize>,
+        frames_seen_at_sync: Cell<usize>,
+        fail_write: bool,
+        fail_sync: bool,
+    }
+
+    impl JournalSink for TestSink {
+        fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+            if self.fail_write {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "injected write failure",
+                ));
+            }
+            self.frames.push(frame.to_vec());
+            Ok(())
+        }
+
+        fn sync_all(&self) -> io::Result<()> {
+            self.sync_attempts
+                .set(self.sync_attempts.get().saturating_add(1));
+            self.frames_seen_at_sync.set(self.frames.len());
+            if self.fail_sync {
+                Err(io::Error::other("injected sync failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     #[test]
     fn crc32_matches_the_ieee_check_value() {
         assert_eq!(crc32_parts(&[b"123456789"]), 0xcbf4_3926);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_windows_native_name_encoding_on_unix() {
+        let mut cursor = super::PayloadCursor::new(&[2, 0, 0, 0, 0], 0);
+        let error = super::decode_native_name(&mut cursor).err();
+
+        assert!(matches!(
+            error.map(|value| value.kind()),
+            Some(super::JournalCodecErrorKind::InvalidNativeNameEncoding)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_unix_native_name_encoding_on_windows() {
+        let mut cursor = super::PayloadCursor::new(&[1, 0, 0, 0, 0], 0);
+        let error = super::decode_native_name(&mut cursor).err();
+
+        assert!(matches!(
+            error.map(|value| value.kind()),
+            Some(super::JournalCodecErrorKind::InvalidNativeNameEncoding)
+        ));
+    }
+
+    #[test]
+    fn durable_append_writes_before_syncing() -> Result<(), Box<dyn std::error::Error>> {
+        let mut appender = DurableAppender::new(TestSink::default());
+
+        appender.append_initial(&JournalRecord::TransactionStarted {
+            plan_id: renamewright_core::PlanId::new(1),
+            source_generation: 1,
+            step_count: 0,
+            entries: Vec::new(),
+        })?;
+
+        assert_eq!(appender.sink.frames.len(), 1);
+        assert_eq!(appender.sink.sync_attempts.get(), 1);
+        assert_eq!(appender.sink.frames_seen_at_sync.get(), 1);
+        assert_eq!(appender.next_sequence, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn sync_failure_poisons_writer_without_advancing_sequence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sink = TestSink {
+            fail_sync: true,
+            ..TestSink::default()
+        };
+        let mut appender = DurableAppender::new(sink);
+        let initial = JournalRecord::TransactionStarted {
+            plan_id: renamewright_core::PlanId::new(1),
+            source_generation: 1,
+            step_count: 0,
+            entries: Vec::new(),
+        };
+
+        let sync_error = appender
+            .append_initial(&initial)
+            .err()
+            .ok_or("sync failure was accepted")?;
+        assert!(matches!(
+            sync_error.kind(),
+            JournalStorageErrorKind::SyncFailed { .. }
+        ));
+        assert_eq!(appender.next_sequence, 0);
+        assert_eq!(appender.sink.frames.len(), 1);
+
+        let poisoned_error = appender
+            .append(&JournalRecord::ForwardStepPrepared { step_index: 0 })
+            .err()
+            .ok_or("poisoned writer accepted another frame")?;
+        assert_eq!(
+            poisoned_error.kind(),
+            JournalStorageErrorKind::WriterPoisoned
+        );
+        assert_eq!(appender.sink.frames.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn write_failure_poisons_writer_without_attempting_sync()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sink = TestSink {
+            fail_write: true,
+            ..TestSink::default()
+        };
+        let mut appender = DurableAppender::new(sink);
+        let initial = JournalRecord::TransactionStarted {
+            plan_id: renamewright_core::PlanId::new(1),
+            source_generation: 1,
+            step_count: 0,
+            entries: Vec::new(),
+        };
+
+        let error = appender
+            .append_initial(&initial)
+            .err()
+            .ok_or("write failure was accepted")?;
+        assert!(matches!(
+            error.kind(),
+            JournalStorageErrorKind::WriteFailed { .. }
+        ));
+        assert_eq!(appender.next_sequence, 0);
+        assert_eq!(appender.sink.sync_attempts.get(), 0);
+        Ok(())
     }
 }
