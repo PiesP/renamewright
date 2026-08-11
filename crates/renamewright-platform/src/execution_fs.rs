@@ -303,7 +303,7 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
             ));
         }
         let source_path = entry_path(parent, source_name)?;
-        validate_component(target_name)?;
+        let target_path = entry_path(parent, target_name)?;
         let destination_directory = renamewright_windows_native::DirectoryHandle::open(parent)
             .map_err(map_windows_io_error)?;
         let source = renamewright_windows_native::EntryHandle::open_final_component(&source_path)
@@ -323,7 +323,7 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
             destination_directory.as_handle(),
             target_name,
         )
-        .map_err(map_windows_io_error)?;
+        .map_err(|error| map_windows_rename_error(error, &target_path))?;
         let observed_identity = renamewright_windows_native::file_identity(source.as_handle())
             .map(to_execution_identity)
             .map_err(map_windows_io_error)?;
@@ -359,4 +359,16 @@ fn map_windows_io_error(error: std::io::Error) -> ExecutionFsError {
         _ => ExecutionFsErrorKind::IoFailure,
     };
     ExecutionFsError::new(kind, os_code)
+}
+
+#[cfg(windows)]
+fn map_windows_rename_error(error: std::io::Error, target: &Path) -> ExecutionFsError {
+    let mapped = map_windows_io_error(error);
+    if mapped.kind() == ExecutionFsErrorKind::AccessDenied
+        && std::fs::symlink_metadata(target).is_ok()
+    {
+        ExecutionFsError::new(ExecutionFsErrorKind::DestinationExists, mapped.os_code())
+    } else {
+        mapped
+    }
 }

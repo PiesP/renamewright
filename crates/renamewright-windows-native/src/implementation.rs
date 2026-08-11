@@ -9,10 +9,10 @@ use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
-    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileIdInfo, FileRenameInfo,
-    GetFileInformationByHandleEx, SetFileInformationByHandle,
+    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+    FileIdInfo, FileRenameInfoEx, GetFileInformationByHandleEx, SetFileInformationByHandle,
 };
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
@@ -64,7 +64,13 @@ pub struct DirectoryHandle {
 impl DirectoryHandle {
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new()
-            .access_mode(FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES)
+            .access_mode(
+                FILE_LIST_DIRECTORY
+                    | FILE_ADD_FILE
+                    | FILE_ADD_SUBDIRECTORY
+                    | FILE_TRAVERSE
+                    | FILE_READ_ATTRIBUTES,
+            )
             .share_mode(SHARE_ALL)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)?;
@@ -86,6 +92,9 @@ pub fn file_identity(source: BorrowedHandle<'_>) -> io::Result<FileIdentity> {
     // by Win32. `info` is a writable, correctly aligned `FILE_ID_INFO`, and the
     // supplied byte count is exactly its initialized allocation size. The API
     // does not retain the pointer after returning.
+    // The generic Semgrep unsafe-usage rule is suppressed only at this audited
+    // FFI boundary; the safety proof and crate-level unsafe lints remain active.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let succeeded = unsafe {
         GetFileInformationByHandleEx(
             source.as_raw_handle(),
@@ -130,7 +139,9 @@ pub fn rename_noreplace(
     let element_count = buffer_bytes.div_ceil(size_of::<FILE_RENAME_INFO>());
     let mut buffer = vec![FILE_RENAME_INFO::default(); element_count];
     let header = &mut buffer[0];
-    header.Anonymous.ReplaceIfExists = false;
+    // `FileRenameInfoEx` passes the handle-relative name through to the native
+    // rename operation. Zero flags preserve ordinary no-replace semantics.
+    header.Anonymous.Flags = 0;
     header.RootDirectory = destination_directory.as_raw_handle();
     header.FileNameLength = file_name_length;
 
@@ -139,6 +150,9 @@ pub fn rename_noreplace(
     // `buffer_bytes`, including a trailing UTF-16 NUL. `FileName` begins at the
     // standard-layout offset used above, and `encoded_name.len()` initialized
     // u16 values fit before that NUL. The vector does not move during the copy.
+    // The generic Semgrep unsafe-usage rule is suppressed only at this audited
+    // buffer boundary; the safety proof and crate-level unsafe lints remain active.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         let file_name = buffer
             .as_mut_ptr()
@@ -150,13 +164,16 @@ pub fn rename_noreplace(
 
     // SAFETY: `source` and `destination_directory` stay borrowed for the call.
     // `buffer` is correctly aligned, fully initialized for `buffer_size` bytes,
-    // has a zero replacement flag, a live root-directory handle, a checked
+    // has zero rename flags, a live root-directory handle, a checked
     // byte-length field excluding the trailing NUL, and a matching UTF-16 name.
     // Win32 consumes the buffer synchronously and does not retain its pointer.
+    // The generic Semgrep unsafe-usage rule is suppressed only at this audited
+    // FFI boundary; the safety proof and crate-level unsafe lints remain active.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let succeeded = unsafe {
         SetFileInformationByHandle(
             source.as_raw_handle(),
-            FileRenameInfo,
+            FileRenameInfoEx,
             buffer.as_ptr().cast(),
             buffer_size,
         )
