@@ -40,9 +40,10 @@ pub use ledger::{
     MAX_DISCOVERED_JOURNALS, RenameLedger,
 };
 pub use recovery::{
-    PreparedStepDisposition, PreparedStepInspection, RecoveryActionError, RecoveryActionErrorKind,
-    RecoveryInspectionError, RecoveryInspectionErrorKind, RecoveryLocation, RecoveryLocationState,
-    RecoveryObservation, inspect_prepared_step, reconcile_prepared_step,
+    PreparedStepDisposition, PreparedStepInspection, RecoveryAction, RecoveryActionError,
+    RecoveryActionErrorKind, RecoveryInspectionError, RecoveryInspectionErrorKind,
+    RecoveryLocation, RecoveryLocationState, RecoveryObservation, inspect_prepared_step,
+    reconcile_prepared_step, recover_transaction,
 };
 
 /// Filesystem mutation remains unavailable during the planning milestone.

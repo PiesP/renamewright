@@ -1,15 +1,27 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::path::Path;
 
 use renamewright_core::{
-    ExecutionDirection, ExecutionPhase, JournalEntry, JournalRecord, JournalStatus, ScheduleError,
-    SourceId, build_two_phase_schedule, replay_journal,
+    ExecutionDirection, ExecutionPhase, ExecutionStep, JournalEntry, JournalRecord, JournalStatus,
+    RollbackCause, ScheduleError, SourceId, build_two_phase_schedule, replay_journal,
 };
 
-use crate::{
-    ExecutionFileSystem, ExecutionFsErrorKind, JournalStorageErrorKind, JournalWriter, LedgerId,
-    RenameLedger,
+use crate::executor::{
+    ExecutionPlanView, complete_rollback, complete_transaction, continue_forward,
+    continue_rollback, journal_recovery, start_rollback,
 };
+use crate::{
+    ExecutionFileSystem, ExecutionFsErrorKind, ExecutionOutcome, JournalStorageErrorKind,
+    JournalWriter, LedgerId, RenameLedger,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryAction {
+    Resume,
+    Rollback,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveryLocation {
@@ -118,6 +130,9 @@ pub enum RecoveryActionErrorKind {
     Journal { kind: JournalStorageErrorKind },
     Inspection { kind: RecoveryInspectionErrorKind },
     DispositionNotDeterministic,
+    RequiresReconciliation,
+    ActionUnavailable,
+    IdentityStateChanged,
     InvalidProtocol,
 }
 
@@ -284,6 +299,193 @@ pub fn reconcile_prepared_step<F: ExecutionFileSystem + ?Sized>(
             RecoveryActionErrorKind::InvalidProtocol,
         )
     })
+}
+
+pub fn recover_transaction<F, C>(
+    ledger: &RenameLedger,
+    ledger_id: LedgerId,
+    filesystem: &F,
+    action: RecoveryAction,
+    should_cancel: C,
+) -> Result<ExecutionOutcome, RecoveryActionError>
+where
+    F: ExecutionFileSystem + ?Sized,
+    C: Fn() -> bool,
+{
+    let (journal_path, _) = ledger.item(ledger_id).ok_or_else(|| {
+        RecoveryActionError::new(None, RecoveryActionErrorKind::JournalUnavailable)
+    })?;
+    let (mut writer, records) = JournalWriter::resume(journal_path).map_err(|error| {
+        RecoveryActionError::new(
+            None,
+            RecoveryActionErrorKind::Journal { kind: error.kind() },
+        )
+    })?;
+    let status = replay_journal(&records)
+        .map_err(|_| RecoveryActionError::new(None, RecoveryActionErrorKind::InvalidProtocol))?;
+    if matches!(status, JournalStatus::ReconciliationRequired { .. }) {
+        return Err(RecoveryActionError::new(
+            None,
+            RecoveryActionErrorKind::RequiresReconciliation,
+        ));
+    }
+    let plan = RecoveryPlan::from_records(&records)?;
+    validate_recorded_state(&records, &plan, filesystem)?;
+
+    let outcome = match (status, action) {
+        (JournalStatus::ForwardPending { next_step }, RecoveryAction::Resume) => {
+            continue_forward(&plan, filesystem, &mut writer, next_step, &should_cancel)
+        }
+        (JournalStatus::CompletionPending, RecoveryAction::Resume) => {
+            complete_transaction(&mut writer)
+        }
+        (JournalStatus::ForwardPending { next_step }, RecoveryAction::Rollback) => start_rollback(
+            &plan,
+            filesystem,
+            &mut writer,
+            next_step,
+            RollbackCause::RecoveryRequested,
+        ),
+        (JournalStatus::CompletionPending, RecoveryAction::Rollback) => start_rollback(
+            &plan,
+            filesystem,
+            &mut writer,
+            plan.schedule.len(),
+            RollbackCause::RecoveryRequested,
+        ),
+        (JournalStatus::RollbackPending { cause, next_step }, _) => {
+            continue_rollback(&plan, filesystem, &mut writer, next_step, cause)
+        }
+        (JournalStatus::RecoveryRequired { cause, failed_step }, _) => {
+            if let Err(error) = writer.append(&JournalRecord::RollbackRecoveryStarted {
+                step_index: failed_step,
+            }) {
+                journal_recovery(
+                    ExecutionDirection::Rollback,
+                    Some(failed_step),
+                    error.kind(),
+                )
+            } else {
+                continue_rollback(&plan, filesystem, &mut writer, failed_step, cause)
+            }
+        }
+        (JournalStatus::RollbackCompletionPending { cause }, _) => {
+            complete_rollback(&mut writer, cause)
+        }
+        (JournalStatus::Completed | JournalStatus::RolledBack { .. }, _)
+        | (JournalStatus::ReconciliationRequired { .. }, _) => {
+            return Err(RecoveryActionError::new(
+                None,
+                RecoveryActionErrorKind::ActionUnavailable,
+            ));
+        }
+    };
+    Ok(outcome)
+}
+
+struct RecoveryPlan<'a> {
+    entries: &'a [JournalEntry],
+    schedule: Vec<ExecutionStep>,
+}
+
+impl<'a> RecoveryPlan<'a> {
+    fn from_records(records: &'a [JournalRecord]) -> Result<Self, RecoveryActionError> {
+        let entries = header_entries(records)?;
+        if entries.iter().any(|entry| entry.native_parent().is_none()) {
+            return Err(RecoveryActionError::new(
+                None,
+                RecoveryActionErrorKind::Inspection {
+                    kind: RecoveryInspectionErrorKind::MissingNativeParent,
+                },
+            ));
+        }
+        let source_ids = entries
+            .iter()
+            .map(JournalEntry::source_id)
+            .collect::<Vec<_>>();
+        let schedule = build_two_phase_schedule(&source_ids).map_err(|kind| {
+            RecoveryActionError::new(
+                None,
+                RecoveryActionErrorKind::Inspection {
+                    kind: RecoveryInspectionErrorKind::Schedule { kind },
+                },
+            )
+        })?;
+        Ok(Self { entries, schedule })
+    }
+}
+
+impl ExecutionPlanView for RecoveryPlan<'_> {
+    fn schedule(&self) -> &[ExecutionStep] {
+        &self.schedule
+    }
+
+    fn entry(&self, source_id: SourceId) -> Option<(&JournalEntry, &Path)> {
+        self.entries
+            .iter()
+            .find(|entry| entry.source_id() == source_id)
+            .and_then(|entry| entry.native_parent().map(|parent| (entry, parent)))
+    }
+}
+
+fn validate_recorded_state<F: ExecutionFileSystem + ?Sized>(
+    records: &[JournalRecord],
+    plan: &RecoveryPlan<'_>,
+    filesystem: &F,
+) -> Result<(), RecoveryActionError> {
+    let mut expected = plan
+        .entries
+        .iter()
+        .map(|entry| (entry.source_id(), RecoveryLocation::Original))
+        .collect::<BTreeMap<_, _>>();
+    for record in records {
+        let (step_index, direction) = match record {
+            JournalRecord::ForwardStepCompleted { step_index, .. } => {
+                (*step_index, ExecutionDirection::Forward)
+            }
+            JournalRecord::RollbackStepCompleted { step_index, .. } => {
+                (*step_index, ExecutionDirection::Rollback)
+            }
+            _ => continue,
+        };
+        let step = plan.schedule.get(step_index).ok_or_else(|| {
+            RecoveryActionError::new(None, RecoveryActionErrorKind::InvalidProtocol)
+        })?;
+        let (_, target) = step_locations(direction, step.phase());
+        expected.insert(step.source_id(), target);
+    }
+
+    for entry in plan.entries {
+        let parent = entry.native_parent().ok_or_else(|| {
+            RecoveryActionError::new(
+                Some(entry.source_id()),
+                RecoveryActionErrorKind::InvalidProtocol,
+            )
+        })?;
+        let observations = [
+            observe_location(filesystem, parent, entry, RecoveryLocation::Original)?,
+            observe_location(filesystem, parent, entry, RecoveryLocation::Temporary)?,
+            observe_location(filesystem, parent, entry, RecoveryLocation::Final)?,
+        ];
+        let expected_location = expected.get(&entry.source_id()).ok_or_else(|| {
+            RecoveryActionError::new(
+                Some(entry.source_id()),
+                RecoveryActionErrorKind::InvalidProtocol,
+            )
+        })?;
+        let mut owned = observations
+            .iter()
+            .filter(|observation| observation.state() == RecoveryLocationState::TransactionOwned);
+        if owned.next().map(|observation| observation.location()) != Some(*expected_location)
+            || owned.next().is_some()
+        {
+            return Err(RecoveryActionError::new(
+                Some(entry.source_id()),
+                RecoveryActionErrorKind::IdentityStateChanged,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn inspect_prepared_records<F: ExecutionFileSystem + ?Sized>(
