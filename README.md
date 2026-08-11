@@ -33,10 +33,8 @@ pnpm tauri dev
 ```
 
 `pnpm verify` runs frontend formatting, linting, strict types, coverage and build
-checks plus Rustfmt, Clippy, and all Rust workspace tests. See
-[the delivery plan](docs/delivery-plan.md) for the implementation sequence.
-`pnpm verify:full` additionally exercises the rendered flow and responsive
-layouts in Chromium.
+checks plus Rustfmt, Clippy, and all Rust workspace tests. `pnpm verify:full`
+additionally exercises the rendered flow and responsive layouts in Chromium.
 
 ## Product commitments
 
@@ -48,7 +46,3 @@ layouts in Chromium.
 - Native path handling without lossy Unicode conversion.
 - No telemetry, remote content, shell access, or background network traffic in
   the first release.
-
-Read the [product design](docs/product-design.md),
-[architecture](docs/architecture.md), and
-[delivery plan](docs/delivery-plan.md) before implementation.

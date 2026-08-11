@@ -11,6 +11,8 @@
 *.tmp
 
 # Workspace guidance is intentionally local-only.
+/docs/
+/plans/
 /AGENTS.md
 /CODE_STANDARDS.md
 /TESTING.md
