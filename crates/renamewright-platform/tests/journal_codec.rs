@@ -86,6 +86,37 @@ fn round_trips_records_and_preserves_replay_semantics() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn round_trips_undo_lineage_in_the_current_schema() -> Result<(), Box<dyn std::error::Error>> {
+    let undo_of = PlanId::new(41);
+    let record = match transaction_started(OsString::from("original.txt")) {
+        JournalRecord::TransactionStarted {
+            plan_id,
+            source_generation,
+            step_count,
+            entries,
+        } => JournalRecord::TransactionStarted {
+            plan_id,
+            source_generation,
+            step_count,
+            entries: entries
+                .into_iter()
+                .map(|entry| entry.into_undo_of(undo_of))
+                .collect(),
+        },
+        _ => return Err("transaction helper did not produce a header".into()),
+    };
+
+    let frames = decode_journal(&encode_journal(std::slice::from_ref(&record))?)?;
+    assert_eq!(frames[0].schema_version(), JOURNAL_SCHEMA_VERSION);
+    assert_eq!(frames[0].record(), &record);
+    let JournalRecord::TransactionStarted { entries, .. } = frames[0].record() else {
+        return Err("decoded undo journal did not contain a header".into());
+    };
+    assert_eq!(entries[0].undo_of_plan_id(), Some(undo_of));
+    Ok(())
+}
+
+#[test]
 fn reads_and_reproduces_the_version_one_golden_frame() -> Result<(), Box<dyn std::error::Error>> {
     let frames = decode_journal(&GOLDEN_V1_TRANSACTION_COMPLETED)?;
 
@@ -95,8 +126,14 @@ fn reads_and_reproduces_the_version_one_golden_frame() -> Result<(), Box<dyn std
     assert_eq!(frames[0].record(), &JournalRecord::TransactionCompleted);
     let current = encode_journal(&[JournalRecord::TransactionCompleted])?;
     assert_ne!(current, GOLDEN_V1_TRANSACTION_COMPLETED);
-    assert_eq!(u16::from_le_bytes([current[4], current[5]]), 2);
-    assert_eq!(decode_journal(&current)?[0].schema_version(), 2);
+    assert_eq!(
+        u16::from_le_bytes([current[4], current[5]]),
+        JOURNAL_SCHEMA_VERSION
+    );
+    assert_eq!(
+        decode_journal(&current)?[0].schema_version(),
+        JOURNAL_SCHEMA_VERSION
+    );
     Ok(())
 }
 
@@ -113,7 +150,7 @@ fn rejects_mixed_schema_versions() -> Result<(), Box<dyn std::error::Error>> {
         error.kind(),
         JournalCodecErrorKind::MixedVersion {
             expected: 1,
-            actual: 2,
+            actual: JOURNAL_SCHEMA_VERSION,
         }
     );
     Ok(())

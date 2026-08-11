@@ -11,8 +11,9 @@ use renamewright_core::{
     SourceFingerprint, SourceId, replay_journal,
 };
 
-pub const JOURNAL_SCHEMA_VERSION: u16 = 2;
+pub const JOURNAL_SCHEMA_VERSION: u16 = 3;
 pub const MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION: u16 = 1;
+const MIN_RESUMABLE_JOURNAL_SCHEMA_VERSION: u16 = 2;
 pub const MAX_JOURNAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_JOURNAL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -298,7 +299,9 @@ impl JournalWriter {
                 },
             ));
         };
-        if first.schema_version() != JOURNAL_SCHEMA_VERSION {
+        if !(MIN_RESUMABLE_JOURNAL_SCHEMA_VERSION..=JOURNAL_SCHEMA_VERSION)
+            .contains(&first.schema_version())
+        {
             return Err(JournalStorageError::new(
                 0,
                 JournalStorageErrorKind::ResumeVersion {
@@ -306,6 +309,7 @@ impl JournalWriter {
                 },
             ));
         }
+        let schema_version = first.schema_version();
         let records = frames
             .into_iter()
             .map(JournalFrame::into_record)
@@ -330,7 +334,7 @@ impl JournalWriter {
         })?;
         Ok((
             Self {
-                appender: DurableAppender::resume(file, next_sequence),
+                appender: DurableAppender::resume(file, next_sequence, schema_version),
             },
             records,
         ))
@@ -372,6 +376,7 @@ struct DurableAppender<S> {
     next_sequence: u64,
     terminal: bool,
     poisoned: bool,
+    schema_version: u16,
 }
 
 impl<S: JournalSink> DurableAppender<S> {
@@ -381,15 +386,17 @@ impl<S: JournalSink> DurableAppender<S> {
             next_sequence: 0,
             terminal: false,
             poisoned: false,
+            schema_version: JOURNAL_SCHEMA_VERSION,
         }
     }
 
-    const fn resume(sink: S, next_sequence: u64) -> Self {
+    const fn resume(sink: S, next_sequence: u64, schema_version: u16) -> Self {
         Self {
             sink,
             next_sequence,
             terminal: false,
             poisoned: false,
+            schema_version,
         }
     }
 
@@ -438,12 +445,14 @@ impl<S: JournalSink> DurableAppender<S> {
                 JournalStorageErrorKind::SequenceExhausted,
             )
         })?;
-        let frame = encode_frame(self.next_sequence, record, frame_index).map_err(|error| {
-            JournalStorageError::new(
-                self.next_sequence,
-                JournalStorageErrorKind::Codec { kind: error.kind() },
-            )
-        })?;
+        let frame =
+            encode_frame_for_version(self.next_sequence, record, frame_index, self.schema_version)
+                .map_err(|error| {
+                    JournalStorageError::new(
+                        self.next_sequence,
+                        JournalStorageErrorKind::Codec { kind: error.kind() },
+                    )
+                })?;
 
         if let Err(error) = self.sink.write_frame(&frame) {
             self.poisoned = true;
@@ -869,6 +878,20 @@ fn encode_entry(
             None => payload.push(0),
         }
     }
+    if schema_version >= 3 {
+        match entry.undo_of_plan_id() {
+            Some(plan_id) => {
+                payload.push(1);
+                put_u64(payload, plan_id.value());
+            }
+            None => payload.push(0),
+        }
+    } else if entry.undo_of_plan_id().is_some() {
+        return Err(JournalCodecError::new(
+            frame_index,
+            JournalCodecErrorKind::InvalidPayload,
+        ));
+    }
     Ok(())
 }
 
@@ -894,8 +917,17 @@ fn decode_entry(
     } else {
         None
     };
+    let undo_of_plan_id = if schema_version >= 3 {
+        match cursor.read_u8()? {
+            0 => None,
+            1 => Some(PlanId::new(cursor.read_u64()?)),
+            _ => return Err(cursor.error(JournalCodecErrorKind::InvalidPayload)),
+        }
+    } else {
+        None
+    };
     let entry = JournalEntry::new(source_id, parent_id, names, fingerprint, execution_identity);
-    Ok(native_parent.map_or(entry.clone(), |parent| {
+    let entry = native_parent.map_or(entry.clone(), |parent| {
         JournalEntry::with_native_parent(
             entry.source_id(),
             entry.parent_id(),
@@ -904,7 +936,8 @@ fn decode_entry(
             entry.execution_identity(),
             parent,
         )
-    }))
+    });
+    Ok(undo_of_plan_id.map_or(entry.clone(), |plan_id| entry.into_undo_of(plan_id)))
 }
 
 fn encode_fingerprint(payload: &mut Vec<u8>, fingerprint: &SourceFingerprint) {
@@ -1198,6 +1231,7 @@ impl<'a> PayloadCursor<'a> {
 mod tests {
     use std::cell::Cell;
     use std::ffi::OsString;
+    use std::fs;
     use std::io;
 
     use renamewright_core::{
@@ -1206,8 +1240,8 @@ mod tests {
     };
 
     use super::{
-        DurableAppender, JournalSink, JournalStorageErrorKind, crc32_parts, decode_journal,
-        encode_frame_for_version,
+        DurableAppender, JournalCodecErrorKind, JournalSink, JournalStorageErrorKind,
+        JournalWriter, crc32_parts, decode_journal, encode_frame_for_version,
     };
 
     #[derive(Debug, Default)]
@@ -1278,6 +1312,78 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].native_parent(), None);
         Ok(())
+    }
+
+    #[test]
+    fn schema_two_header_remains_readable_without_undo_lineage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let record = transaction_started_with_native_parent(None);
+        let bytes = encode_frame_for_version(0, &record, 0, 2)?;
+        let frames = decode_journal(&bytes)?;
+        let JournalRecord::TransactionStarted { entries, .. } = frames[0].record() else {
+            return Err("schema-two header changed record kind".into());
+        };
+
+        assert_eq!(frames[0].schema_version(), 2);
+        assert_eq!(
+            entries[0].native_parent(),
+            Some(std::path::Path::new("native-parent"))
+        );
+        assert_eq!(entries[0].undo_of_plan_id(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn schema_two_encoding_rejects_undo_lineage() {
+        let record = transaction_started_with_native_parent(Some(PlanId::new(9)));
+        let error = encode_frame_for_version(0, &record, 0, 2).err();
+
+        assert_eq!(
+            error.map(|value| value.kind()),
+            Some(JournalCodecErrorKind::InvalidPayload)
+        );
+    }
+
+    #[test]
+    fn resuming_schema_two_keeps_appended_frames_on_schema_two()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("schema-two.rwj");
+        fs::write(
+            &path,
+            encode_frame_for_version(0, &transaction_started_with_native_parent(None), 0, 2)?,
+        )?;
+
+        let (mut writer, _) = JournalWriter::resume(&path)?;
+        writer.append(&JournalRecord::ForwardStepPrepared { step_index: 0 })?;
+        drop(writer);
+
+        let frames = decode_journal(&fs::read(path)?)?;
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().all(|frame| frame.schema_version() == 2));
+        Ok(())
+    }
+
+    fn transaction_started_with_native_parent(undo_of: Option<PlanId>) -> JournalRecord {
+        let entry = JournalEntry::with_native_parent(
+            SourceId::new(3),
+            ParentId::new(4),
+            JournalNameGraph::new(
+                OsString::from("original.txt"),
+                OsString::from("temporary.tmp"),
+                OsString::from("final.txt"),
+            ),
+            SourceFingerprint::new(EntryKind::File, None, 5, None),
+            ExecutionIdentity::new(6, [7; 16]),
+            std::path::PathBuf::from("native-parent"),
+        );
+        let entry = undo_of.map_or(entry.clone(), |plan_id| entry.into_undo_of(plan_id));
+        JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(1),
+            source_generation: 2,
+            step_count: 2,
+            entries: vec![entry],
+        }
     }
 
     #[cfg(unix)]

@@ -175,6 +175,7 @@ pub struct JournalEntry {
     admission_fingerprint: SourceFingerprint,
     execution_identity: ExecutionIdentity,
     native_parent: Option<PathBuf>,
+    undo_of_plan_id: Option<PlanId>,
 }
 
 impl JournalEntry {
@@ -193,6 +194,7 @@ impl JournalEntry {
             admission_fingerprint,
             execution_identity,
             native_parent: None,
+            undo_of_plan_id: None,
         }
     }
 
@@ -212,7 +214,14 @@ impl JournalEntry {
             admission_fingerprint,
             execution_identity,
             native_parent: Some(native_parent),
+            undo_of_plan_id: None,
         }
+    }
+
+    #[must_use]
+    pub fn into_undo_of(mut self, plan_id: PlanId) -> Self {
+        self.undo_of_plan_id = Some(plan_id);
+        self
     }
 
     #[must_use]
@@ -243,6 +252,11 @@ impl JournalEntry {
     #[must_use]
     pub fn native_parent(&self) -> Option<&Path> {
         self.native_parent.as_deref()
+    }
+
+    #[must_use]
+    pub const fn undo_of_plan_id(&self) -> Option<PlanId> {
+        self.undo_of_plan_id
     }
 }
 
