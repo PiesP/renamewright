@@ -53,6 +53,13 @@ function fakeClient(): PlanningClient {
       throw new Error('No recovery action fixture was configured.');
     },
     cancelRecovery: async () => false,
+    inspectUndo: async () => {
+      throw new Error('No Undo fixture was configured.');
+    },
+    applyUndo: async () => {
+      throw new Error('No Undo action fixture was configured.');
+    },
+    cancelUndo: async () => false,
     watchSourceChanges: () => () => undefined,
   };
 }
@@ -70,6 +77,8 @@ test('runs a path-free startup ledger action only after inspection', async () =>
       status: 'reconciliationRequired',
       attentionStep: 2,
       recoveryAvailable: true,
+      undoOfPlanId: null,
+      undoAvailable: false,
     },
   ];
   const inspection = {
@@ -96,6 +105,8 @@ test('runs a path-free startup ledger action only after inspection', async () =>
         status: 'forwardPending' as const,
         attentionStep: 2,
         recoveryAvailable: true,
+        undoOfPlanId: null,
+        undoAvailable: false,
       },
     ],
   }));
@@ -132,6 +143,8 @@ test('offers resume and rollback only when the fresh inspection allows them', as
       status: 'forwardPending',
       attentionStep: 1,
       recoveryAvailable: true,
+      undoOfPlanId: null,
+      undoAvailable: false,
     },
   ];
   client.inspectRecovery = async () => ({
@@ -166,6 +179,8 @@ test('requests cancellation only while forward recovery is active', async () => 
       status: 'forwardPending',
       attentionStep: 1,
       recoveryAvailable: true,
+      undoOfPlanId: null,
+      undoAvailable: false,
     },
   ];
   const inspection = {
@@ -224,6 +239,8 @@ test('requests cancellation only while forward recovery is active', async () => 
         status: 'rolledBack',
         attentionStep: null,
         recoveryAvailable: false,
+        undoOfPlanId: null,
+        undoAvailable: false,
       },
     ],
   });
@@ -234,6 +251,167 @@ test('requests cancellation only while forward recovery is active', async () => 
     })
   ).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Cancel and roll back' })).not.toBeInTheDocument();
+});
+
+test('runs Undo only from a fresh path-free inspection', async () => {
+  const user = userEvent.setup();
+  const client = fakeClient();
+  client.listLedger = async () => [
+    {
+      ledgerId: 4,
+      planId: 80,
+      sourceGeneration: 6,
+      schemaVersion: 3,
+      sourceCount: 3,
+      status: 'completed',
+      attentionStep: null,
+      recoveryAvailable: false,
+      undoOfPlanId: null,
+      undoAvailable: true,
+    },
+  ];
+  const inspection = {
+    ledgerId: 4,
+    originalPlanId: 80,
+    sourceCount: 3,
+    readiness: 'ready',
+    blockReason: null,
+    undoAvailable: true,
+  } as const;
+  client.inspectUndo = async () => inspection;
+  const applyUndo = vi.fn(async () => ({
+    performed: true,
+    outcome: 'completed' as const,
+    ledger: [
+      {
+        ledgerId: 4,
+        planId: 80,
+        sourceGeneration: 6,
+        schemaVersion: 3,
+        sourceCount: 3,
+        status: 'completed' as const,
+        attentionStep: null,
+        recoveryAvailable: false,
+        undoOfPlanId: null,
+        undoAvailable: false,
+      },
+      {
+        ledgerId: 5,
+        planId: 81,
+        sourceGeneration: 6,
+        schemaVersion: 3,
+        sourceCount: 3,
+        status: 'completed' as const,
+        attentionStep: null,
+        recoveryAvailable: false,
+        undoOfPlanId: 80,
+        undoAvailable: false,
+      },
+    ],
+  }));
+  client.applyUndo = applyUndo;
+
+  render(() => <App client={client} />);
+
+  await user.click(await screen.findByRole('button', { name: 'Inspect plan 80 Undo' }));
+  expect(await screen.findByText('Undo checks passed')).toBeInTheDocument();
+  expect(screen.getByText('Plan 80 · 3 sources')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Undo rename' }));
+
+  expect(applyUndo).toHaveBeenCalledWith(inspection);
+  expect(await screen.findByText('Undo of plan 80')).toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent(
+    'The completed rename transaction was undone.'
+  );
+  expect(screen.queryByText('Undo checks passed')).not.toBeInTheDocument();
+});
+
+test('explains why a fresh Undo inspection is blocked', async () => {
+  const user = userEvent.setup();
+  const client = fakeClient();
+  client.listLedger = async () => [
+    {
+      ledgerId: 5,
+      planId: 82,
+      sourceGeneration: 7,
+      schemaVersion: 3,
+      sourceCount: 1,
+      status: 'completed',
+      attentionStep: null,
+      recoveryAvailable: false,
+      undoOfPlanId: null,
+      undoAvailable: true,
+    },
+  ];
+  client.inspectUndo = async () => ({
+    ledgerId: 5,
+    originalPlanId: 82,
+    sourceCount: 1,
+    readiness: 'blocked',
+    blockReason: 'destinationOccupied',
+    undoAvailable: false,
+  });
+
+  render(() => <App client={client} />);
+
+  await user.click(await screen.findByRole('button', { name: 'Inspect plan 82 Undo' }));
+  expect(await screen.findByText('Undo is blocked')).toBeInTheDocument();
+  expect(screen.getByText(/original name is occupied/iu)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Undo rename' })).not.toBeInTheDocument();
+});
+
+test('refreshes the ledger after an Undo command error', async () => {
+  const user = userEvent.setup();
+  const client = fakeClient();
+  const original = {
+    ledgerId: 6,
+    planId: 84,
+    sourceGeneration: 8,
+    schemaVersion: 3,
+    sourceCount: 1,
+    status: 'completed' as const,
+    attentionStep: null,
+    recoveryAvailable: false,
+    undoOfPlanId: null,
+    undoAvailable: true,
+  };
+  const interruptedUndo = {
+    ledgerId: 7,
+    planId: 85,
+    sourceGeneration: 8,
+    schemaVersion: 3,
+    sourceCount: 1,
+    status: 'recoveryRequired' as const,
+    attentionStep: 0,
+    recoveryAvailable: true,
+    undoOfPlanId: 84,
+    undoAvailable: false,
+  };
+  client.listLedger = vi
+    .fn()
+    .mockResolvedValueOnce([original])
+    .mockResolvedValueOnce([{ ...original, undoAvailable: false }, interruptedUndo]);
+  client.inspectUndo = async () => ({
+    ledgerId: 6,
+    originalPlanId: 84,
+    sourceCount: 1,
+    readiness: 'ready',
+    blockReason: null,
+    undoAvailable: true,
+  });
+  client.applyUndo = async () => {
+    throw new Error('Undo stopped safely. Inspect the Rename Ledger before continuing.');
+  };
+
+  render(() => <App client={client} />);
+
+  await user.click(await screen.findByRole('button', { name: 'Inspect plan 84 Undo' }));
+  await user.click(await screen.findByRole('button', { name: 'Undo rename' }));
+
+  expect(await screen.findByText('Undo of plan 84')).toBeInTheDocument();
+  expect(screen.getByText('Recovery required')).toBeInTheDocument();
+  expect(screen.queryByText('Undo checks passed')).not.toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent('Undo stopped safely');
 });
 
 test('loads sample sources and previews a prefix rule', async () => {

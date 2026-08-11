@@ -192,6 +192,32 @@ impl FrozenExecutionPlan {
                 (&entry.journal_entry, entry.parent.as_path())
             })
     }
+
+    pub(crate) fn from_entries(
+        plan_id: PlanId,
+        source_generation: u64,
+        entries: Vec<(JournalEntry, PathBuf)>,
+    ) -> Result<Self, ScheduleError> {
+        let mut entries = entries
+            .into_iter()
+            .map(|(journal_entry, parent)| FrozenExecutionEntry {
+                journal_entry,
+                parent,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.journal_entry.source_id());
+        let source_ids = entries
+            .iter()
+            .map(|entry| entry.journal_entry.source_id())
+            .collect::<Vec<_>>();
+        let schedule = build_two_phase_schedule(&source_ids)?;
+        Ok(Self {
+            plan_id,
+            source_generation,
+            entries,
+            schedule,
+        })
+    }
 }
 
 pub(crate) trait ExecutionPlanView {
@@ -593,7 +619,7 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
     })
 }
 
-fn available_temporary_name<F: ExecutionFileSystem + ?Sized>(
+pub(crate) fn available_temporary_name<F: ExecutionFileSystem + ?Sized>(
     filesystem: &F,
     parent: &Path,
     plan_id: PlanId,

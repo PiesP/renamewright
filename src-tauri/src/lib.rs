@@ -13,8 +13,10 @@ use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
     FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, NativeExecutionFileSystem,
     PreparedStepDisposition, RecoveryAction, RecoveryReadiness, RecoveryTransactionInspection,
-    RenameLedger, SourceRegistry, execute_frozen_plan, freeze_execution_plan,
-    inspect_recovery_transaction, reconcile_prepared_step, recover_transaction,
+    RenameLedger, SourceRegistry, UndoBlockReason, UndoReadiness, UndoTransactionInspection,
+    execute_frozen_plan, execute_prepared_undo, freeze_execution_plan,
+    inspect_recovery_transaction, inspect_undo_transaction, prepare_undo_transaction,
+    reconcile_prepared_step, recover_transaction,
 };
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use serde::{Deserialize, Serialize};
@@ -168,6 +170,67 @@ struct LedgerEntryDto {
     status: &'static str,
     attention_step: Option<usize>,
     recovery_available: bool,
+    undo_of_plan_id: Option<u64>,
+    undo_available: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UndoInspectionDto {
+    ledger_id: u64,
+    original_plan_id: u64,
+    source_count: usize,
+    readiness: String,
+    block_reason: Option<String>,
+    undo_available: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct UndoRequestDto {
+    inspection: UndoInspectionDto,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UndoCommandResultDto {
+    performed: bool,
+    outcome: &'static str,
+    ledger: Vec<LedgerEntryDto>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UndoCommandErrorKind {
+    Busy,
+    StateUnavailable,
+    InspectionChanged,
+    ActionUnavailable,
+    UndoFailed,
+    LedgerRefreshFailed,
+}
+
+impl UndoCommandErrorKind {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::StateUnavailable => "stateUnavailable",
+            Self::InspectionChanged => "inspectionChanged",
+            Self::ActionUnavailable => "actionUnavailable",
+            Self::UndoFailed => "undoFailed",
+            Self::LedgerRefreshFailed => "ledgerRefreshFailed",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct UndoCommandErrorDto {
+    code: &'static str,
+}
+
+impl From<UndoCommandErrorKind> for UndoCommandErrorDto {
+    fn from(kind: UndoCommandErrorKind) -> Self {
+        Self { code: kind.code() }
+    }
 }
 
 #[derive(Serialize)]
@@ -410,6 +473,27 @@ fn inspect_recovery(
 }
 
 #[tauri::command]
+fn inspect_undo(
+    ledger_id: u64,
+    state: State<'_, AppState>,
+) -> Result<UndoInspectionDto, UndoCommandErrorDto> {
+    let mut ledger = state
+        .ledger
+        .lock()
+        .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
+    ledger
+        .refresh()
+        .map_err(|_| UndoCommandErrorKind::LedgerRefreshFailed)?;
+    inspect_undo_transaction(
+        &ledger,
+        LedgerId::from_value(ledger_id),
+        &NativeExecutionFileSystem::new(),
+    )
+    .map(UndoInspectionDto::from)
+    .map_err(|_| UndoCommandErrorDto::from(UndoCommandErrorKind::ActionUnavailable))
+}
+
+#[tauri::command]
 async fn apply_recovery_action(
     request: RecoveryRequestDto,
     app: AppHandle,
@@ -429,8 +513,33 @@ async fn apply_recovery_action(
 }
 
 #[tauri::command]
+async fn apply_undo(
+    request: UndoRequestDto,
+    app: AppHandle,
+) -> Result<UndoCommandResultDto, UndoCommandErrorDto> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        perform_undo_request(
+            &state,
+            &request,
+            &NativeExecutionFileSystem::new(),
+            |inspection| confirm_undo(&app, inspection),
+        )
+        .map_err(UndoCommandErrorDto::from)
+    })
+    .await
+    .map_err(|_| UndoCommandErrorDto::from(UndoCommandErrorKind::StateUnavailable))?
+}
+
+#[tauri::command]
 fn cancel_recovery(state: State<'_, AppState>) -> Result<bool, RecoveryCommandErrorDto> {
     request_recovery_cancellation(&state).map_err(RecoveryCommandErrorDto::from)
+}
+
+#[tauri::command]
+fn cancel_undo(state: State<'_, AppState>) -> Result<bool, UndoCommandErrorDto> {
+    request_recovery_cancellation(&state)
+        .map_err(|_| UndoCommandErrorDto::from(UndoCommandErrorKind::StateUnavailable))
 }
 
 #[tauri::command]
@@ -583,6 +692,25 @@ impl From<LedgerEntry> for LedgerEntryDto {
             status: ledger_status_name(entry.status()),
             attention_step: entry.attention_step(),
             recovery_available: entry.recovery_available(),
+            undo_of_plan_id: entry.undo_of_plan_id().map(PlanId::value),
+            undo_available: entry.undo_available(),
+        }
+    }
+}
+
+impl From<UndoTransactionInspection> for UndoInspectionDto {
+    fn from(inspection: UndoTransactionInspection) -> Self {
+        let (readiness, block_reason) = match inspection.readiness() {
+            UndoReadiness::Ready => ("ready", None),
+            UndoReadiness::Blocked { reason } => ("blocked", Some(undo_block_reason_name(reason))),
+        };
+        Self {
+            ledger_id: inspection.ledger_id().value(),
+            original_plan_id: inspection.original_plan_id().value(),
+            source_count: inspection.source_count(),
+            readiness: readiness.to_owned(),
+            block_reason: block_reason.map(str::to_owned),
+            undo_available: inspection.undo_available(),
         }
     }
 }
@@ -707,6 +835,114 @@ where
     })
 }
 
+fn perform_undo_request<F, C>(
+    state: &AppState,
+    request: &UndoRequestDto,
+    filesystem: &F,
+    confirm: C,
+) -> Result<UndoCommandResultDto, UndoCommandErrorKind>
+where
+    F: ExecutionFileSystem + ?Sized,
+    C: FnOnce(UndoTransactionInspection) -> bool,
+{
+    let _mutation_guard = match state.mutation_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => return Err(UndoCommandErrorKind::Busy),
+        Err(TryLockError::Poisoned(_)) => return Err(UndoCommandErrorKind::StateUnavailable),
+    };
+    let ledger_id = LedgerId::from_value(request.inspection.ledger_id);
+    let inspection = {
+        let mut ledger = state
+            .ledger
+            .lock()
+            .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
+        validate_undo_expectation(&mut ledger, request, ledger_id, filesystem)?
+    };
+    if !confirm(inspection) {
+        let mut ledger = state
+            .ledger
+            .lock()
+            .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
+        ledger
+            .refresh()
+            .map_err(|_| UndoCommandErrorKind::LedgerRefreshFailed)?;
+        return Ok(UndoCommandResultDto {
+            performed: false,
+            outcome: "cancelled",
+            ledger: ledger.entries().map(LedgerEntryDto::from).collect(),
+        });
+    }
+
+    let mut ledger = state
+        .ledger
+        .lock()
+        .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
+    validate_undo_expectation(&mut ledger, request, ledger_id, filesystem)?;
+    let plan_id = allocate_transaction_plan_id(state, &ledger)?;
+    let prepared = prepare_undo_transaction(&ledger, ledger_id, plan_id, filesystem)
+        .map_err(|_| UndoCommandErrorKind::InspectionChanged)?;
+    let recovery_session =
+        RecoverySession::begin(&state.recovery_control, true).map_err(|kind| match kind {
+            RecoveryCommandErrorKind::Busy => UndoCommandErrorKind::Busy,
+            _ => UndoCommandErrorKind::StateUnavailable,
+        })?;
+    let action_result =
+        execute_prepared_undo(prepared, filesystem, || recovery_session.cancel_requested());
+    let refresh_result = ledger.refresh();
+    let outcome = action_result
+        .map(recovery_outcome_name)
+        .map_err(|_| UndoCommandErrorKind::UndoFailed)?;
+    refresh_result.map_err(|_| UndoCommandErrorKind::LedgerRefreshFailed)?;
+    Ok(UndoCommandResultDto {
+        performed: true,
+        outcome,
+        ledger: ledger.entries().map(LedgerEntryDto::from).collect(),
+    })
+}
+
+fn validate_undo_expectation<F>(
+    ledger: &mut RenameLedger,
+    request: &UndoRequestDto,
+    ledger_id: LedgerId,
+    filesystem: &F,
+) -> Result<UndoTransactionInspection, UndoCommandErrorKind>
+where
+    F: ExecutionFileSystem + ?Sized,
+{
+    ledger
+        .refresh()
+        .map_err(|_| UndoCommandErrorKind::LedgerRefreshFailed)?;
+    let inspection = inspect_undo_transaction(ledger, ledger_id, filesystem)
+        .map_err(|_| UndoCommandErrorKind::InspectionChanged)?;
+    if UndoInspectionDto::from(inspection) != request.inspection {
+        return Err(UndoCommandErrorKind::InspectionChanged);
+    }
+    if !inspection.undo_available() {
+        return Err(UndoCommandErrorKind::ActionUnavailable);
+    }
+    Ok(inspection)
+}
+
+fn allocate_transaction_plan_id(
+    state: &AppState,
+    ledger: &RenameLedger,
+) -> Result<PlanId, UndoCommandErrorKind> {
+    let after_ledger = ledger
+        .entries()
+        .filter_map(LedgerEntry::plan_id)
+        .map(PlanId::value)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut next = state
+        .next_plan_id
+        .lock()
+        .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
+    let value = (*next).max(after_ledger);
+    *next = value.saturating_add(1);
+    Ok(PlanId::new(value))
+}
+
 fn validate_recovery_expectation<F>(
     ledger: &mut RenameLedger,
     request: &RecoveryRequestDto,
@@ -783,6 +1019,22 @@ fn confirm_recovery_action(
     let mut dialog = MessageDialog::new()
         .set_level(MessageLevel::Warning)
         .set_title("Confirm Renamewright recovery")
+        .set_description(description)
+        .set_buttons(MessageButtons::YesNo);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    dialog.show() == MessageDialogResult::Yes
+}
+
+fn confirm_undo(app: &AppHandle, inspection: UndoTransactionInspection) -> bool {
+    let description = format!(
+        "Undo this completed rename transaction for {} source(s)? Renamewright will recheck every file identity, create a separate recovery journal, and will not replace existing destinations.",
+        inspection.source_count()
+    );
+    let mut dialog = MessageDialog::new()
+        .set_level(MessageLevel::Warning)
+        .set_title("Confirm Renamewright Undo")
         .set_description(description)
         .set_buttons(MessageButtons::YesNo);
     if let Some(window) = app.get_webview_window("main") {
@@ -925,6 +1177,13 @@ const fn disposition_name(disposition: PreparedStepDisposition) -> &'static str 
     }
 }
 
+const fn undo_block_reason_name(reason: UndoBlockReason) -> &'static str {
+    match reason {
+        UndoBlockReason::SourceChanged => "sourceChanged",
+        UndoBlockReason::DestinationOccupied => "destinationOccupied",
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -939,6 +1198,17 @@ pub fn run() {
                 .map_err(|_| "the journal directory could not be prepared")?;
             let ledger = RenameLedger::discover(&journal_root)
                 .map_err(|_| "the rename ledger could not be loaded")?;
+            let next_plan_id = ledger
+                .entries()
+                .filter_map(LedgerEntry::plan_id)
+                .map(PlanId::value)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            *app.state::<AppState>()
+                .next_plan_id
+                .lock()
+                .map_err(|_| "the plan sequence is unavailable")? = next_plan_id;
             *app.state::<AppState>()
                 .ledger
                 .lock()
@@ -960,8 +1230,11 @@ pub fn run() {
             poll_source_changes,
             list_ledger,
             inspect_recovery,
+            inspect_undo,
             apply_recovery_action,
+            apply_undo,
             cancel_recovery,
+            cancel_undo,
             inspect_plan,
             export_plan
         ])
@@ -986,8 +1259,8 @@ mod tests {
     };
     #[cfg(target_os = "linux")]
     use renamewright_platform::{
-        ExecutionOutcome, LinuxExecutionFileSystem, freeze_execution_plan,
-        inspect_recovery_transaction,
+        ExecutionOutcome, LinuxExecutionFileSystem, execute_frozen_plan, freeze_execution_plan,
+        inspect_recovery_transaction, inspect_undo_transaction,
     };
 
     use super::{
@@ -998,7 +1271,8 @@ mod tests {
     use super::{
         PrepareExecutionError, RecoveryCommandAction, RecoveryCommandErrorKind,
         RecoveryExpectationDto, RecoveryInspectionDto, RecoveryRequestDto, RecoverySession,
-        perform_recovery_request, prepare_latest_execution, request_recovery_cancellation,
+        UndoCommandErrorKind, UndoInspectionDto, UndoRequestDto, perform_recovery_request,
+        perform_undo_request, prepare_latest_execution, request_recovery_cancellation,
     };
 
     #[test]
@@ -1243,6 +1517,109 @@ mod tests {
         assert!(!serialized.contains("private-source"));
         assert!(!serialized.contains("private-final"));
         assert!(!serialized.contains("private-journal"));
+        assert!(!serialized.contains(&directory.path().display().to_string()));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn undo_command_requires_fresh_pathless_inspection_and_native_confirmation()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("private-source.txt");
+        fs::write(&source, b"source")?;
+        let mut registry = renamewright_platform::SourceRegistry::new();
+        registry.admit_paths([source.clone()])?;
+        let plan = build_plan_with_environment(
+            PlanId::new(79),
+            registry.generation(),
+            &registry.snapshots(),
+            &[RenameRule::prefix("private-final-")],
+            TargetPolicy::windows(),
+            &registry.validation_environment(),
+        );
+        let filesystem = LinuxExecutionFileSystem::new();
+        let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
+        assert_eq!(
+            execute_frozen_plan(
+                frozen,
+                &filesystem,
+                &directory.path().join("private-original-journal.rwj"),
+                || false,
+            )?,
+            ExecutionOutcome::Completed
+        );
+        let state = AppState::default();
+        *state.ledger.lock().map_err(|_| "ledger lock failed")? =
+            renamewright_platform::RenameLedger::discover(directory.path())?;
+        let inspection = {
+            let ledger = state.ledger.lock().map_err(|_| "ledger lock failed")?;
+            let ledger_id = ledger
+                .entries()
+                .next()
+                .ok_or("ledger was empty")?
+                .ledger_id();
+            inspect_undo_transaction(&ledger, ledger_id, &filesystem)?
+        };
+        let request = UndoRequestDto {
+            inspection: UndoInspectionDto::from(inspection),
+        };
+        let serialized = serde_json::to_string(&request.inspection)?;
+        assert!(serialized.contains("\"undoAvailable\":true"));
+        assert!(!serialized.contains("private-source"));
+        assert!(!serialized.contains("private-final"));
+        assert!(!serialized.contains(&directory.path().display().to_string()));
+
+        let cancelled = perform_undo_request(&state, &request, &filesystem, |_| false)
+            .map_err(|_| "cancelled undo request failed")?;
+        assert!(!cancelled.performed);
+        assert_eq!(cancelled.outcome, "cancelled");
+        assert!(
+            directory
+                .path()
+                .join("private-final-private-source.txt")
+                .exists()
+        );
+
+        let mut stale = request.clone();
+        stale.inspection.source_count = usize::MAX;
+        let confirmation_called = Cell::new(false);
+        let error = perform_undo_request(&state, &stale, &filesystem, |_| {
+            confirmation_called.set(true);
+            true
+        })
+        .err()
+        .ok_or("a stale undo inspection was accepted")?;
+        assert_eq!(error, UndoCommandErrorKind::InspectionChanged);
+        assert!(!confirmation_called.get());
+
+        let ledger_available_during_confirmation = Cell::new(false);
+        let occupant_created = Cell::new(false);
+        let result = perform_undo_request(&state, &request, &filesystem, |_| {
+            ledger_available_during_confirmation.set(state.ledger.try_lock().is_ok());
+            occupant_created.set(fs::write(&source, b"occupant").is_ok());
+            true
+        });
+        assert!(ledger_available_during_confirmation.get());
+        assert!(occupant_created.get());
+        assert_eq!(result.err(), Some(UndoCommandErrorKind::InspectionChanged));
+        fs::remove_file(&source)?;
+
+        let completed = perform_undo_request(&state, &request, &filesystem, |_| true)
+            .map_err(|_| "confirmed undo request failed")?;
+        assert!(completed.performed);
+        assert_eq!(completed.outcome, "completed");
+        assert_eq!(fs::read(&source)?, b"source");
+        assert!(
+            !directory
+                .path()
+                .join("private-final-private-source.txt")
+                .exists()
+        );
+        let serialized = serde_json::to_string(&completed)?;
+        assert!(!serialized.contains("private-source"));
+        assert!(!serialized.contains("private-final"));
+        assert!(!serialized.contains("private-original-journal"));
         assert!(!serialized.contains(&directory.path().display().to_string()));
         Ok(())
     }
