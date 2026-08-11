@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use renamewright_core::{
     EntryIdentitySignal, EntryKind, ExecutionIdentity, JournalEntry, JournalNameGraph,
@@ -6,7 +7,7 @@ use renamewright_core::{
 };
 use renamewright_platform::{
     JOURNAL_SCHEMA_VERSION, JournalCodecErrorKind, MAX_JOURNAL_PAYLOAD_BYTES, decode_journal,
-    encode_journal,
+    encode_journal, inspect_journal,
 };
 
 const GOLDEN_V1_TRANSACTION_COMPLETED: [u8; 24] = [
@@ -22,7 +23,7 @@ fn transaction_started(original_name: OsString) -> JournalRecord {
         plan_id: PlanId::new(7),
         source_generation: 11,
         step_count: 2,
-        entries: vec![JournalEntry::new(
+        entries: vec![JournalEntry::with_native_parent(
             SourceId::new(13),
             ParentId::new(17),
             JournalNameGraph::new(
@@ -37,6 +38,7 @@ fn transaction_started(original_name: OsString) -> JournalRecord {
                 Some(31),
             ),
             identity(37),
+            PathBuf::from("native-parent"),
         )],
     }
 }
@@ -88,11 +90,31 @@ fn reads_and_reproduces_the_version_one_golden_frame() -> Result<(), Box<dyn std
     let frames = decode_journal(&GOLDEN_V1_TRANSACTION_COMPLETED)?;
 
     assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].schema_version(), 1);
     assert_eq!(frames[0].sequence(), 0);
     assert_eq!(frames[0].record(), &JournalRecord::TransactionCompleted);
+    let current = encode_journal(&[JournalRecord::TransactionCompleted])?;
+    assert_ne!(current, GOLDEN_V1_TRANSACTION_COMPLETED);
+    assert_eq!(u16::from_le_bytes([current[4], current[5]]), 2);
+    assert_eq!(decode_journal(&current)?[0].schema_version(), 2);
+    Ok(())
+}
+
+#[test]
+fn rejects_mixed_schema_versions() -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = GOLDEN_V1_TRANSACTION_COMPLETED.to_vec();
+    bytes.extend_from_slice(&encode_journal(&[JournalRecord::TransactionCompleted])?);
+
+    let error = decode_journal(&bytes)
+        .err()
+        .ok_or("mixed journal versions were accepted")?;
+
     assert_eq!(
-        encode_journal(&[JournalRecord::TransactionCompleted])?,
-        GOLDEN_V1_TRANSACTION_COMPLETED
+        error.kind(),
+        JournalCodecErrorKind::MixedVersion {
+            expected: 1,
+            actual: 2,
+        }
     );
     Ok(())
 }
@@ -107,8 +129,11 @@ fn round_trips_rollback_records() -> Result<(), Box<dyn std::error::Error>> {
             observed_identity: identity(47),
         },
         JournalRecord::RollbackStarted {
-            cause: RollbackCause::ForwardStepFailed { step_index: 1 },
+            cause: RollbackCause::RecoveryRequested,
         },
+        JournalRecord::RollbackStepPrepared { step_index: 0 },
+        JournalRecord::RollbackStepFailed { step_index: 0 },
+        JournalRecord::RollbackRecoveryStarted { step_index: 0 },
         JournalRecord::RollbackStepPrepared { step_index: 0 },
         JournalRecord::RollbackStepCompleted {
             step_index: 0,
@@ -155,6 +180,49 @@ fn rejects_corrupted_payload() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(error.kind(), JournalCodecErrorKind::ChecksumMismatch);
     assert_eq!(error.frame_index(), 0);
     assert!(!error.to_string().contains('/'));
+    Ok(())
+}
+
+#[test]
+fn inspection_retains_only_the_valid_prefix_before_damage() -> Result<(), Box<dyn std::error::Error>>
+{
+    let records = complete_records(OsString::from("original.txt"));
+    let mut bytes = encode_journal(&records)?;
+    let first_frame_length = encode_journal(&records[..1])?.len();
+    let corrupt_at = first_frame_length
+        .checked_add(24)
+        .ok_or("corruption offset overflowed")?;
+    let Some(byte) = bytes.get_mut(corrupt_at) else {
+        return Err("second frame had no payload".into());
+    };
+    *byte ^= 0xff;
+
+    let inspection = inspect_journal(&bytes);
+
+    assert_eq!(inspection.frames().len(), 1);
+    assert!(!inspection.is_torn_tail());
+    assert_eq!(
+        inspection.issue().map(|issue| issue.kind()),
+        Some(JournalCodecErrorKind::ChecksumMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn inspection_classifies_a_truncated_final_frame_as_a_torn_tail()
+-> Result<(), Box<dyn std::error::Error>> {
+    let records = complete_records(OsString::from("original.txt"));
+    let mut bytes = encode_journal(&records)?;
+    bytes.pop().ok_or("journal was empty")?;
+
+    let inspection = inspect_journal(&bytes);
+
+    assert_eq!(inspection.frames().len(), records.len() - 1);
+    assert!(inspection.is_torn_tail());
+    assert_eq!(
+        inspection.issue().map(|issue| issue.kind()),
+        Some(JournalCodecErrorKind::TruncatedHeader)
+    );
     Ok(())
 }
 

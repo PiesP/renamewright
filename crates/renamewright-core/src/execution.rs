@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
+use std::path::{Path, PathBuf};
 
 use crate::{ParentId, PlanId, SourceFingerprint, SourceId};
 
@@ -104,6 +105,7 @@ pub enum ExecutionDirection {
 pub enum RollbackCause {
     Cancelled,
     ForwardStepFailed { step_index: usize },
+    RecoveryRequested,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +174,7 @@ pub struct JournalEntry {
     names: JournalNameGraph,
     admission_fingerprint: SourceFingerprint,
     execution_identity: ExecutionIdentity,
+    native_parent: Option<PathBuf>,
 }
 
 impl JournalEntry {
@@ -189,6 +192,26 @@ impl JournalEntry {
             names,
             admission_fingerprint,
             execution_identity,
+            native_parent: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_native_parent(
+        source_id: SourceId,
+        parent_id: ParentId,
+        names: JournalNameGraph,
+        admission_fingerprint: SourceFingerprint,
+        execution_identity: ExecutionIdentity,
+        native_parent: PathBuf,
+    ) -> Self {
+        Self {
+            source_id,
+            parent_id,
+            names,
+            admission_fingerprint,
+            execution_identity,
+            native_parent: Some(native_parent),
         }
     }
 
@@ -216,6 +239,11 @@ impl JournalEntry {
     pub const fn execution_identity(&self) -> ExecutionIdentity {
         self.execution_identity
     }
+
+    #[must_use]
+    pub fn native_parent(&self) -> Option<&Path> {
+        self.native_parent.as_deref()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,6 +261,9 @@ pub enum JournalRecord {
         step_index: usize,
         observed_identity: ExecutionIdentity,
     },
+    ForwardStepNotApplied {
+        step_index: usize,
+    },
     RollbackStarted {
         cause: RollbackCause,
     },
@@ -243,7 +274,13 @@ pub enum JournalRecord {
         step_index: usize,
         observed_identity: ExecutionIdentity,
     },
+    RollbackStepNotApplied {
+        step_index: usize,
+    },
     RollbackStepFailed {
+        step_index: usize,
+    },
+    RollbackRecoveryStarted {
         step_index: usize,
     },
     TransactionCompleted,
@@ -340,6 +377,7 @@ enum ReplayMode {
     RecoveryRequired {
         cause: RollbackCause,
         failed_step: usize,
+        remaining_steps: VecDeque<usize>,
     },
 }
 
@@ -404,9 +442,22 @@ fn apply_record(
             remaining_steps,
             prepared_step,
         } => apply_rollback_record(cause, remaining_steps, prepared_step, record, record_index),
-        ReplayMode::Completed
-        | ReplayMode::RolledBack { .. }
-        | ReplayMode::RecoveryRequired { .. } => Err(JournalReplayError::new(
+        ReplayMode::RecoveryRequired {
+            cause,
+            failed_step,
+            remaining_steps,
+        } => match record {
+            JournalRecord::RollbackRecoveryStarted { step_index } => {
+                require_step(failed_step, *step_index, record_index)?;
+                Ok(ReplayMode::Rollback {
+                    cause,
+                    remaining_steps,
+                    prepared_step: None,
+                })
+            }
+            _ => unexpected(record_index),
+        },
+        ReplayMode::Completed | ReplayMode::RolledBack { .. } => Err(JournalReplayError::new(
             record_index,
             JournalReplayErrorKind::RecordAfterTerminal,
         )),
@@ -442,9 +493,19 @@ fn apply_forward_record(
                 prepared_step: None,
             })
         }
+        JournalRecord::ForwardStepNotApplied { step_index }
+            if prepared_step == Some(*step_index) =>
+        {
+            Ok(ReplayMode::Forward {
+                next_step,
+                completed_steps,
+                prepared_step: None,
+            })
+        }
         JournalRecord::RollbackStarted { cause } => {
             match *cause {
                 RollbackCause::Cancelled if prepared_step.is_none() => {}
+                RollbackCause::RecoveryRequested if prepared_step.is_none() => {}
                 RollbackCause::ForwardStepFailed { step_index }
                     if prepared_step == Some(step_index) =>
                 {
@@ -498,10 +559,20 @@ fn apply_rollback_record(
                 prepared_step: None,
             })
         }
+        JournalRecord::RollbackStepNotApplied { step_index }
+            if prepared_step == Some(*step_index) =>
+        {
+            Ok(ReplayMode::Rollback {
+                cause,
+                remaining_steps,
+                prepared_step: None,
+            })
+        }
         JournalRecord::RollbackStepFailed { step_index } if prepared_step == Some(*step_index) => {
             Ok(ReplayMode::RecoveryRequired {
                 cause,
                 failed_step: *step_index,
+                remaining_steps,
             })
         }
         JournalRecord::TransactionRolledBack
@@ -582,8 +653,8 @@ fn status_for(mode: ReplayMode, step_count: usize) -> JournalStatus {
         ),
         ReplayMode::Completed => JournalStatus::Completed,
         ReplayMode::RolledBack { cause } => JournalStatus::RolledBack { cause },
-        ReplayMode::RecoveryRequired { cause, failed_step } => {
-            JournalStatus::RecoveryRequired { cause, failed_step }
-        }
+        ReplayMode::RecoveryRequired {
+            cause, failed_step, ..
+        } => JournalStatus::RecoveryRequired { cause, failed_step },
     }
 }

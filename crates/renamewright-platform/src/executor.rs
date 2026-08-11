@@ -194,6 +194,22 @@ impl FrozenExecutionPlan {
     }
 }
 
+pub(crate) trait ExecutionPlanView {
+    fn schedule(&self) -> &[ExecutionStep];
+
+    fn entry(&self, source_id: SourceId) -> Option<(&JournalEntry, &Path)>;
+}
+
+impl ExecutionPlanView for FrozenExecutionPlan {
+    fn schedule(&self) -> &[ExecutionStep] {
+        &self.schedule
+    }
+
+    fn entry(&self, source_id: SourceId) -> Option<(&JournalEntry, &Path)> {
+        FrozenExecutionPlan::entry(self, source_id)
+    }
+}
+
 /// Executes a frozen plan exactly once, with a durable journal created before
 /// the first filesystem mutation.
 pub fn execute_frozen_plan<F, C>(
@@ -216,7 +232,7 @@ where
     ))
 }
 
-trait ExecutionJournal {
+pub(crate) trait ExecutionJournal {
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageErrorKind>;
 }
 
@@ -237,14 +253,33 @@ where
     J: ExecutionJournal + ?Sized,
     C: Fn() -> bool + ?Sized,
 {
-    let mut completed_steps = Vec::with_capacity(plan.schedule.len());
-    for step in &plan.schedule {
+    continue_forward(plan, filesystem, journal, 0, should_cancel)
+}
+
+pub(crate) fn continue_forward<P, F, J, C>(
+    plan: &P,
+    filesystem: &F,
+    journal: &mut J,
+    next_step: usize,
+    should_cancel: &C,
+) -> ExecutionOutcome
+where
+    P: ExecutionPlanView + ?Sized,
+    F: ExecutionFileSystem + ?Sized,
+    J: ExecutionJournal + ?Sized,
+    C: Fn() -> bool + ?Sized,
+{
+    if next_step > plan.schedule().len() {
+        return invalid_plan(ExecutionDirection::Forward, Some(next_step));
+    }
+    let mut completed_count = next_step;
+    for step in plan.schedule().iter().skip(next_step) {
         if should_cancel() {
-            return begin_rollback(
+            return start_rollback(
                 plan,
                 filesystem,
                 journal,
-                &completed_steps,
+                completed_count,
                 RollbackCause::Cancelled,
             );
         }
@@ -255,11 +290,7 @@ where
         }
 
         let Some(entry) = plan.entry(step.source_id()) else {
-            return ExecutionOutcome::RecoveryRequired(ExecutionRecovery::new(
-                ExecutionDirection::Forward,
-                Some(step.index()),
-                ExecutionRecoveryReason::InvalidFrozenPlan,
-            ));
+            return invalid_plan(ExecutionDirection::Forward, Some(step.index()));
         };
         let (source_name, target_name) = forward_names(entry.0, step.phase());
         match filesystem.rename_no_replace(
@@ -275,7 +306,7 @@ where
                 }) {
                     return journal_recovery(ExecutionDirection::Forward, Some(step.index()), kind);
                 }
-                completed_steps.push(*step);
+                completed_count += 1;
             }
             Err(error) if filesystem_error_is_ambiguous(error.kind()) => {
                 return ExecutionOutcome::RecoveryRequired(ExecutionRecovery::new(
@@ -285,11 +316,11 @@ where
                 ));
             }
             Err(_) => {
-                return begin_rollback(
+                return start_rollback(
                     plan,
                     filesystem,
                     journal,
-                    &completed_steps,
+                    completed_count,
                     RollbackCause::ForwardStepFailed {
                         step_index: step.index(),
                     },
@@ -298,20 +329,18 @@ where
         }
     }
 
-    match journal.append(&JournalRecord::TransactionCompleted) {
-        Ok(()) => ExecutionOutcome::Completed,
-        Err(kind) => journal_recovery(ExecutionDirection::Forward, None, kind),
-    }
+    complete_transaction(journal)
 }
 
-fn begin_rollback<F, J>(
-    plan: &FrozenExecutionPlan,
+pub(crate) fn start_rollback<P, F, J>(
+    plan: &P,
     filesystem: &F,
     journal: &mut J,
-    completed_steps: &[ExecutionStep],
+    completed_count: usize,
     cause: RollbackCause,
 ) -> ExecutionOutcome
 where
+    P: ExecutionPlanView + ?Sized,
     F: ExecutionFileSystem + ?Sized,
     J: ExecutionJournal + ?Sized,
 {
@@ -319,6 +348,27 @@ where
         return journal_recovery(ExecutionDirection::Rollback, None, kind);
     }
 
+    let Some(next_step) = completed_count.checked_sub(1) else {
+        return complete_rollback(journal, cause);
+    };
+    continue_rollback(plan, filesystem, journal, next_step, cause)
+}
+
+pub(crate) fn continue_rollback<P, F, J>(
+    plan: &P,
+    filesystem: &F,
+    journal: &mut J,
+    next_step: usize,
+    cause: RollbackCause,
+) -> ExecutionOutcome
+where
+    P: ExecutionPlanView + ?Sized,
+    F: ExecutionFileSystem + ?Sized,
+    J: ExecutionJournal + ?Sized,
+{
+    let Some(completed_steps) = plan.schedule().get(..=next_step) else {
+        return invalid_plan(ExecutionDirection::Rollback, Some(next_step));
+    };
     for step in completed_steps.iter().rev() {
         if let Err(kind) = journal.append(&JournalRecord::RollbackStepPrepared {
             step_index: step.index(),
@@ -326,11 +376,7 @@ where
             return journal_recovery(ExecutionDirection::Rollback, Some(step.index()), kind);
         }
         let Some(entry) = plan.entry(step.source_id()) else {
-            return ExecutionOutcome::RecoveryRequired(ExecutionRecovery::new(
-                ExecutionDirection::Rollback,
-                Some(step.index()),
-                ExecutionRecoveryReason::InvalidFrozenPlan,
-            ));
+            return invalid_plan(ExecutionDirection::Rollback, Some(step.index()));
         };
         let (source_name, target_name) = rollback_names(entry.0, step.phase());
         match filesystem.rename_no_replace(
@@ -377,10 +423,37 @@ where
         }
     }
 
+    complete_rollback(journal, cause)
+}
+
+pub(crate) fn complete_transaction<J: ExecutionJournal + ?Sized>(
+    journal: &mut J,
+) -> ExecutionOutcome {
+    match journal.append(&JournalRecord::TransactionCompleted) {
+        Ok(()) => ExecutionOutcome::Completed,
+        Err(kind) => journal_recovery(ExecutionDirection::Forward, None, kind),
+    }
+}
+
+pub(crate) fn complete_rollback<J: ExecutionJournal + ?Sized>(
+    journal: &mut J,
+    cause: RollbackCause,
+) -> ExecutionOutcome {
     match journal.append(&JournalRecord::TransactionRolledBack) {
         Ok(()) => ExecutionOutcome::RolledBack { cause },
         Err(kind) => journal_recovery(ExecutionDirection::Rollback, None, kind),
     }
+}
+
+const fn invalid_plan(
+    direction: ExecutionDirection,
+    step_index: Option<usize>,
+) -> ExecutionOutcome {
+    ExecutionOutcome::RecoveryRequired(ExecutionRecovery::new(
+        direction,
+        step_index,
+        ExecutionRecoveryReason::InvalidFrozenPlan,
+    ))
 }
 
 const fn filesystem_error_is_ambiguous(kind: ExecutionFsErrorKind) -> bool {
@@ -391,7 +464,7 @@ const fn filesystem_error_is_ambiguous(kind: ExecutionFsErrorKind) -> bool {
     )
 }
 
-const fn journal_recovery(
+pub(crate) const fn journal_recovery(
     direction: ExecutionDirection,
     step_index: Option<usize>,
     kind: JournalStorageErrorKind,
@@ -491,7 +564,7 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
         let temporary = available_temporary_name(filesystem, parent, plan.id(), source_id)?;
 
         entries.push(FrozenExecutionEntry {
-            journal_entry: JournalEntry::new(
+            journal_entry: JournalEntry::with_native_parent(
                 source_id,
                 row.parent_id(),
                 JournalNameGraph::new(
@@ -501,6 +574,7 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
                 ),
                 fingerprint,
                 execution_identity,
+                parent.to_path_buf(),
             ),
             parent: parent.to_path_buf(),
         });

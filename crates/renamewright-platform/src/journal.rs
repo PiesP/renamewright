@@ -2,16 +2,19 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 use renamewright_core::{
     EntryIdentitySignal, EntryKind, ExecutionIdentity, JournalEntry, JournalNameGraph,
-    JournalRecord, ParentId, PlanId, RollbackCause, SourceFingerprint, SourceId,
+    JournalRecord, JournalReplayErrorKind, JournalStatus, ParentId, PlanId, RollbackCause,
+    SourceFingerprint, SourceId, replay_journal,
 };
 
-pub const JOURNAL_SCHEMA_VERSION: u16 = 1;
+pub const JOURNAL_SCHEMA_VERSION: u16 = 2;
+pub const MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION: u16 = 1;
 pub const MAX_JOURNAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_JOURNAL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 const MAGIC: [u8; 4] = *b"RWJR";
 const FRAME_HEADER_BYTES: usize = 24;
@@ -27,6 +30,7 @@ pub enum JournalCodecErrorKind {
     TruncatedPayload,
     InvalidMagic,
     UnsupportedVersion { version: u16 },
+    MixedVersion { expected: u16, actual: u16 },
     InvalidFlags { flags: u8 },
     FrameTooLarge { payload_length: u32 },
     ChecksumMismatch,
@@ -73,11 +77,48 @@ impl Error for JournalCodecError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JournalFrame {
+    schema_version: u16,
     sequence: u64,
     record: JournalRecord,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalInspection {
+    frames: Vec<JournalFrame>,
+    issue: Option<JournalCodecError>,
+}
+
+impl JournalInspection {
+    #[must_use]
+    pub fn frames(&self) -> &[JournalFrame] {
+        &self.frames
+    }
+
+    #[must_use]
+    pub const fn issue(&self) -> Option<JournalCodecError> {
+        self.issue
+    }
+
+    #[must_use]
+    pub fn is_torn_tail(&self) -> bool {
+        matches!(
+            self.issue.map(JournalCodecError::kind),
+            Some(JournalCodecErrorKind::TruncatedHeader | JournalCodecErrorKind::TruncatedPayload)
+        )
+    }
+
+    #[must_use]
+    pub fn into_frames(self) -> Vec<JournalFrame> {
+        self.frames
+    }
+}
+
 impl JournalFrame {
+    #[must_use]
+    pub const fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
@@ -99,6 +140,13 @@ pub enum JournalStorageErrorKind {
     InvalidInitialRecord,
     AlreadyExists,
     OpenFailed { io_kind: io::ErrorKind },
+    LockFailed { io_kind: io::ErrorKind },
+    ResumeReadFailed { io_kind: io::ErrorKind },
+    ResumeTooLarge,
+    ResumeCodec { kind: JournalCodecErrorKind },
+    ResumeProtocol { kind: JournalReplayErrorKind },
+    ResumeVersion { version: u16 },
+    ResumeTerminal,
     HeaderAfterStart,
     RecordAfterTerminal,
     Codec { kind: JournalCodecErrorKind },
@@ -173,9 +221,118 @@ impl JournalWriter {
                 };
                 JournalStorageError::new(0, kind)
             })?;
+        file.try_lock().map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::LockFailed {
+                    io_kind: io::Error::from(error).kind(),
+                },
+            )
+        })?;
         let mut appender = DurableAppender::new(file);
         appender.append_initial(initial_record)?;
         Ok(Self { appender })
+    }
+
+    pub fn resume(path: &Path) -> Result<(Self, Vec<JournalRecord>), JournalStorageError> {
+        let mut file = open_existing_journal_no_follow(path).map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::OpenFailed {
+                    io_kind: error.kind(),
+                },
+            )
+        })?;
+        file.try_lock().map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::LockFailed {
+                    io_kind: io::Error::from(error).kind(),
+                },
+            )
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeReadFailed {
+                    io_kind: error.kind(),
+                },
+            )
+        })?;
+        if !metadata.is_file() || metadata.len() > MAX_JOURNAL_FILE_BYTES {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeTooLarge,
+            ));
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(MAX_JOURNAL_FILE_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                JournalStorageError::new(
+                    0,
+                    JournalStorageErrorKind::ResumeReadFailed {
+                        io_kind: error.kind(),
+                    },
+                )
+            })?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_JOURNAL_FILE_BYTES {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeTooLarge,
+            ));
+        }
+        let frames = decode_journal(&bytes).map_err(|error| {
+            JournalStorageError::new(
+                u64::try_from(error.frame_index()).unwrap_or(u64::MAX),
+                JournalStorageErrorKind::ResumeCodec { kind: error.kind() },
+            )
+        })?;
+        let Some(first) = frames.first() else {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeProtocol {
+                    kind: JournalReplayErrorKind::EmptyJournal,
+                },
+            ));
+        };
+        if first.schema_version() != JOURNAL_SCHEMA_VERSION {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeVersion {
+                    version: first.schema_version(),
+                },
+            ));
+        }
+        let records = frames
+            .into_iter()
+            .map(JournalFrame::into_record)
+            .collect::<Vec<_>>();
+        let status = replay_journal(&records).map_err(|error| {
+            JournalStorageError::new(
+                u64::try_from(error.record_index()).unwrap_or(u64::MAX),
+                JournalStorageErrorKind::ResumeProtocol { kind: error.kind() },
+            )
+        })?;
+        if matches!(
+            status,
+            JournalStatus::Completed | JournalStatus::RolledBack { .. }
+        ) {
+            return Err(JournalStorageError::new(
+                u64::try_from(records.len()).unwrap_or(u64::MAX),
+                JournalStorageErrorKind::ResumeTerminal,
+            ));
+        }
+        let next_sequence = u64::try_from(records.len()).map_err(|_| {
+            JournalStorageError::new(u64::MAX, JournalStorageErrorKind::SequenceExhausted)
+        })?;
+        Ok((
+            Self {
+                appender: DurableAppender::resume(file, next_sequence),
+            },
+            records,
+        ))
     }
 
     pub fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageError> {
@@ -221,6 +378,15 @@ impl<S: JournalSink> DurableAppender<S> {
         Self {
             sink,
             next_sequence: 0,
+            terminal: false,
+            poisoned: false,
+        }
+    }
+
+    const fn resume(sink: S, next_sequence: u64) -> Self {
+        Self {
+            sink,
+            next_sequence,
             terminal: false,
             poisoned: false,
         }
@@ -306,6 +472,36 @@ impl<S: JournalSink> DurableAppender<S> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn open_existing_journal_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let flags = i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    OpenOptions::new()
+        .read(true)
+        .append(true)
+        .custom_flags(flags)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_existing_journal_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .append(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn open_existing_journal_no_follow(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).append(true).open(path)
+}
+
 pub fn encode_journal(records: &[JournalRecord]) -> Result<Vec<u8>, JournalCodecError> {
     let mut encoded = Vec::new();
     for (frame_index, record) in records.iter().enumerate() {
@@ -318,7 +514,7 @@ pub fn encode_journal(records: &[JournalRecord]) -> Result<Vec<u8>, JournalCodec
 }
 
 pub fn decode_journal(bytes: &[u8]) -> Result<Vec<JournalFrame>, JournalCodecError> {
-    let mut frames = Vec::new();
+    let mut frames: Vec<JournalFrame> = Vec::new();
     let mut offset = 0usize;
 
     while offset < bytes.len() {
@@ -338,10 +534,21 @@ pub fn decode_journal(bytes: &[u8]) -> Result<Vec<JournalFrame>, JournalCodecErr
             ));
         }
         let version = u16::from_le_bytes([header[4], header[5]]);
-        if version != JOURNAL_SCHEMA_VERSION {
+        if !(MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION..=JOURNAL_SCHEMA_VERSION).contains(&version) {
             return Err(JournalCodecError::new(
                 frame_index,
                 JournalCodecErrorKind::UnsupportedVersion { version },
+            ));
+        }
+        if let Some(first) = frames.first()
+            && first.schema_version != version
+        {
+            return Err(JournalCodecError::new(
+                frame_index,
+                JournalCodecErrorKind::MixedVersion {
+                    expected: first.schema_version,
+                    actual: version,
+                },
             ));
         }
         let record_kind = header[6];
@@ -400,12 +607,56 @@ pub fn decode_journal(bytes: &[u8]) -> Result<Vec<JournalFrame>, JournalCodecErr
                 JournalCodecErrorKind::ChecksumMismatch,
             ));
         }
-        let record = decode_record(record_kind, payload, frame_index)?;
-        frames.push(JournalFrame { sequence, record });
+        let record = decode_record(record_kind, payload, frame_index, version)?;
+        frames.push(JournalFrame {
+            schema_version: version,
+            sequence,
+            record,
+        });
         offset = payload_end;
     }
 
     Ok(frames)
+}
+
+/// Reads the longest valid journal prefix and retains a pathless description of
+/// the first invalid or torn frame. This function never treats a damaged prefix
+/// as permission to resume execution.
+#[must_use]
+pub fn inspect_journal(bytes: &[u8]) -> JournalInspection {
+    match decode_journal(bytes) {
+        Ok(frames) => JournalInspection {
+            frames,
+            issue: None,
+        },
+        Err(issue) => {
+            let prefix_length = complete_prefix_length(bytes, issue.frame_index());
+            let frames = prefix_length
+                .and_then(|length| decode_journal(&bytes[..length]).ok())
+                .unwrap_or_default();
+            JournalInspection {
+                frames,
+                issue: Some(issue),
+            }
+        }
+    }
+}
+
+fn complete_prefix_length(bytes: &[u8], frame_count: usize) -> Option<usize> {
+    let mut offset = 0usize;
+    for _ in 0..frame_count {
+        let header_end = offset.checked_add(FRAME_HEADER_BYTES)?;
+        let header = bytes.get(offset..header_end)?;
+        let payload_length = u32::from_le_bytes(header.get(16..20)?.try_into().ok()?) as usize;
+        if payload_length > MAX_JOURNAL_PAYLOAD_BYTES {
+            return None;
+        }
+        offset = header_end.checked_add(payload_length)?;
+        if offset > bytes.len() {
+            return None;
+        }
+    }
+    Some(offset)
 }
 
 pub(crate) fn encode_frame(
@@ -413,8 +664,17 @@ pub(crate) fn encode_frame(
     record: &JournalRecord,
     frame_index: usize,
 ) -> Result<Vec<u8>, JournalCodecError> {
+    encode_frame_for_version(sequence, record, frame_index, JOURNAL_SCHEMA_VERSION)
+}
+
+fn encode_frame_for_version(
+    sequence: u64,
+    record: &JournalRecord,
+    frame_index: usize,
+    schema_version: u16,
+) -> Result<Vec<u8>, JournalCodecError> {
     let mut payload = Vec::new();
-    let record_kind = encode_record(record, &mut payload, frame_index)?;
+    let record_kind = encode_record(record, &mut payload, frame_index, schema_version)?;
     let payload_length = u32::try_from(payload.len()).map_err(|_| {
         JournalCodecError::new(
             frame_index,
@@ -437,7 +697,7 @@ pub(crate) fn encode_frame(
         })?;
     let mut frame = Vec::with_capacity(capacity);
     frame.extend_from_slice(&MAGIC);
-    frame.extend_from_slice(&JOURNAL_SCHEMA_VERSION.to_le_bytes());
+    frame.extend_from_slice(&schema_version.to_le_bytes());
     frame.push(record_kind);
     frame.push(FLAG_NONE);
     frame.extend_from_slice(&sequence.to_le_bytes());
@@ -453,6 +713,7 @@ fn encode_record(
     record: &JournalRecord,
     payload: &mut Vec<u8>,
     frame_index: usize,
+    schema_version: u16,
 ) -> Result<u8, JournalCodecError> {
     match record {
         JournalRecord::TransactionStarted {
@@ -466,7 +727,7 @@ fn encode_record(
             put_usize(payload, *step_count, frame_index)?;
             put_u32_len(payload, entries.len(), frame_index)?;
             for entry in entries {
-                encode_entry(payload, entry, frame_index)?;
+                encode_entry(payload, entry, frame_index, schema_version)?;
             }
             Ok(1)
         }
@@ -481,6 +742,10 @@ fn encode_record(
             put_usize(payload, *step_index, frame_index)?;
             encode_execution_identity(payload, *observed_identity);
             Ok(3)
+        }
+        JournalRecord::ForwardStepNotApplied { step_index } => {
+            put_usize(payload, *step_index, frame_index)?;
+            Ok(10)
         }
         JournalRecord::RollbackStarted { cause } => {
             encode_rollback_cause(payload, *cause, frame_index)?;
@@ -498,9 +763,17 @@ fn encode_record(
             encode_execution_identity(payload, *observed_identity);
             Ok(6)
         }
+        JournalRecord::RollbackStepNotApplied { step_index } => {
+            put_usize(payload, *step_index, frame_index)?;
+            Ok(11)
+        }
         JournalRecord::RollbackStepFailed { step_index } => {
             put_usize(payload, *step_index, frame_index)?;
             Ok(7)
+        }
+        JournalRecord::RollbackRecoveryStarted { step_index } => {
+            put_usize(payload, *step_index, frame_index)?;
+            Ok(12)
         }
         JournalRecord::TransactionCompleted => Ok(8),
         JournalRecord::TransactionRolledBack => Ok(9),
@@ -511,6 +784,7 @@ fn decode_record(
     kind: u8,
     payload: &[u8],
     frame_index: usize,
+    schema_version: u16,
 ) -> Result<JournalRecord, JournalCodecError> {
     let mut cursor = PayloadCursor::new(payload, frame_index);
     let record = match kind {
@@ -521,7 +795,7 @@ fn decode_record(
             let entry_count = cursor.read_u32()? as usize;
             let mut entries = Vec::with_capacity(entry_count.min(1024));
             for _ in 0..entry_count {
-                entries.push(decode_entry(&mut cursor)?);
+                entries.push(decode_entry(&mut cursor, schema_version)?);
             }
             JournalRecord::TransactionStarted {
                 plan_id,
@@ -537,6 +811,9 @@ fn decode_record(
             step_index: cursor.read_usize()?,
             observed_identity: decode_execution_identity(&mut cursor)?,
         },
+        10 => JournalRecord::ForwardStepNotApplied {
+            step_index: cursor.read_usize()?,
+        },
         4 => JournalRecord::RollbackStarted {
             cause: decode_rollback_cause(&mut cursor)?,
         },
@@ -547,7 +824,13 @@ fn decode_record(
             step_index: cursor.read_usize()?,
             observed_identity: decode_execution_identity(&mut cursor)?,
         },
+        11 => JournalRecord::RollbackStepNotApplied {
+            step_index: cursor.read_usize()?,
+        },
         7 => JournalRecord::RollbackStepFailed {
+            step_index: cursor.read_usize()?,
+        },
+        12 => JournalRecord::RollbackRecoveryStarted {
             step_index: cursor.read_usize()?,
         },
         8 => JournalRecord::TransactionCompleted,
@@ -567,6 +850,7 @@ fn encode_entry(
     payload: &mut Vec<u8>,
     entry: &JournalEntry,
     frame_index: usize,
+    schema_version: u16,
 ) -> Result<(), JournalCodecError> {
     put_u64(payload, entry.source_id().value());
     put_u64(payload, entry.parent_id().value());
@@ -575,10 +859,22 @@ fn encode_entry(
     encode_native_name(payload, entry.names().final_name(), frame_index)?;
     encode_fingerprint(payload, entry.admission_fingerprint());
     encode_execution_identity(payload, entry.execution_identity());
+    if schema_version >= 2 {
+        match entry.native_parent() {
+            Some(parent) => {
+                payload.push(1);
+                encode_native_name(payload, parent.as_os_str(), frame_index)?;
+            }
+            None => payload.push(0),
+        }
+    }
     Ok(())
 }
 
-fn decode_entry(cursor: &mut PayloadCursor<'_>) -> Result<JournalEntry, JournalCodecError> {
+fn decode_entry(
+    cursor: &mut PayloadCursor<'_>,
+    schema_version: u16,
+) -> Result<JournalEntry, JournalCodecError> {
     let source_id = SourceId::new(cursor.read_u64()?);
     let parent_id = ParentId::new(cursor.read_u64()?);
     let names = JournalNameGraph::new(
@@ -588,13 +884,26 @@ fn decode_entry(cursor: &mut PayloadCursor<'_>) -> Result<JournalEntry, JournalC
     );
     let fingerprint = decode_fingerprint(cursor)?;
     let execution_identity = decode_execution_identity(cursor)?;
-    Ok(JournalEntry::new(
-        source_id,
-        parent_id,
-        names,
-        fingerprint,
-        execution_identity,
-    ))
+    let native_parent = if schema_version >= 2 {
+        match cursor.read_u8()? {
+            0 => None,
+            1 => Some(std::path::PathBuf::from(decode_native_name(cursor)?)),
+            _ => return Err(cursor.error(JournalCodecErrorKind::InvalidPayload)),
+        }
+    } else {
+        None
+    };
+    let entry = JournalEntry::new(source_id, parent_id, names, fingerprint, execution_identity);
+    Ok(native_parent.map_or(entry.clone(), |parent| {
+        JournalEntry::with_native_parent(
+            entry.source_id(),
+            entry.parent_id(),
+            entry.names().clone(),
+            entry.admission_fingerprint().clone(),
+            entry.execution_identity(),
+            parent,
+        )
+    }))
 }
 
 fn encode_fingerprint(payload: &mut Vec<u8>, fingerprint: &SourceFingerprint) {
@@ -674,6 +983,7 @@ fn encode_rollback_cause(
             payload.push(2);
             put_usize(payload, step_index, frame_index)?;
         }
+        RollbackCause::RecoveryRequested => payload.push(3),
     }
     Ok(())
 }
@@ -686,6 +996,7 @@ fn decode_rollback_cause(
         2 => Ok(RollbackCause::ForwardStepFailed {
             step_index: cursor.read_usize()?,
         }),
+        3 => Ok(RollbackCause::RecoveryRequested),
         _ => Err(cursor.error(JournalCodecErrorKind::InvalidPayload)),
     }
 }
@@ -885,11 +1196,18 @@ impl<'a> PayloadCursor<'a> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::ffi::OsString;
     use std::io;
 
-    use renamewright_core::JournalRecord;
+    use renamewright_core::{
+        EntryKind, ExecutionIdentity, JournalEntry, JournalNameGraph, JournalRecord, ParentId,
+        PlanId, SourceFingerprint, SourceId,
+    };
 
-    use super::{DurableAppender, JournalSink, JournalStorageErrorKind, crc32_parts};
+    use super::{
+        DurableAppender, JournalSink, JournalStorageErrorKind, crc32_parts, decode_journal,
+        encode_frame_for_version,
+    };
 
     #[derive(Debug, Default)]
     struct TestSink {
@@ -927,6 +1245,38 @@ mod tests {
     #[test]
     fn crc32_matches_the_ieee_check_value() {
         assert_eq!(crc32_parts(&[b"123456789"]), 0xcbf4_3926);
+    }
+
+    #[test]
+    fn schema_one_header_remains_readable_without_a_native_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let record = JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(1),
+            source_generation: 2,
+            step_count: 2,
+            entries: vec![JournalEntry::new(
+                SourceId::new(3),
+                ParentId::new(4),
+                JournalNameGraph::new(
+                    OsString::from("original.txt"),
+                    OsString::from("temporary.tmp"),
+                    OsString::from("final.txt"),
+                ),
+                SourceFingerprint::new(EntryKind::File, None, 5, None),
+                ExecutionIdentity::new(6, [7; 16]),
+            )],
+        };
+        let bytes = encode_frame_for_version(0, &record, 0, 1)?;
+
+        let frames = decode_journal(&bytes)?;
+        let JournalRecord::TransactionStarted { entries, .. } = frames[0].record() else {
+            return Err("schema-one header changed record kind".into());
+        };
+
+        assert_eq!(frames[0].schema_version(), 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].native_parent(), None);
+        Ok(())
     }
 
     #[cfg(unix)]

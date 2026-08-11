@@ -120,3 +120,72 @@ fn writer_rejects_second_header_and_records_after_terminal()
     assert_eq!(fs::metadata(path)?.len(), length_after_terminal);
     Ok(())
 }
+
+#[test]
+fn resume_revalidates_and_locks_an_incomplete_journal() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let path = directory.path().join("transaction.rwj");
+    let mut writer = JournalWriter::create_new(&path, &transaction_started())?;
+    writer.append(&JournalRecord::ForwardStepPrepared { step_index: 0 })?;
+
+    let locked = JournalWriter::resume(&path)
+        .err()
+        .ok_or("a live journal lock was ignored")?;
+    assert!(matches!(
+        locked.kind(),
+        JournalStorageErrorKind::LockFailed { .. }
+    ));
+    drop(writer);
+
+    let (mut resumed, mut records) = JournalWriter::resume(&path)?;
+    assert_eq!(resumed.next_sequence(), 2);
+    assert_eq!(records.len(), 2);
+    let reconciled = JournalRecord::ForwardStepNotApplied { step_index: 0 };
+    resumed.append(&reconciled)?;
+    records.push(reconciled);
+
+    assert_eq!(
+        replay_journal(&records)?,
+        JournalStatus::ForwardPending { next_step: 0 }
+    );
+    assert_eq!(resumed.next_sequence(), 3);
+    Ok(())
+}
+
+#[test]
+fn resume_rejects_terminal_and_damaged_journals() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let terminal_path = directory.path().join("terminal.rwj");
+    let mut terminal = JournalWriter::create_new(&terminal_path, &transaction_started())?;
+    terminal.append(&JournalRecord::ForwardStepPrepared { step_index: 0 })?;
+    terminal.append(&JournalRecord::ForwardStepCompleted {
+        step_index: 0,
+        observed_identity: ExecutionIdentity::new(6, [7; 16]),
+    })?;
+    terminal.append(&JournalRecord::ForwardStepPrepared { step_index: 1 })?;
+    terminal.append(&JournalRecord::ForwardStepCompleted {
+        step_index: 1,
+        observed_identity: ExecutionIdentity::new(6, [7; 16]),
+    })?;
+    terminal.append(&JournalRecord::TransactionCompleted)?;
+    drop(terminal);
+
+    let terminal_error = JournalWriter::resume(&terminal_path)
+        .err()
+        .ok_or("a terminal journal was resumed")?;
+    assert_eq!(
+        terminal_error.kind(),
+        JournalStorageErrorKind::ResumeTerminal
+    );
+
+    let damaged_path = directory.path().join("damaged.rwj");
+    fs::write(&damaged_path, b"not a journal")?;
+    let damaged_error = JournalWriter::resume(&damaged_path)
+        .err()
+        .ok_or("a damaged journal was resumed")?;
+    assert!(matches!(
+        damaged_error.kind(),
+        JournalStorageErrorKind::ResumeCodec { .. }
+    ));
+    Ok(())
+}

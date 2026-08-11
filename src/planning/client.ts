@@ -24,6 +24,53 @@ export interface SourceChange {
   error: string | null;
 }
 
+export type LedgerStatus =
+  | 'completed'
+  | 'rolledBack'
+  | 'forwardPending'
+  | 'completionPending'
+  | 'rollbackPending'
+  | 'rollbackCompletionPending'
+  | 'reconciliationRequired'
+  | 'recoveryRequired'
+  | 'legacyInspectionRequired'
+  | 'torn'
+  | 'damaged'
+  | 'unsupportedVersion'
+  | 'tooLarge'
+  | 'unreadable';
+
+export interface LedgerEntry {
+  ledgerId: number;
+  planId: number | null;
+  sourceGeneration: number | null;
+  schemaVersion: number | null;
+  sourceCount: number;
+  status: LedgerStatus;
+  attentionStep: number | null;
+  recoveryAvailable: boolean;
+}
+
+export type RecoveryDirection = 'forward' | 'rollback';
+export type RecoveryReadiness = 'ready' | 'reconciliationRequired' | 'blocked';
+export type RecoveryDisposition =
+  | 'notApplied'
+  | 'applied'
+  | 'missing'
+  | 'multipleLocations'
+  | 'unexpectedLocation';
+
+export interface RecoveryInspection {
+  ledgerId: number;
+  direction: RecoveryDirection;
+  stepIndex: number | null;
+  readiness: RecoveryReadiness;
+  disposition: RecoveryDisposition | null;
+  resumeAvailable: boolean;
+  rollbackAvailable: boolean;
+  reconcileAvailable: boolean;
+}
+
 export interface PlanningClient {
   nativeSelectionAvailable: boolean;
   loadSample(prefix: string): Promise<Plan>;
@@ -31,6 +78,8 @@ export interface PlanningClient {
   previewPrefix(prefix: string): Promise<Plan>;
   inspectPlan(planId: number): Promise<string>;
   exportPlan(planId: number): Promise<boolean>;
+  listLedger(): Promise<LedgerEntry[]>;
+  inspectRecovery(ledgerId: number): Promise<RecoveryInspection>;
   watchSourceChanges(onChange: (change: SourceChange) => void): () => void;
 }
 
@@ -139,6 +188,13 @@ export function createPlanningClient(): PlanningClient {
         : inspectBrowserPlan(planId),
     exportPlan: async (planId) =>
       nativeSelectionAvailable ? invoke<boolean>('export_plan', { planId }) : false,
+    listLedger: async () => (nativeSelectionAvailable ? invoke<LedgerEntry[]>('list_ledger') : []),
+    inspectRecovery: async (ledgerId) => {
+      if (!nativeSelectionAvailable) {
+        throw new Error('Recovery inspection is available in the Windows desktop app.');
+      }
+      return invoke<RecoveryInspection>('inspect_recovery', { ledgerId });
+    },
     watchSourceChanges: (onChange) => {
       if (!nativeSelectionAvailable) {
         return () => undefined;
