@@ -118,7 +118,7 @@ export function App(props: AppProps) {
       return 'No sources are loaded.';
     }
     if (current.blockedCount > 0) {
-      return `${current.blockedCount} names are blocked. Edit the prefix before continuing.`;
+      return `${current.blockedCount} names are blocked. Review diagnostics before continuing.`;
     }
     return `${current.changedCount} names are ready for review.`;
   };
@@ -194,13 +194,16 @@ export function App(props: AppProps) {
                 when={plan()?.blockedCount}
                 fallback="Added before every source name. The preview updates immediately."
               >
-                Some destinations are invalid on Windows. Remove reserved characters or names.
+                One or more destinations are blocked. Review the row diagnostics before continuing.
               </Show>
             </p>
           </section>
           <div class="scope-note">
             <strong>Current scope</strong>
-            <p>Prefix rules and deterministic Windows name checks. No file operation can run.</p>
+            <p>
+              Prefix rules with deterministic name, occupancy, and stale-source checks. No file
+              operation can run.
+            </p>
           </div>
         </aside>
 

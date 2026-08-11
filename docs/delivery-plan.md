@@ -89,17 +89,19 @@ without a separate explicit request.
 
 ## Immediate next implementation stage
 
-Milestone 0 and the first read-only Milestone 1 slice are complete: native file
-selection, backend-only path retention, prefix preview, Windows name diagnostics,
-and the responsive Workbench are implemented and tested. Drag/drop,
-virtualisation, plan JSON inspection, occupied-destination checks, and stale
-source validation remain in Milestone 1.
+Milestones 0 and 1 are complete. Native selection and drag/drop retain paths in
+Rust; large previews are virtualised and filterable; versioned plan JSON is
+inspectable and exported with create-new semantics; and occupied destinations,
+stale sources, and symlink entries have behavioural coverage. No source rename
+command exists.
 
-The next implementation request should finish those read-only planning gaps. It
-must not begin real rename execution until the complete plan format and recovery
-design have been reviewed.
+The next implementation request should review and freeze the execution-grade
+plan format, Windows entry-identity strategy, journal durability contract,
+no-replace primitive, rollback state machine, and startup recovery decisions.
+That review should produce accepted design records and failing behavioural
+fixtures before implementation of any real rename operation.
 
-The expected first commit series is:
+The completed Milestone 1 commit series is:
 
 1. `feat: admit dropped sources without exposing native paths`
 2. `feat: virtualise and filter large rename plans`

@@ -1,11 +1,16 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
-use renamewright_core::{ParentId, SourceId, SourceSnapshot};
+use renamewright_core::{
+    EntryIdentity, EntryKind, OccupiedName, ParentId, SourceFingerprint, SourceId, SourceSnapshot,
+    ValidationEnvironment,
+};
 
 /// Filesystem mutation remains unavailable during the planning milestone.
 #[must_use]
@@ -22,23 +27,34 @@ pub enum AdmissionError {
 impl Display for AdmissionError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unavailable(path) => write!(
-                formatter,
-                "the selected source is not an available file: {}",
-                path.display()
-            ),
-            Self::MissingFileName(path) => {
-                write!(
-                    formatter,
-                    "the selected source has no file name: {}",
-                    path.display()
-                )
+            Self::Unavailable(_) => {
+                formatter.write_str("a selected source is not an available file")
             }
+            Self::MissingFileName(_) => formatter.write_str("a selected source has no file name"),
         }
     }
 }
 
 impl Error for AdmissionError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValidationError {
+    ParentUnavailable(ParentId),
+}
+
+impl Display for ValidationError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ParentUnavailable(parent_id) => write!(
+                formatter,
+                "source directory {} could not be validated",
+                parent_id.value()
+            ),
+        }
+    }
+}
+
+impl Error for ValidationError {}
 
 #[derive(Debug, Default)]
 pub struct SourceRegistry {
@@ -68,23 +84,14 @@ impl SourceRegistry {
         let mut candidates = Vec::new();
 
         for path in paths {
-            let canonical = path
-                .canonicalize()
-                .map_err(|_| AdmissionError::Unavailable(path.clone()))?;
-            if !canonical.is_file() {
-                return Err(AdmissionError::Unavailable(path));
-            }
-            if canonical.file_name().is_none() {
-                return Err(AdmissionError::MissingFileName(canonical));
-            }
-            candidates.push(canonical);
+            candidates.push(normalize_entry_path(path)?);
         }
 
-        candidates.sort();
-        candidates.dedup();
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+        candidates.dedup_by(|left, right| left.0 == right.0);
         let mut changed = false;
 
-        for path in candidates {
+        for (path, fingerprint) in candidates {
             if self.source_ids.contains_key(&path) {
                 continue;
             }
@@ -105,7 +112,12 @@ impl SourceRegistry {
             let name = path
                 .file_name()
                 .ok_or_else(|| AdmissionError::MissingFileName(path.clone()))?;
-            let snapshot = SourceSnapshot::new(source_id, parent_id, name.to_os_string());
+            let snapshot = SourceSnapshot::with_fingerprint(
+                source_id,
+                parent_id,
+                name.to_os_string(),
+                fingerprint,
+            );
             self.source_ids.insert(path.clone(), source_id);
             self.paths.insert(source_id, path);
             self.snapshots.insert(source_id, snapshot);
@@ -133,14 +145,199 @@ impl SourceRegistry {
     pub fn path_for(&self, source_id: SourceId) -> Option<&Path> {
         self.paths.get(&source_id).map(PathBuf::as_path)
     }
+
+    pub fn validation_environment(&self) -> Result<ValidationEnvironment, ValidationError> {
+        let stale_sources = self
+            .paths
+            .iter()
+            .filter_map(|(source_id, path)| {
+                let snapshot = self.snapshots.get(source_id)?;
+                let current = fs::symlink_metadata(path)
+                    .ok()
+                    .and_then(|metadata| fingerprint_for(&metadata));
+                (current.as_ref() != snapshot.fingerprint()).then_some(*source_id)
+            })
+            .collect::<BTreeSet<_>>();
+        let source_paths = self.paths.values().cloned().collect::<BTreeSet<_>>();
+        let mut occupied_names = Vec::new();
+
+        for (parent, parent_id) in &self.parent_ids {
+            let entries =
+                fs::read_dir(parent).map_err(|_| ValidationError::ParentUnavailable(*parent_id))?;
+            for entry in entries {
+                let entry = entry.map_err(|_| ValidationError::ParentUnavailable(*parent_id))?;
+                if !source_paths.contains(&entry.path()) {
+                    occupied_names.push(OccupiedName::new(*parent_id, entry.file_name()));
+                }
+            }
+        }
+        occupied_names.sort_by(|left, right| {
+            (left.parent_id(), left.native_name()).cmp(&(right.parent_id(), right.native_name()))
+        });
+
+        Ok(ValidationEnvironment::new(stale_sources, occupied_names))
+    }
+}
+
+fn normalize_entry_path(path: PathBuf) -> Result<(PathBuf, SourceFingerprint), AdmissionError> {
+    let absolute =
+        std::path::absolute(&path).map_err(|_| AdmissionError::Unavailable(path.clone()))?;
+    let name = absolute
+        .file_name()
+        .ok_or_else(|| AdmissionError::MissingFileName(absolute.clone()))?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| AdmissionError::MissingFileName(absolute.clone()))?
+        .canonicalize()
+        .map_err(|_| AdmissionError::Unavailable(path.clone()))?;
+    let normalized = parent.join(name);
+    let metadata =
+        fs::symlink_metadata(&normalized).map_err(|_| AdmissionError::Unavailable(path.clone()))?;
+    let fingerprint = fingerprint_for(&metadata).ok_or(AdmissionError::Unavailable(path))?;
+    Ok((normalized, fingerprint))
+}
+
+fn fingerprint_for(metadata: &Metadata) -> Option<SourceFingerprint> {
+    let entry_kind = if metadata.file_type().is_symlink() {
+        EntryKind::Symlink
+    } else if metadata.file_type().is_file() {
+        EntryKind::File
+    } else {
+        return None;
+    };
+    let modified_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    Some(SourceFingerprint::new(
+        entry_kind,
+        entry_identity(metadata),
+        metadata.len(),
+        modified_nanos,
+    ))
+}
+
+#[cfg(unix)]
+fn entry_identity(metadata: &Metadata) -> Option<EntryIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    Some(EntryIdentity::new(metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn entry_identity(metadata: &Metadata) -> Option<EntryIdentity> {
+    use std::os::windows::fs::MetadataExt;
+
+    Some(EntryIdentity::new(
+        metadata.creation_time(),
+        u64::from(metadata.file_attributes()),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+const fn entry_identity(_metadata: &Metadata) -> Option<EntryIdentity> {
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::mutation_is_enabled;
+    use std::error::Error;
+    use std::fs;
+
+    use renamewright_core::{EntryKind, SourceId};
+
+    use super::{SourceRegistry, mutation_is_enabled};
 
     #[test]
     fn planning_milestone_is_read_only() {
         assert!(!mutation_is_enabled());
+    }
+
+    #[test]
+    fn validation_detects_stale_sources_and_excludes_planned_entries() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("a.txt");
+        let second = directory.path().join("final-a.txt");
+        fs::write(&first, b"a")?;
+        fs::write(&second, b"second")?;
+        let mut registry = SourceRegistry::new();
+        registry.admit_paths([first.clone(), second])?;
+
+        let initial = registry.validation_environment()?;
+        assert!(initial.stale_sources().is_empty());
+        assert!(initial.occupied_names().is_empty());
+
+        fs::write(first, b"changed-size")?;
+        let changed = registry.validation_environment()?;
+        assert_eq!(
+            changed.stale_sources(),
+            &std::collections::BTreeSet::from([SourceId::new(1)])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validation_reports_entries_outside_the_plan() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"source")?;
+        fs::write(directory.path().join("final-report.txt"), b"occupied")?;
+        let mut registry = SourceRegistry::new();
+        registry.admit_paths([source])?;
+
+        let environment = registry.validation_environment()?;
+
+        assert_eq!(environment.occupied_names().len(), 1);
+        assert_eq!(
+            environment.occupied_names()[0].native_name(),
+            "final-report.txt"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validation_detects_same_size_entry_replacement() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        let prior_entry = directory.path().join("prior-report.txt");
+        fs::write(&source, b"same-size")?;
+        let mut registry = SourceRegistry::new();
+        registry.admit_paths([source.clone()])?;
+
+        fs::rename(&source, prior_entry)?;
+        fs::write(&source, b"same-size")?;
+        let environment = registry.validation_environment()?;
+
+        assert_eq!(
+            environment.stale_sources(),
+            &std::collections::BTreeSet::from([SourceId::new(1)])
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admission_preserves_a_symlink_entry_instead_of_following_it() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("target.txt");
+        let link = directory.path().join("link.txt");
+        fs::write(&target, b"target")?;
+        symlink(&target, &link)?;
+        let mut registry = SourceRegistry::new();
+
+        let snapshots = registry.admit_paths([link.clone()])?;
+
+        assert_eq!(registry.path_for(SourceId::new(1)), Some(link.as_path()));
+        assert_eq!(snapshots[0].native_name(), "link.txt");
+        assert_eq!(
+            snapshots[0].fingerprint().map(|value| value.entry_kind()),
+            Some(EntryKind::Symlink)
+        );
+        Ok(())
     }
 }

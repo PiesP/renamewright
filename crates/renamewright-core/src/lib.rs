@@ -5,10 +5,11 @@ mod planner;
 mod windows;
 
 pub use model::{
-    Diagnostic, DiagnosticCode, DiagnosticSeverity, NameStatus, ParentId, PlanId, PlanRow,
-    RenamePlan, RenameRule, SourceId, SourceSnapshot, TargetPolicy, TraceStep,
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, EntryIdentity, EntryKind, NameStatus,
+    OccupiedName, ParentId, PlanId, PlanRow, RenamePlan, RenameRule, SourceFingerprint, SourceId,
+    SourceSnapshot, TargetPolicy, TraceStep, ValidationEnvironment,
 };
-pub use planner::build_plan;
+pub use planner::{build_plan, build_plan_with_environment};
 
 /// Version of the frontend/backend planning protocol.
 pub const PROTOCOL_VERSION: u16 = 1;

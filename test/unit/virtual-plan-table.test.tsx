@@ -12,7 +12,8 @@ function makeRows(count: number): PlanRow[] {
     originalName: `source-${index}.txt`,
     proposedName: `renamed-source-${index}.txt`,
     status: index === count - 1 ? 'blocked' : 'changed',
-    diagnostics: index === count - 1 ? ['duplicateDestination'] : [],
+    diagnostics:
+      index === count - 1 ? ['duplicateDestination', 'occupiedDestination', 'staleSource'] : [],
   }));
 }
 
@@ -28,7 +29,9 @@ test('windows a large plan and filters without rendering every row', async () =>
 
   expect(screen.getByText('Showing 1 of 10000')).toBeInTheDocument();
   expect(screen.getByText('source-9999.txt')).toBeInTheDocument();
-  expect(screen.getByText('Duplicate destination')).toBeInTheDocument();
+  expect(screen.getByText(/Duplicate destination/u)).toBeInTheDocument();
+  expect(screen.getByText(/Destination already exists/u)).toBeInTheDocument();
+  expect(screen.getByText(/Source changed since admission/u)).toBeInTheDocument();
 });
 
 test('updates the rendered window while scrolling', () => {

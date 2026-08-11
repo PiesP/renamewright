@@ -20,6 +20,8 @@ const diagnosticLabels: Record<string, string> = {
   nameTooLong: 'Name exceeds 255 characters',
   duplicateDestination: 'Duplicate destination',
   unsupportedEncoding: 'Unsupported name encoding',
+  occupiedDestination: 'Destination already exists',
+  staleSource: 'Source changed since admission',
 };
 
 const filterLabels: Record<PlanFilter, string> = {

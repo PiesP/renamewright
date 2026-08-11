@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use renamewright_core::{
     DiagnosticCode, NameStatus, PROTOCOL_VERSION, PlanId, RenamePlan, RenameRule, TargetPolicy,
-    build_plan,
+    build_plan_with_environment,
 };
 use renamewright_platform::SourceRegistry;
 use serde::Serialize;
@@ -228,12 +228,16 @@ fn plan_from_registry(
         .map_err(|_| "the plan sequence is unavailable".to_owned())?;
     let plan_id = PlanId::new(*next_plan_id);
     *next_plan_id = next_plan_id.saturating_add(1);
-    let plan = build_plan(
+    let environment = registry
+        .validation_environment()
+        .map_err(|error| error.to_string())?;
+    let plan = build_plan_with_environment(
         plan_id,
         registry.generation(),
         &registry.snapshots(),
         &[RenameRule::prefix(prefix)],
         TargetPolicy::windows(),
+        &environment,
     );
     let dto = PlanDto::from(&plan);
     let mut latest_plan = state
@@ -358,6 +362,8 @@ const fn diagnostic_name(code: DiagnosticCode) -> &'static str {
         DiagnosticCode::NameTooLong => "nameTooLong",
         DiagnosticCode::DuplicateDestination => "duplicateDestination",
         DiagnosticCode::UnsupportedEncoding => "unsupportedEncoding",
+        DiagnosticCode::OccupiedDestination => "occupiedDestination",
+        DiagnosticCode::StaleSource => "staleSource",
     }
 }
 
@@ -394,11 +400,12 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
 
-    use renamewright_core::{ParentId, PlanId, RenameRule, SourceId, SourceSnapshot, TargetPolicy};
+    use renamewright_core::{
+        ParentId, PlanId, RenameRule, SourceId, SourceSnapshot, TargetPolicy, build_plan,
+    };
 
     use super::{
-        AppState, StoredPlan, admit_dropped_sources, build_plan, plan_document_json,
-        write_new_document,
+        AppState, StoredPlan, admit_dropped_sources, plan_document_json, write_new_document,
     };
 
     #[test]
