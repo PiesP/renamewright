@@ -57,6 +57,7 @@ jobs:
           cargo clippy \
             --package renamewright-core \
             --package renamewright-platform \
+            --package renamewright-windows-native \
             --all-targets \
             --locked \
             -- -D warnings
@@ -160,7 +161,16 @@ jobs:
         run: pnpm install --frozen-lockfile --no-runtime
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy
+
+      - name: Lint the Windows native boundary
+        run: >-
+          cargo clippy
+          --package renamewright-platform
+          --package renamewright-windows-native
+          --all-targets
+          --locked
+          -- -D warnings
 
       - name: Test the complete Rust workspace
         run: cargo test --workspace --all-targets --locked
