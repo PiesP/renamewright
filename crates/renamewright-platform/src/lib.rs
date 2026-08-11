@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod execution_fs;
+mod executor;
 mod journal;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,6 +21,11 @@ pub use execution_fs::LinuxExecutionFileSystem;
 pub use execution_fs::{
     ExecutionFileSystem, ExecutionFsError, ExecutionFsErrorKind, NativeExecutionFileSystem,
     temporary_name,
+};
+pub use executor::{
+    ExecutionOutcome, ExecutionRecovery, ExecutionRecoveryReason, ExecutionStartError,
+    FreezeExecutionError, FreezeExecutionErrorKind, FrozenExecutionPlan,
+    MAX_TEMPORARY_NAME_ATTEMPTS, execute_frozen_plan, freeze_execution_plan,
 };
 pub use journal::{
     JOURNAL_SCHEMA_VERSION, JournalCodecError, JournalCodecErrorKind, JournalFrame,
