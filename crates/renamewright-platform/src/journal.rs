@@ -80,6 +80,37 @@ pub struct JournalFrame {
     record: JournalRecord,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalInspection {
+    frames: Vec<JournalFrame>,
+    issue: Option<JournalCodecError>,
+}
+
+impl JournalInspection {
+    #[must_use]
+    pub fn frames(&self) -> &[JournalFrame] {
+        &self.frames
+    }
+
+    #[must_use]
+    pub const fn issue(&self) -> Option<JournalCodecError> {
+        self.issue
+    }
+
+    #[must_use]
+    pub fn is_torn_tail(&self) -> bool {
+        matches!(
+            self.issue.map(JournalCodecError::kind),
+            Some(JournalCodecErrorKind::TruncatedHeader | JournalCodecErrorKind::TruncatedPayload)
+        )
+    }
+
+    #[must_use]
+    pub fn into_frames(self) -> Vec<JournalFrame> {
+        self.frames
+    }
+}
+
 impl JournalFrame {
     #[must_use]
     pub const fn schema_version(&self) -> u16 {
@@ -429,6 +460,46 @@ pub fn decode_journal(bytes: &[u8]) -> Result<Vec<JournalFrame>, JournalCodecErr
     }
 
     Ok(frames)
+}
+
+/// Reads the longest valid journal prefix and retains a pathless description of
+/// the first invalid or torn frame. This function never treats a damaged prefix
+/// as permission to resume execution.
+#[must_use]
+pub fn inspect_journal(bytes: &[u8]) -> JournalInspection {
+    match decode_journal(bytes) {
+        Ok(frames) => JournalInspection {
+            frames,
+            issue: None,
+        },
+        Err(issue) => {
+            let prefix_length = complete_prefix_length(bytes, issue.frame_index());
+            let frames = prefix_length
+                .and_then(|length| decode_journal(&bytes[..length]).ok())
+                .unwrap_or_default();
+            JournalInspection {
+                frames,
+                issue: Some(issue),
+            }
+        }
+    }
+}
+
+fn complete_prefix_length(bytes: &[u8], frame_count: usize) -> Option<usize> {
+    let mut offset = 0usize;
+    for _ in 0..frame_count {
+        let header_end = offset.checked_add(FRAME_HEADER_BYTES)?;
+        let header = bytes.get(offset..header_end)?;
+        let payload_length = u32::from_le_bytes(header.get(16..20)?.try_into().ok()?) as usize;
+        if payload_length > MAX_JOURNAL_PAYLOAD_BYTES {
+            return None;
+        }
+        offset = header_end.checked_add(payload_length)?;
+        if offset > bytes.len() {
+            return None;
+        }
+    }
+    Some(offset)
 }
 
 pub(crate) fn encode_frame(

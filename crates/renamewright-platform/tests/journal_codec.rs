@@ -7,7 +7,7 @@ use renamewright_core::{
 };
 use renamewright_platform::{
     JOURNAL_SCHEMA_VERSION, JournalCodecErrorKind, MAX_JOURNAL_PAYLOAD_BYTES, decode_journal,
-    encode_journal,
+    encode_journal, inspect_journal,
 };
 
 const GOLDEN_V1_TRANSACTION_COMPLETED: [u8; 24] = [
@@ -177,6 +177,49 @@ fn rejects_corrupted_payload() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(error.kind(), JournalCodecErrorKind::ChecksumMismatch);
     assert_eq!(error.frame_index(), 0);
     assert!(!error.to_string().contains('/'));
+    Ok(())
+}
+
+#[test]
+fn inspection_retains_only_the_valid_prefix_before_damage() -> Result<(), Box<dyn std::error::Error>>
+{
+    let records = complete_records(OsString::from("original.txt"));
+    let mut bytes = encode_journal(&records)?;
+    let first_frame_length = encode_journal(&records[..1])?.len();
+    let corrupt_at = first_frame_length
+        .checked_add(24)
+        .ok_or("corruption offset overflowed")?;
+    let Some(byte) = bytes.get_mut(corrupt_at) else {
+        return Err("second frame had no payload".into());
+    };
+    *byte ^= 0xff;
+
+    let inspection = inspect_journal(&bytes);
+
+    assert_eq!(inspection.frames().len(), 1);
+    assert!(!inspection.is_torn_tail());
+    assert_eq!(
+        inspection.issue().map(|issue| issue.kind()),
+        Some(JournalCodecErrorKind::ChecksumMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn inspection_classifies_a_truncated_final_frame_as_a_torn_tail()
+-> Result<(), Box<dyn std::error::Error>> {
+    let records = complete_records(OsString::from("original.txt"));
+    let mut bytes = encode_journal(&records)?;
+    bytes.pop().ok_or("journal was empty")?;
+
+    let inspection = inspect_journal(&bytes);
+
+    assert_eq!(inspection.frames().len(), records.len() - 1);
+    assert!(inspection.is_torn_tail());
+    assert_eq!(
+        inspection.issue().map(|issue| issue.kind()),
+        Some(JournalCodecErrorKind::TruncatedHeader)
+    );
     Ok(())
 }
 
