@@ -16,6 +16,7 @@ pub use model::{
     SourceSnapshot, TargetPolicy, TraceStep, ValidationEnvironment,
 };
 pub use planner::{build_plan, build_plan_with_environment};
+pub use windows::windows_name_comparison_key;
 
 /// Version of the frontend/backend planning protocol.
 pub const PROTOCOL_VERSION: u16 = 1;

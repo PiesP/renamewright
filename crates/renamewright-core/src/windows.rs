@@ -1,3 +1,5 @@
+use std::ffi::{OsStr, OsString};
+
 use crate::model::{Diagnostic, DiagnosticCode};
 
 const ILLEGAL_CHARACTERS: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
@@ -28,6 +30,13 @@ pub(crate) fn comparison_key(name: &str) -> String {
     name.trim_end_matches([' ', '.']).to_lowercase()
 }
 
+#[must_use]
+pub fn windows_name_comparison_key(name: &OsStr) -> OsString {
+    name.to_str()
+        .map(comparison_key)
+        .map_or_else(|| name.to_os_string(), OsString::from)
+}
+
 fn is_reserved(name: &str) -> bool {
     let stem = name
         .split_once('.')
@@ -47,7 +56,9 @@ fn numbered_device(name: &str, prefix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{comparison_key, is_reserved};
+    use std::ffi::OsStr;
+
+    use super::{comparison_key, is_reserved, windows_name_comparison_key};
 
     #[test]
     fn device_names_are_reserved_with_extensions() {
@@ -59,5 +70,9 @@ mod tests {
     #[test]
     fn comparison_ignores_case_and_trailing_dots() {
         assert_eq!(comparison_key("Report.TXT."), "report.txt");
+        assert_eq!(
+            windows_name_comparison_key(OsStr::new("Report.TXT.")),
+            OsStr::new("report.txt")
+        );
     }
 }
