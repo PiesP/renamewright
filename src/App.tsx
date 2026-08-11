@@ -6,6 +6,7 @@ import {
   type LedgerStatus,
   type Plan,
   type PlanningClient,
+  type RecoveryCommandAction,
   type RecoveryDisposition,
   type RecoveryInspection,
 } from './planning/client';
@@ -26,10 +27,12 @@ export function App(props: AppProps) {
   const [ledger, setLedger] = createSignal<LedgerEntry[]>([]);
   const [recoveryInspection, setRecoveryInspection] = createSignal<RecoveryInspection>();
   const [inspectingLedgerId, setInspectingLedgerId] = createSignal<number>();
+  const [recoveryBusyAction, setRecoveryBusyAction] = createSignal<RecoveryCommandAction>();
   let requestSequence = 0;
   let planInspector: HTMLDialogElement | undefined;
   let planInspectorOpener: HTMLButtonElement | undefined;
   let recoveryInspectionPanel: HTMLDivElement | undefined;
+  let ledgerHeading: HTMLHeadingElement | undefined;
   let previewTimer: number | undefined;
 
   const dismissPlanInspector = () => {
@@ -150,6 +153,38 @@ export function App(props: AppProps) {
     }
   };
 
+  const applyRecoveryAction = async (action: RecoveryCommandAction) => {
+    const inspection = recoveryInspection();
+    if (!inspection) {
+      return;
+    }
+    setRecoveryBusyAction(action);
+    setError('');
+    setNotice('');
+    try {
+      const result = await planningClient.applyRecoveryAction(action, inspection);
+      setLedger(result.ledger);
+      if (!result.performed) {
+        setNotice('Recovery action cancelled. No journal or file was changed.');
+        return;
+      }
+      setRecoveryInspection(undefined);
+      const messages = {
+        cancelled: 'Recovery action cancelled.',
+        completed: 'The interrupted rename transaction completed.',
+        rolledBack: 'The interrupted rename transaction was rolled back.',
+        recoveryRequired: 'Recovery stopped safely. Inspect the transaction again.',
+        reconciled: 'Prepared-step observation recorded. Inspect the transaction again.',
+      } as const;
+      setNotice(messages[result.outcome]);
+      queueMicrotask(() => ledgerHeading?.focus({ preventScroll: true }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The recovery action could not run.');
+    } finally {
+      setRecoveryBusyAction(undefined);
+    }
+  };
+
   onMount(() => {
     void planningClient
       .listLedger()
@@ -176,6 +211,9 @@ export function App(props: AppProps) {
     const current = plan();
     if (error()) {
       return error();
+    }
+    if (recoveryBusyAction()) {
+      return 'Waiting for native confirmation or recovery completion…';
     }
     if (busy()) {
       return 'Updating the rename plan…';
@@ -245,12 +283,14 @@ export function App(props: AppProps) {
       return '';
     }
     if (inspection.readiness === 'reconciliationRequired') {
-      return `${dispositionLabel(inspection.disposition)} Recovery actions remain locked.`;
+      return `${dispositionLabel(inspection.disposition)} Recording this observation requires native confirmation.`;
     }
     if (inspection.readiness === 'blocked') {
       return 'The journal no longer matches one expected entry location. No action is available.';
     }
-    return 'Resume and rollback remain locked until Windows interruption testing passes.';
+    return inspection.direction === 'forward'
+      ? 'Resume or roll back only after native confirmation and a fresh identity check.'
+      : 'Continue rollback only after native confirmation and a fresh identity check.';
   };
 
   return (
@@ -267,7 +307,7 @@ export function App(props: AppProps) {
           </div>
         </div>
         <div class="source-actions">
-          <span class="read-only-badge">Read-only milestone</span>
+          <span class="read-only-badge">Recovery-only milestone</span>
           <span class="drop-hint">
             {planningClient.nativeSelectionAvailable ? 'Drop files anywhere' : 'Desktop drop ready'}
           </span>
@@ -331,17 +371,19 @@ export function App(props: AppProps) {
           <div class="scope-note">
             <strong>Current scope</strong>
             <p>
-              Prefix rules with deterministic name, occupancy, and stale-source checks. No file
-              operation can run.
+              New plan execution remains locked. Startup recovery requires inspection and native
+              confirmation.
             </p>
           </div>
           <Show when={ledger().length > 0}>
             <section class="ledger-panel" aria-labelledby="ledger-heading">
               <div class="ledger-heading">
-                <h2 id="ledger-heading">Rename Ledger</h2>
+                <h2 id="ledger-heading" tabIndex={-1} ref={ledgerHeading}>
+                  Rename Ledger
+                </h2>
                 <span>{ledger().length}</span>
               </div>
-              <p>Local transaction status. Recovery actions remain locked.</p>
+              <p>Inspect a transaction before any native-confirmed recovery action.</p>
               <ul aria-label="Rename journal status">
                 {ledger().map((entry) => (
                   <li>
@@ -361,7 +403,9 @@ export function App(props: AppProps) {
                         <button
                           class="button button-secondary button-compact ledger-inspect-button"
                           type="button"
-                          disabled={inspectingLedgerId() !== undefined}
+                          disabled={
+                            inspectingLedgerId() !== undefined || recoveryBusyAction() !== undefined
+                          }
                           aria-label={`Inspect ${entry.planId === null ? `ledger ${entry.ledgerId}` : `plan ${entry.planId}`} recovery`}
                           onClick={() => void inspectLedgerEntry(entry)}
                         >
@@ -387,6 +431,45 @@ export function App(props: AppProps) {
                       ? ' · terminal record'
                       : ` · step ${recoveryInspection()?.stepIndex}`}
                   </span>
+                  <fieldset class="ledger-recovery-actions">
+                    <legend class="visually-hidden">Available recovery actions</legend>
+                    <Show when={recoveryInspection()?.reconcileAvailable}>
+                      <button
+                        class="button button-primary button-compact"
+                        type="button"
+                        disabled={recoveryBusyAction() !== undefined}
+                        onClick={() => void applyRecoveryAction('reconcile')}
+                      >
+                        {recoveryBusyAction() === 'reconcile'
+                          ? 'Waiting for confirmation…'
+                          : 'Record observation'}
+                      </button>
+                    </Show>
+                    <Show when={recoveryInspection()?.resumeAvailable}>
+                      <button
+                        class="button button-primary button-compact"
+                        type="button"
+                        disabled={recoveryBusyAction() !== undefined}
+                        onClick={() => void applyRecoveryAction('resume')}
+                      >
+                        {recoveryBusyAction() === 'resume'
+                          ? 'Recovering…'
+                          : recoveryInspection()?.direction === 'forward'
+                            ? 'Resume'
+                            : 'Continue rollback'}
+                      </button>
+                    </Show>
+                    <Show when={recoveryInspection()?.rollbackAvailable}>
+                      <button
+                        class="button button-secondary button-compact"
+                        type="button"
+                        disabled={recoveryBusyAction() !== undefined}
+                        onClick={() => void applyRecoveryAction('rollback')}
+                      >
+                        {recoveryBusyAction() === 'rollback' ? 'Rolling back…' : 'Roll back'}
+                      </button>
+                    </Show>
+                  </fieldset>
                 </div>
               </Show>
             </section>
@@ -462,7 +545,7 @@ export function App(props: AppProps) {
           </span>
         </div>
         <div class="execution-lock">
-          <span>File execution arrives after recovery design and Windows testing.</span>
+          <span>New rename execution remains unavailable while startup recovery is enabled.</span>
           <button class="button button-locked" type="button" disabled>
             Execution unavailable
           </button>

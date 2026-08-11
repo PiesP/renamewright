@@ -44,11 +44,14 @@ function fakeClient(): PlanningClient {
     inspectRecovery: async () => {
       throw new Error('No recovery fixture was configured.');
     },
+    applyRecoveryAction: async () => {
+      throw new Error('No recovery action fixture was configured.');
+    },
     watchSourceChanges: () => () => undefined,
   };
 }
 
-test('shows path-free startup ledger status without enabling recovery actions', async () => {
+test('runs a path-free startup ledger action only after inspection', async () => {
   const user = userEvent.setup();
   const client = fakeClient();
   client.listLedger = async () => [
@@ -63,7 +66,7 @@ test('shows path-free startup ledger status without enabling recovery actions', 
       recoveryAvailable: true,
     },
   ];
-  client.inspectRecovery = async () => ({
+  const inspection = {
     ledgerId: 1,
     direction: 'forward',
     stepIndex: 2,
@@ -72,7 +75,25 @@ test('shows path-free startup ledger status without enabling recovery actions', 
     resumeAvailable: false,
     rollbackAvailable: false,
     reconcileAvailable: true,
-  });
+  } as const;
+  client.inspectRecovery = async () => inspection;
+  const applyRecoveryAction = vi.fn(async () => ({
+    performed: true,
+    outcome: 'reconciled' as const,
+    ledger: [
+      {
+        ledgerId: 1,
+        planId: 67,
+        sourceGeneration: 3,
+        schemaVersion: 2,
+        sourceCount: 4,
+        status: 'forwardPending' as const,
+        attentionStep: 2,
+        recoveryAvailable: true,
+      },
+    ],
+  }));
+  client.applyRecoveryAction = applyRecoveryAction;
 
   render(() => <App client={client} />);
 
@@ -83,9 +104,47 @@ test('shows path-free startup ledger status without enabling recovery actions', 
   await user.click(screen.getByRole('button', { name: 'Inspect plan 67 recovery' }));
   expect(await screen.findByText('Observation ready to record')).toBeInTheDocument();
   expect(screen.getByText(/prepared rename was not applied/iu)).toBeInTheDocument();
-  expect(
-    screen.queryByRole('button', { name: /^(resume|roll back|record observation)$/iu })
-  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Record observation' }));
+  expect(applyRecoveryAction).toHaveBeenCalledWith('reconcile', inspection);
+  expect(await screen.findByText('Forward recovery pending')).toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent(
+    'Prepared-step observation recorded. Inspect the transaction again.'
+  );
+  expect(screen.queryByText('Observation ready to record')).not.toBeInTheDocument();
+});
+
+test('offers resume and rollback only when the fresh inspection allows them', async () => {
+  const user = userEvent.setup();
+  const client = fakeClient();
+  client.listLedger = async () => [
+    {
+      ledgerId: 2,
+      planId: 72,
+      sourceGeneration: 4,
+      schemaVersion: 2,
+      sourceCount: 2,
+      status: 'forwardPending',
+      attentionStep: 1,
+      recoveryAvailable: true,
+    },
+  ];
+  client.inspectRecovery = async () => ({
+    ledgerId: 2,
+    direction: 'forward',
+    stepIndex: 1,
+    readiness: 'ready',
+    disposition: null,
+    resumeAvailable: true,
+    rollbackAvailable: true,
+    reconcileAvailable: false,
+  });
+
+  render(() => <App client={client} />);
+
+  await user.click(await screen.findByRole('button', { name: 'Inspect plan 72 recovery' }));
+  expect(await screen.findByRole('button', { name: 'Resume' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Roll back' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Record observation' })).not.toBeInTheDocument();
 });
 
 test('loads sample sources and previews a prefix rule', async () => {

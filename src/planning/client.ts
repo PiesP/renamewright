@@ -71,6 +71,20 @@ export interface RecoveryInspection {
   reconcileAvailable: boolean;
 }
 
+export type RecoveryCommandAction = 'resume' | 'rollback' | 'reconcile';
+export type RecoveryCommandOutcome =
+  | 'cancelled'
+  | 'completed'
+  | 'rolledBack'
+  | 'recoveryRequired'
+  | 'reconciled';
+
+export interface RecoveryCommandResult {
+  performed: boolean;
+  outcome: RecoveryCommandOutcome;
+  ledger: LedgerEntry[];
+}
+
 export interface PlanningClient {
   nativeSelectionAvailable: boolean;
   loadSample(prefix: string): Promise<Plan>;
@@ -80,6 +94,10 @@ export interface PlanningClient {
   exportPlan(planId: number): Promise<boolean>;
   listLedger(): Promise<LedgerEntry[]>;
   inspectRecovery(ledgerId: number): Promise<RecoveryInspection>;
+  applyRecoveryAction(
+    action: RecoveryCommandAction,
+    inspection: RecoveryInspection
+  ): Promise<RecoveryCommandResult>;
   watchSourceChanges(onChange: (change: SourceChange) => void): () => void;
 }
 
@@ -130,6 +148,26 @@ function browserPlan(prefix: string): Plan {
     blockedCount,
     canApply: changedCount > 0 && blockedCount === 0,
   };
+}
+
+function recoveryCommandError(cause: unknown): Error {
+  const code =
+    typeof cause === 'object' && cause !== null && 'code' in cause
+      ? (cause as { code?: unknown }).code
+      : undefined;
+  const messages: Record<string, string> = {
+    busy: 'Another filesystem operation is already active.',
+    stateUnavailable: 'The recovery worker is unavailable.',
+    inspectionChanged: 'The recovery state changed. Inspect the transaction again.',
+    actionUnavailable: 'That recovery action is no longer available.',
+    recoveryFailed: 'Recovery stopped safely. Inspect the transaction again.',
+    ledgerRefreshFailed: 'Recovery finished, but the Rename Ledger could not be refreshed.',
+  };
+  return new Error(
+    typeof code === 'string' && code in messages
+      ? messages[code]
+      : 'The recovery action could not be completed.'
+  );
 }
 
 export function createPlanningClient(): PlanningClient {
@@ -194,6 +232,18 @@ export function createPlanningClient(): PlanningClient {
         throw new Error('Recovery inspection is available in the Windows desktop app.');
       }
       return invoke<RecoveryInspection>('inspect_recovery', { ledgerId });
+    },
+    applyRecoveryAction: async (action, inspection) => {
+      if (!nativeSelectionAvailable) {
+        throw new Error('Recovery actions are available in the Windows desktop app.');
+      }
+      try {
+        return await invoke<RecoveryCommandResult>('apply_recovery_action', {
+          request: { action, inspection },
+        });
+      } catch (cause) {
+        throw recoveryCommandError(cause);
+      }
     },
     watchSourceChanges: (onChange) => {
       if (!nativeSelectionAvailable) {

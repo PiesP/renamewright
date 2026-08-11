@@ -341,6 +341,11 @@ input:focus-visible {
   font-size: 1rem;
 }
 
+.ledger-heading h2:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
 .ledger-heading span,
 .ledger-entry-actions > span {
   color: var(--color-muted);
@@ -432,6 +437,16 @@ input:focus-visible {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
+}
+
+.ledger-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-block-start: var(--space-3);
+  padding: 0;
+  border: 0;
 }
 
 .preview-pane {

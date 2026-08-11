@@ -77,6 +77,24 @@ test('renders the path-free startup ledger at supported narrow widths', async ({
             reconcileAvailable: true,
           };
         }
+        if (command === 'apply_recovery_action') {
+          return {
+            performed: true,
+            outcome: 'reconciled',
+            ledger: [
+              {
+                ledgerId: 1,
+                planId: 67,
+                sourceGeneration: 3,
+                schemaVersion: 2,
+                sourceCount: 4,
+                status: 'forwardPending',
+                attentionStep: 2,
+                recoveryAvailable: true,
+              },
+            ],
+          };
+        }
         throw new Error(`Unexpected command: ${command}`);
       },
     };
@@ -100,9 +118,12 @@ test('renders the path-free startup ledger at supported narrow widths', async ({
       (inspectionBox?.y ?? 0) + (inspectionBox?.height ?? 0),
       `inspection obscured by review bar at ${width}px`
     ).toBeLessThanOrEqual(reviewBarBox?.y ?? 0);
+    await page.getByRole('button', { name: 'Record observation' }).click();
+    await expect(page.getByText('Forward recovery pending')).toBeVisible();
     await expect(
-      page.getByRole('button', { name: /^(resume|roll back|record observation)$/iu })
-    ).toHaveCount(0);
+      page.getByText('Prepared-step observation recorded. Inspect the transaction again.')
+    ).toBeVisible();
+    await expect(page.getByText('Observation ready to record')).toHaveCount(0);
 
     const sizes = await page.evaluate(() => ({
       client: document.documentElement.clientWidth,
