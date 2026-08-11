@@ -13,9 +13,11 @@ new product owns its interaction model, safety guarantees, and implementation.
 
 ## Status
 
-The repository contains the approved planning baseline and a reproducible
-Rust/Tauri/Solid foundation. The current vertical slice remains read-only:
-filesystem mutation is not exposed to the application.
+The repository contains the approved planning baseline and a working read-only
+Rust/Tauri/Solid vertical slice. The desktop picker admits files into a
+Rust-owned source registry, the Workbench previews a prefix rule, and Windows
+name diagnostics block invalid proposals. Filesystem mutation is not exposed to
+the application.
 
 ## Development
 
@@ -25,12 +27,15 @@ Use the Rust, Node.js, and pnpm versions pinned by `rust-toolchain.toml` and
 ```bash
 pnpm install --frozen-lockfile
 pnpm verify
+pnpm verify:full
 pnpm tauri dev
 ```
 
 `pnpm verify` runs frontend formatting, linting, strict types, coverage and build
 checks plus Rustfmt, Clippy, and all Rust workspace tests. See
 [the delivery plan](docs/delivery-plan.md) for the implementation sequence.
+`pnpm verify:full` additionally exercises the rendered flow and responsive
+layouts in Chromium.
 
 ## Product commitments
 

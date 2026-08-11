@@ -18,6 +18,8 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 renamewright-core = { path = "../crates/renamewright-core" }
 renamewright-platform = { path = "../crates/renamewright-platform" }
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
 tauri = { version = "2.11.5", features = [] }
 
 [lints]

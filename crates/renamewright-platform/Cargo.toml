@@ -11,5 +11,8 @@ publish = false
 [dependencies]
 renamewright-core = { path = "../renamewright-core" }
 
+[dev-dependencies]
+tempfile = "3.27.0"
+
 [lints]
 workspace = true
