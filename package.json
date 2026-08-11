@@ -1,0 +1,52 @@
+{
+  "name": "renamewright",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A modern, local-first batch rename workbench.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "fmt": "biome check --linter-enabled=false .",
+    "fmt:fix": "biome check --write --linter-enabled=false .",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "check": "tsc --noEmit",
+    "fmt:rust": "cargo fmt --all -- --check",
+    "lint:rust": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cov": "vitest run --coverage",
+    "test:rust": "cargo test --workspace --all-targets --locked",
+    "quality": "pnpm -s fmt && pnpm -s lint && pnpm -s check && pnpm -s fmt:rust && pnpm -s lint:rust",
+    "verify": "pnpm -s quality && pnpm -s test:cov && pnpm -s test:rust && pnpm -s build",
+    "tauri": "tauri"
+  },
+  "engines": {
+    "node": ">=22.13.0",
+    "pnpm": ">=11.17.0"
+  },
+  "packageManager": "pnpm@11.17.0",
+  "volta": {
+    "node": "26.7.0",
+    "pnpm": "11.17.0"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "solid-js": "1.9.14"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.7",
+    "@solidjs/testing-library": "0.8.10",
+    "@tauri-apps/cli": "2.11.4",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/user-event": "14.6.3",
+    "@vitest/coverage-v8": "4.1.10",
+    "jsdom": "30.0.1",
+    "typescript": "7.0.2",
+    "vite": "8.2.1",
+    "vite-plugin-solid": "2.11.14",
+    "vitest": "4.1.10"
+  }
+}

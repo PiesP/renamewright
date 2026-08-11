@@ -1,0 +1,23 @@
+[workspace]
+members = [
+  "crates/renamewright-core",
+  "crates/renamewright-platform",
+  "src-tauri",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+authors = ["PiesP"]
+repository = "https://github.com/PiesP/renamewright"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "deny"
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"

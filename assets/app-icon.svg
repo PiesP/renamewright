@@ -1,0 +1,15 @@
+<!-- Renamewright foundation mark: source name to validated target name. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Renamewright</title>
+  <rect width="512" height="512" rx="112" fill="#142238" />
+  <rect x="104" y="128" width="208" height="56" rx="28" fill="#dce8f8" />
+  <rect x="104" y="328" width="304" height="56" rx="28" fill="#60d4c8" />
+  <path
+    d="M336 132v96c0 31-25 56-56 56H176"
+    fill="none"
+    stroke="#60d4c8"
+    stroke-linecap="round"
+    stroke-width="36"
+  />
+  <path d="m196 244-40 40 40 40" fill="none" stroke="#60d4c8" stroke-linecap="round" stroke-linejoin="round" stroke-width="36" />
+</svg>
