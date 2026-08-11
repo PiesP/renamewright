@@ -1,13 +1,57 @@
+use std::ffi::OsString;
+
 use renamewright_core::{
-    ExecutionDirection, ExecutionPhase, JournalRecord, JournalReplayErrorKind, JournalStatus,
-    PlanId, RollbackCause, ScheduleError, SourceId, build_two_phase_schedule, replay_journal,
+    EntryIdentitySignal, EntryKind, ExecutionDirection, ExecutionIdentity, ExecutionPhase,
+    JournalEntry, JournalNameGraph, JournalRecord, JournalReplayErrorKind, JournalStatus, ParentId,
+    PlanId, RollbackCause, ScheduleError, SourceFingerprint, SourceId, build_two_phase_schedule,
+    replay_journal,
 };
+
+fn identity(seed: usize) -> ExecutionIdentity {
+    let mut file_id = [0; 16];
+    file_id[..8].copy_from_slice(&(seed as u64).to_le_bytes());
+    ExecutionIdentity::new(5, file_id)
+}
+
+fn entry(source: u64) -> JournalEntry {
+    JournalEntry::new(
+        SourceId::new(source),
+        ParentId::new(10),
+        JournalNameGraph::new(
+            OsString::from(format!("source-{source}.txt")),
+            OsString::from(format!(".renamewright-{source}.tmp")),
+            OsString::from(format!("final-{source}.txt")),
+        ),
+        SourceFingerprint::new(
+            EntryKind::File,
+            Some(EntryIdentitySignal::new(5, source)),
+            12,
+            Some(99),
+        ),
+        identity(source as usize),
+    )
+}
 
 fn started(step_count: usize) -> JournalRecord {
     JournalRecord::TransactionStarted {
         plan_id: PlanId::new(41),
         source_generation: 7,
         step_count,
+        entries: (1..=(step_count / 2) as u64).map(entry).collect(),
+    }
+}
+
+fn forward_completed(step_index: usize) -> JournalRecord {
+    JournalRecord::ForwardStepCompleted {
+        step_index,
+        observed_identity: identity(step_index),
+    }
+}
+
+fn rollback_completed(step_index: usize) -> JournalRecord {
+    JournalRecord::RollbackStepCompleted {
+        step_index,
+        observed_identity: identity(step_index),
     }
 }
 
@@ -49,13 +93,47 @@ fn schedule_rejects_empty_or_duplicate_sources() {
 }
 
 #[test]
+fn journal_payload_preserves_native_name_graph_and_execution_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let JournalRecord::TransactionStarted { entries, .. } = started(2) else {
+        return Err("the helper must create a transaction header".into());
+    };
+    let Some(first) = entries.first() else {
+        return Err("the transaction header must retain its entry graph".into());
+    };
+    assert_eq!(first.names().original_name(), "source-1.txt");
+    assert_eq!(first.names().temporary_name(), ".renamewright-1.tmp");
+    assert_eq!(first.names().final_name(), "final-1.txt");
+    assert_eq!(first.execution_identity(), identity(1));
+
+    let JournalRecord::ForwardStepCompleted {
+        observed_identity, ..
+    } = forward_completed(0)
+    else {
+        return Err("the helper must create a completed step".into());
+    };
+    assert_eq!(observed_identity, identity(0));
+    Ok(())
+}
+
+#[test]
+fn journal_header_rejects_a_step_count_without_a_complete_name_graph()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Err(error) = replay_journal(&[started(1)]) else {
+        return Err("an odd two-phase step count must be rejected".into());
+    };
+    assert_eq!(error.kind(), JournalReplayErrorKind::InvalidStepCount);
+    Ok(())
+}
+
+#[test]
 fn completed_forward_journal_replays_to_a_terminal_state() {
     let records = [
         started(2),
         JournalRecord::ForwardStepPrepared { step_index: 0 },
-        JournalRecord::ForwardStepCompleted { step_index: 0 },
+        forward_completed(0),
         JournalRecord::ForwardStepPrepared { step_index: 1 },
-        JournalRecord::ForwardStepCompleted { step_index: 1 },
+        forward_completed(1),
         JournalRecord::TransactionCompleted,
     ];
 
@@ -84,7 +162,7 @@ fn forward_failure_rolls_back_completed_steps_in_reverse_order() {
     let mut records = vec![started(4)];
     for step_index in 0..2 {
         records.push(JournalRecord::ForwardStepPrepared { step_index });
-        records.push(JournalRecord::ForwardStepCompleted { step_index });
+        records.push(forward_completed(step_index));
     }
     records.push(JournalRecord::ForwardStepPrepared { step_index: 2 });
     records.push(JournalRecord::RollbackStarted { cause });
@@ -99,7 +177,7 @@ fn forward_failure_rolls_back_completed_steps_in_reverse_order() {
 
     records.extend([
         JournalRecord::RollbackStepPrepared { step_index: 1 },
-        JournalRecord::RollbackStepCompleted { step_index: 1 },
+        rollback_completed(1),
     ]);
     assert_eq!(
         replay_journal(&records),
@@ -114,12 +192,12 @@ fn forward_failure_rolls_back_completed_steps_in_reverse_order() {
 fn cancellation_at_a_step_boundary_uses_the_same_rollback_path() {
     let cause = RollbackCause::Cancelled;
     let records = [
-        started(3),
+        started(4),
         JournalRecord::ForwardStepPrepared { step_index: 0 },
-        JournalRecord::ForwardStepCompleted { step_index: 0 },
+        forward_completed(0),
         JournalRecord::RollbackStarted { cause },
         JournalRecord::RollbackStepPrepared { step_index: 0 },
-        JournalRecord::RollbackStepCompleted { step_index: 0 },
+        rollback_completed(0),
     ];
 
     assert_eq!(
@@ -132,12 +210,12 @@ fn cancellation_at_a_step_boundary_uses_the_same_rollback_path() {
 fn completed_rollback_requires_an_explicit_terminal_record() {
     let cause = RollbackCause::Cancelled;
     let mut records = vec![
-        started(1),
+        started(2),
         JournalRecord::ForwardStepPrepared { step_index: 0 },
-        JournalRecord::ForwardStepCompleted { step_index: 0 },
+        forward_completed(0),
         JournalRecord::RollbackStarted { cause },
         JournalRecord::RollbackStepPrepared { step_index: 0 },
-        JournalRecord::RollbackStepCompleted { step_index: 0 },
+        rollback_completed(0),
     ];
 
     assert_eq!(
@@ -155,9 +233,9 @@ fn completed_rollback_requires_an_explicit_terminal_record() {
 fn prepared_rollback_step_without_an_outcome_requires_reconciliation() {
     let cause = RollbackCause::Cancelled;
     let records = [
-        started(3),
+        started(4),
         JournalRecord::ForwardStepPrepared { step_index: 0 },
-        JournalRecord::ForwardStepCompleted { step_index: 0 },
+        forward_completed(0),
         JournalRecord::RollbackStarted { cause },
         JournalRecord::RollbackStepPrepared { step_index: 0 },
     ];
@@ -175,9 +253,9 @@ fn prepared_rollback_step_without_an_outcome_requires_reconciliation() {
 fn rollback_failure_remains_recovery_required() {
     let cause = RollbackCause::Cancelled;
     let records = [
-        started(3),
+        started(4),
         JournalRecord::ForwardStepPrepared { step_index: 0 },
-        JournalRecord::ForwardStepCompleted { step_index: 0 },
+        forward_completed(0),
         JournalRecord::RollbackStarted { cause },
         JournalRecord::RollbackStepPrepared { step_index: 0 },
         JournalRecord::RollbackStepFailed { step_index: 0 },
@@ -211,9 +289,11 @@ fn replay_rejects_out_of_order_and_post_terminal_records() -> Result<(), Box<dyn
     );
 
     let post_terminal = [
-        started(1),
+        started(2),
         JournalRecord::ForwardStepPrepared { step_index: 0 },
-        JournalRecord::ForwardStepCompleted { step_index: 0 },
+        forward_completed(0),
+        JournalRecord::ForwardStepPrepared { step_index: 1 },
+        forward_completed(1),
         JournalRecord::TransactionCompleted,
         JournalRecord::RollbackStarted {
             cause: RollbackCause::Cancelled,

@@ -6,9 +6,9 @@ mod planner;
 mod windows;
 
 pub use execution::{
-    ExecutionDirection, ExecutionPhase, ExecutionStep, JournalRecord, JournalReplayError,
-    JournalReplayErrorKind, JournalStatus, RollbackCause, ScheduleError, build_two_phase_schedule,
-    replay_journal,
+    ExecutionDirection, ExecutionIdentity, ExecutionPhase, ExecutionStep, JournalEntry,
+    JournalNameGraph, JournalRecord, JournalReplayError, JournalReplayErrorKind, JournalStatus,
+    RollbackCause, ScheduleError, build_two_phase_schedule, replay_journal,
 };
 pub use model::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, EntryIdentitySignal, EntryKind, NameStatus,

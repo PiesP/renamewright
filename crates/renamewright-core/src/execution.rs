@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 use std::error::Error;
+use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 
-use crate::{PlanId, SourceId};
+use crate::{ParentId, PlanId, SourceFingerprint, SourceId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionPhase {
@@ -106,17 +107,131 @@ pub enum RollbackCause {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecutionIdentity {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+}
+
+impl ExecutionIdentity {
+    #[must_use]
+    pub const fn new(volume_serial_number: u64, file_id: [u8; 16]) -> Self {
+        Self {
+            volume_serial_number,
+            file_id,
+        }
+    }
+
+    #[must_use]
+    pub const fn volume_serial_number(self) -> u64 {
+        self.volume_serial_number
+    }
+
+    #[must_use]
+    pub const fn file_id(self) -> [u8; 16] {
+        self.file_id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalNameGraph {
+    original_name: OsString,
+    temporary_name: OsString,
+    final_name: OsString,
+}
+
+impl JournalNameGraph {
+    #[must_use]
+    pub fn new(original_name: OsString, temporary_name: OsString, final_name: OsString) -> Self {
+        Self {
+            original_name,
+            temporary_name,
+            final_name,
+        }
+    }
+
+    #[must_use]
+    pub fn original_name(&self) -> &OsStr {
+        &self.original_name
+    }
+
+    #[must_use]
+    pub fn temporary_name(&self) -> &OsStr {
+        &self.temporary_name
+    }
+
+    #[must_use]
+    pub fn final_name(&self) -> &OsStr {
+        &self.final_name
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalEntry {
+    source_id: SourceId,
+    parent_id: ParentId,
+    names: JournalNameGraph,
+    admission_fingerprint: SourceFingerprint,
+    execution_identity: ExecutionIdentity,
+}
+
+impl JournalEntry {
+    #[must_use]
+    pub fn new(
+        source_id: SourceId,
+        parent_id: ParentId,
+        names: JournalNameGraph,
+        admission_fingerprint: SourceFingerprint,
+        execution_identity: ExecutionIdentity,
+    ) -> Self {
+        Self {
+            source_id,
+            parent_id,
+            names,
+            admission_fingerprint,
+            execution_identity,
+        }
+    }
+
+    #[must_use]
+    pub const fn source_id(&self) -> SourceId {
+        self.source_id
+    }
+
+    #[must_use]
+    pub const fn parent_id(&self) -> ParentId {
+        self.parent_id
+    }
+
+    #[must_use]
+    pub const fn names(&self) -> &JournalNameGraph {
+        &self.names
+    }
+
+    #[must_use]
+    pub const fn admission_fingerprint(&self) -> &SourceFingerprint {
+        &self.admission_fingerprint
+    }
+
+    #[must_use]
+    pub const fn execution_identity(&self) -> ExecutionIdentity {
+        self.execution_identity
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JournalRecord {
     TransactionStarted {
         plan_id: PlanId,
         source_generation: u64,
         step_count: usize,
+        entries: Vec<JournalEntry>,
     },
     ForwardStepPrepared {
         step_index: usize,
     },
     ForwardStepCompleted {
         step_index: usize,
+        observed_identity: ExecutionIdentity,
     },
     RollbackStarted {
         cause: RollbackCause,
@@ -126,6 +241,7 @@ pub enum JournalRecord {
     },
     RollbackStepCompleted {
         step_index: usize,
+        observed_identity: ExecutionIdentity,
     },
     RollbackStepFailed {
         step_index: usize,
@@ -234,13 +350,19 @@ pub fn replay_journal(records: &[JournalRecord]) -> Result<JournalStatus, Journa
             JournalReplayErrorKind::EmptyJournal,
         ));
     };
-    let JournalRecord::TransactionStarted { step_count, .. } = first else {
+    let JournalRecord::TransactionStarted {
+        step_count,
+        entries,
+        ..
+    } = first
+    else {
         return Err(JournalReplayError::new(
             0,
             JournalReplayErrorKind::MissingHeader,
         ));
     };
-    if *step_count == 0 {
+    let expected_step_count = entries.len().checked_mul(2);
+    if entries.is_empty() || expected_step_count != Some(*step_count) {
         return Err(JournalReplayError::new(
             0,
             JournalReplayErrorKind::InvalidStepCount,
@@ -253,7 +375,7 @@ pub fn replay_journal(records: &[JournalRecord]) -> Result<JournalStatus, Journa
         prepared_step: None,
     };
     for (record_index, record) in records.iter().enumerate().skip(1) {
-        mode = apply_record(mode, *step_count, *record, record_index)?;
+        mode = apply_record(mode, *step_count, record, record_index)?;
     }
     Ok(status_for(mode, *step_count))
 }
@@ -261,7 +383,7 @@ pub fn replay_journal(records: &[JournalRecord]) -> Result<JournalStatus, Journa
 fn apply_record(
     mode: ReplayMode,
     step_count: usize,
-    record: JournalRecord,
+    record: &JournalRecord,
     record_index: usize,
 ) -> Result<ReplayMode, JournalReplayError> {
     match mode {
@@ -296,22 +418,24 @@ fn apply_forward_record(
     mut completed_steps: Vec<usize>,
     prepared_step: Option<usize>,
     step_count: usize,
-    record: JournalRecord,
+    record: &JournalRecord,
     record_index: usize,
 ) -> Result<ReplayMode, JournalReplayError> {
     match record {
         JournalRecord::ForwardStepPrepared { step_index }
             if prepared_step.is_none() && next_step < step_count =>
         {
-            require_step(next_step, step_index, record_index)?;
+            require_step(next_step, *step_index, record_index)?;
             Ok(ReplayMode::Forward {
                 next_step,
                 completed_steps,
-                prepared_step: Some(step_index),
+                prepared_step: Some(*step_index),
             })
         }
-        JournalRecord::ForwardStepCompleted { step_index } if prepared_step == Some(step_index) => {
-            completed_steps.push(step_index);
+        JournalRecord::ForwardStepCompleted { step_index, .. }
+            if prepared_step == Some(*step_index) =>
+        {
+            completed_steps.push(*step_index);
             Ok(ReplayMode::Forward {
                 next_step: next_step + 1,
                 completed_steps,
@@ -319,7 +443,7 @@ fn apply_forward_record(
             })
         }
         JournalRecord::RollbackStarted { cause } => {
-            match cause {
+            match *cause {
                 RollbackCause::Cancelled if prepared_step.is_none() => {}
                 RollbackCause::ForwardStepFailed { step_index }
                     if prepared_step == Some(step_index) =>
@@ -329,7 +453,7 @@ fn apply_forward_record(
                 _ => return unexpected(record_index),
             }
             Ok(ReplayMode::Rollback {
-                cause,
+                cause: *cause,
                 remaining_steps: completed_steps.iter().rev().copied().collect(),
                 prepared_step: None,
             })
@@ -340,7 +464,7 @@ fn apply_forward_record(
             Ok(ReplayMode::Completed)
         }
         JournalRecord::ForwardStepPrepared { step_index } => {
-            require_step(next_step, step_index, record_index)?;
+            require_step(next_step, *step_index, record_index)?;
             unexpected(record_index)
         }
         _ => unexpected(record_index),
@@ -351,21 +475,21 @@ fn apply_rollback_record(
     cause: RollbackCause,
     mut remaining_steps: VecDeque<usize>,
     prepared_step: Option<usize>,
-    record: JournalRecord,
+    record: &JournalRecord,
     record_index: usize,
 ) -> Result<ReplayMode, JournalReplayError> {
     match record {
         JournalRecord::RollbackStepPrepared { step_index }
-            if prepared_step.is_none() && remaining_steps.front() == Some(&step_index) =>
+            if prepared_step.is_none() && remaining_steps.front() == Some(step_index) =>
         {
             Ok(ReplayMode::Rollback {
                 cause,
                 remaining_steps,
-                prepared_step: Some(step_index),
+                prepared_step: Some(*step_index),
             })
         }
-        JournalRecord::RollbackStepCompleted { step_index }
-            if prepared_step == Some(step_index) =>
+        JournalRecord::RollbackStepCompleted { step_index, .. }
+            if prepared_step == Some(*step_index) =>
         {
             remaining_steps.pop_front();
             Ok(ReplayMode::Rollback {
@@ -374,10 +498,10 @@ fn apply_rollback_record(
                 prepared_step: None,
             })
         }
-        JournalRecord::RollbackStepFailed { step_index } if prepared_step == Some(step_index) => {
+        JournalRecord::RollbackStepFailed { step_index } if prepared_step == Some(*step_index) => {
             Ok(ReplayMode::RecoveryRequired {
                 cause,
-                failed_step: step_index,
+                failed_step: *step_index,
             })
         }
         JournalRecord::TransactionRolledBack
@@ -389,7 +513,7 @@ fn apply_rollback_record(
             let Some(expected) = remaining_steps.front() else {
                 return unexpected(record_index);
             };
-            require_step(*expected, step_index, record_index)?;
+            require_step(*expected, *step_index, record_index)?;
             unexpected(record_index)
         }
         _ => unexpected(record_index),
