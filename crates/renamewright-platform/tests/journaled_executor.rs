@@ -194,12 +194,47 @@ fn cancellation_is_observed_only_between_forward_steps() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn rollback_failure_is_durably_marked_as_recovery_required()
+fn every_rollback_step_failure_is_durably_marked_as_recovery_required()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (directory, registry, plan) = fixture(61)?;
+    for (rollback_offset, failed_step) in [2, 1, 0].into_iter().enumerate() {
+        let (directory, registry, plan) = fixture(61 + rollback_offset as u64)?;
+        let filesystem = FaultingFileSystem::new(vec![
+            (3, ExecutionFsErrorKind::DestinationExists),
+            (4 + rollback_offset, ExecutionFsErrorKind::SharingViolation),
+        ]);
+        let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
+        let journal = directory.path().join("transaction.rwj");
+
+        let outcome = execute_frozen_plan(frozen, &filesystem, &journal, || false)?;
+
+        let ExecutionOutcome::RecoveryRequired(recovery) = outcome else {
+            return Err(format!("rollback step {failed_step} did not require recovery").into());
+        };
+        assert_eq!(recovery.direction(), ExecutionDirection::Rollback);
+        assert_eq!(recovery.step_index(), Some(failed_step));
+        assert_eq!(
+            recovery.reason(),
+            ExecutionRecoveryReason::RollbackFailed {
+                kind: ExecutionFsErrorKind::SharingViolation,
+            }
+        );
+        assert_eq!(
+            journal_status(&journal)?,
+            JournalStatus::RecoveryRequired {
+                cause: RollbackCause::ForwardStepFailed { step_index: 3 },
+                failed_step,
+            }
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ambiguous_rollback_result_stops_for_reconciliation() -> Result<(), Box<dyn std::error::Error>> {
+    let (directory, registry, plan) = fixture(65)?;
     let filesystem = FaultingFileSystem::new(vec![
         (3, ExecutionFsErrorKind::DestinationExists),
-        (4, ExecutionFsErrorKind::SharingViolation),
+        (4, ExecutionFsErrorKind::PostRenameIdentityMismatch),
     ]);
     let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
     let journal = directory.path().join("transaction.rwj");
@@ -207,21 +242,21 @@ fn rollback_failure_is_durably_marked_as_recovery_required()
     let outcome = execute_frozen_plan(frozen, &filesystem, &journal, || false)?;
 
     let ExecutionOutcome::RecoveryRequired(recovery) = outcome else {
-        return Err("rollback failure did not require recovery".into());
+        return Err("ambiguous rollback did not require recovery".into());
     };
     assert_eq!(recovery.direction(), ExecutionDirection::Rollback);
     assert_eq!(recovery.step_index(), Some(2));
     assert_eq!(
         recovery.reason(),
-        ExecutionRecoveryReason::RollbackFailed {
-            kind: ExecutionFsErrorKind::SharingViolation,
+        ExecutionRecoveryReason::AmbiguousFilesystem {
+            kind: ExecutionFsErrorKind::PostRenameIdentityMismatch,
         }
     );
     assert_eq!(
         journal_status(&journal)?,
-        JournalStatus::RecoveryRequired {
-            cause: RollbackCause::ForwardStepFailed { step_index: 3 },
-            failed_step: 2,
+        JournalStatus::ReconciliationRequired {
+            direction: ExecutionDirection::Rollback,
+            step_index: 2,
         }
     );
     Ok(())
