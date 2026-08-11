@@ -58,6 +58,11 @@ export function App(props: AppProps) {
     }
   };
 
+  const loadInitialSources = () =>
+    planningClient.nativeSelectionAvailable
+      ? planningClient.selectSources(prefix())
+      : planningClient.loadSample(prefix());
+
   const statusMessage = () => {
     const current = plan();
     if (error()) {
@@ -177,9 +182,15 @@ export function App(props: AppProps) {
                   class="button button-primary"
                   type="button"
                   disabled={busy()}
-                  onClick={() => void run(() => planningClient.loadSample(prefix()))}
+                  onClick={() => void run(loadInitialSources)}
                 >
-                  Load sample
+                  {busy()
+                    ? planningClient.nativeSelectionAvailable
+                      ? 'Opening…'
+                      : 'Loading…'
+                    : planningClient.nativeSelectionAvailable
+                      ? 'Add files'
+                      : 'Load sample'}
                 </button>
               </div>
             }

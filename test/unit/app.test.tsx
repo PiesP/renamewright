@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from '@solidjs/testing-library';
 import userEvent from '@testing-library/user-event';
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../src/App';
 import type { Plan, PlanningClient } from '../../src/planning/client';
 
@@ -71,4 +71,19 @@ test('reports blocked destinations without enabling execution', async () => {
   expect(screen.getAllByText('Blocked')).toHaveLength(3);
   expect(prefix).toHaveAttribute('aria-invalid', 'true');
   expect(screen.getByRole('status')).toHaveTextContent('3 names are blocked');
+});
+
+test('uses the native picker instead of browser samples in the desktop shell', async () => {
+  const user = userEvent.setup();
+  const client = fakeClient();
+  const selectSources = vi.fn(client.selectSources);
+  client.nativeSelectionAvailable = true;
+  client.selectSources = selectSources;
+  render(() => <App client={client} />);
+
+  const addButtons = screen.getAllByRole('button', { name: 'Add files' });
+  await user.click(addButtons.at(-1) as HTMLButtonElement);
+
+  expect(selectSources).toHaveBeenCalledWith('');
+  expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
 });
