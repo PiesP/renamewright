@@ -586,6 +586,10 @@ fn encode_record(
             encode_execution_identity(payload, *observed_identity);
             Ok(3)
         }
+        JournalRecord::ForwardStepNotApplied { step_index } => {
+            put_usize(payload, *step_index, frame_index)?;
+            Ok(10)
+        }
         JournalRecord::RollbackStarted { cause } => {
             encode_rollback_cause(payload, *cause, frame_index)?;
             Ok(4)
@@ -601,6 +605,10 @@ fn encode_record(
             put_usize(payload, *step_index, frame_index)?;
             encode_execution_identity(payload, *observed_identity);
             Ok(6)
+        }
+        JournalRecord::RollbackStepNotApplied { step_index } => {
+            put_usize(payload, *step_index, frame_index)?;
+            Ok(11)
         }
         JournalRecord::RollbackStepFailed { step_index } => {
             put_usize(payload, *step_index, frame_index)?;
@@ -642,6 +650,9 @@ fn decode_record(
             step_index: cursor.read_usize()?,
             observed_identity: decode_execution_identity(&mut cursor)?,
         },
+        10 => JournalRecord::ForwardStepNotApplied {
+            step_index: cursor.read_usize()?,
+        },
         4 => JournalRecord::RollbackStarted {
             cause: decode_rollback_cause(&mut cursor)?,
         },
@@ -651,6 +662,9 @@ fn decode_record(
         6 => JournalRecord::RollbackStepCompleted {
             step_index: cursor.read_usize()?,
             observed_identity: decode_execution_identity(&mut cursor)?,
+        },
+        11 => JournalRecord::RollbackStepNotApplied {
+            step_index: cursor.read_usize()?,
         },
         7 => JournalRecord::RollbackStepFailed {
             step_index: cursor.read_usize()?,

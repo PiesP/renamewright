@@ -56,6 +56,37 @@ fn rollback_completed(step_index: usize) -> JournalRecord {
 }
 
 #[test]
+fn reconciliation_can_record_that_a_prepared_step_was_not_applied() {
+    let forward = vec![
+        started(2),
+        JournalRecord::ForwardStepPrepared { step_index: 0 },
+        JournalRecord::ForwardStepNotApplied { step_index: 0 },
+    ];
+    assert_eq!(
+        replay_journal(&forward),
+        Ok(JournalStatus::ForwardPending { next_step: 0 })
+    );
+
+    let rollback = vec![
+        started(2),
+        JournalRecord::ForwardStepPrepared { step_index: 0 },
+        forward_completed(0),
+        JournalRecord::RollbackStarted {
+            cause: RollbackCause::Cancelled,
+        },
+        JournalRecord::RollbackStepPrepared { step_index: 0 },
+        JournalRecord::RollbackStepNotApplied { step_index: 0 },
+    ];
+    assert_eq!(
+        replay_journal(&rollback),
+        Ok(JournalStatus::RollbackPending {
+            cause: RollbackCause::Cancelled,
+            next_step: 0,
+        })
+    );
+}
+
+#[test]
 fn schedule_moves_every_source_to_temporary_before_any_final_name()
 -> Result<(), Box<dyn std::error::Error>> {
     let schedule =

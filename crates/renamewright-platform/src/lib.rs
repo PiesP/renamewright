@@ -3,6 +3,8 @@
 mod execution_fs;
 mod executor;
 mod journal;
+mod ledger;
+mod recovery;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -32,6 +34,15 @@ pub use journal::{
     JournalInspection, JournalStorageError, JournalStorageErrorKind, JournalWriter,
     MAX_JOURNAL_PAYLOAD_BYTES, MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION, decode_journal,
     encode_journal, inspect_journal,
+};
+pub use ledger::{
+    LedgerDiscoveryError, LedgerDiscoveryErrorKind, LedgerEntry, LedgerId, LedgerStatus,
+    MAX_DISCOVERED_JOURNALS, MAX_JOURNAL_FILE_BYTES, RenameLedger,
+};
+pub use recovery::{
+    PreparedStepDisposition, PreparedStepInspection, RecoveryInspectionError,
+    RecoveryInspectionErrorKind, RecoveryLocation, RecoveryLocationState, RecoveryObservation,
+    inspect_prepared_step,
 };
 
 /// Filesystem mutation remains unavailable during the planning milestone.

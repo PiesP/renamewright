@@ -260,6 +260,9 @@ pub enum JournalRecord {
         step_index: usize,
         observed_identity: ExecutionIdentity,
     },
+    ForwardStepNotApplied {
+        step_index: usize,
+    },
     RollbackStarted {
         cause: RollbackCause,
     },
@@ -269,6 +272,9 @@ pub enum JournalRecord {
     RollbackStepCompleted {
         step_index: usize,
         observed_identity: ExecutionIdentity,
+    },
+    RollbackStepNotApplied {
+        step_index: usize,
     },
     RollbackStepFailed {
         step_index: usize,
@@ -469,6 +475,15 @@ fn apply_forward_record(
                 prepared_step: None,
             })
         }
+        JournalRecord::ForwardStepNotApplied { step_index }
+            if prepared_step == Some(*step_index) =>
+        {
+            Ok(ReplayMode::Forward {
+                next_step,
+                completed_steps,
+                prepared_step: None,
+            })
+        }
         JournalRecord::RollbackStarted { cause } => {
             match *cause {
                 RollbackCause::Cancelled if prepared_step.is_none() => {}
@@ -519,6 +534,15 @@ fn apply_rollback_record(
             if prepared_step == Some(*step_index) =>
         {
             remaining_steps.pop_front();
+            Ok(ReplayMode::Rollback {
+                cause,
+                remaining_steps,
+                prepared_step: None,
+            })
+        }
+        JournalRecord::RollbackStepNotApplied { step_index }
+            if prepared_step == Some(*step_index) =>
+        {
             Ok(ReplayMode::Rollback {
                 cause,
                 remaining_steps,
