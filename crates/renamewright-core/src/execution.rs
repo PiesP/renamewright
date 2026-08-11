@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
+use std::path::{Path, PathBuf};
 
 use crate::{ParentId, PlanId, SourceFingerprint, SourceId};
 
@@ -172,6 +173,7 @@ pub struct JournalEntry {
     names: JournalNameGraph,
     admission_fingerprint: SourceFingerprint,
     execution_identity: ExecutionIdentity,
+    native_parent: Option<PathBuf>,
 }
 
 impl JournalEntry {
@@ -189,6 +191,26 @@ impl JournalEntry {
             names,
             admission_fingerprint,
             execution_identity,
+            native_parent: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_native_parent(
+        source_id: SourceId,
+        parent_id: ParentId,
+        names: JournalNameGraph,
+        admission_fingerprint: SourceFingerprint,
+        execution_identity: ExecutionIdentity,
+        native_parent: PathBuf,
+    ) -> Self {
+        Self {
+            source_id,
+            parent_id,
+            names,
+            admission_fingerprint,
+            execution_identity,
+            native_parent: Some(native_parent),
         }
     }
 
@@ -215,6 +237,11 @@ impl JournalEntry {
     #[must_use]
     pub const fn execution_identity(&self) -> ExecutionIdentity {
         self.execution_identity
+    }
+
+    #[must_use]
+    pub fn native_parent(&self) -> Option<&Path> {
+        self.native_parent.as_deref()
     }
 }
 

@@ -491,7 +491,7 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
         let temporary = available_temporary_name(filesystem, parent, plan.id(), source_id)?;
 
         entries.push(FrozenExecutionEntry {
-            journal_entry: JournalEntry::new(
+            journal_entry: JournalEntry::with_native_parent(
                 source_id,
                 row.parent_id(),
                 JournalNameGraph::new(
@@ -501,6 +501,7 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
                 ),
                 fingerprint,
                 execution_identity,
+                parent.to_path_buf(),
             ),
             parent: parent.to_path_buf(),
         });
