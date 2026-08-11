@@ -1,4 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
+import {
+  compileBrowserRulePipeline,
+  planningError,
+  type RulePipelineRequest,
+  type RuleTraceStep,
+} from './rules';
 
 export type RowStatus = 'changed' | 'unchanged' | 'blocked';
 
@@ -110,9 +116,9 @@ export interface RecoveryCommandResult {
 
 export interface PlanningClient {
   nativeSelectionAvailable: boolean;
-  loadSample(prefix: string): Promise<Plan>;
-  selectSources(prefix: string): Promise<Plan | null>;
-  previewPrefix(prefix: string): Promise<Plan>;
+  loadSample(request: RulePipelineRequest): Promise<Plan>;
+  selectSources(request: RulePipelineRequest): Promise<Plan | null>;
+  previewRules(request: RulePipelineRequest): Promise<Plan>;
   inspectPlan(planId: number): Promise<string>;
   exportPlan(planId: number): Promise<boolean>;
   listLedger(): Promise<LedgerEntry[]>;
@@ -139,9 +145,18 @@ const illegalWindowsCharacters = '<>:"/\\|?*';
 
 let nextBrowserPlanId = 1;
 
-function browserPlan(prefix: string): Plan {
+interface BrowserPlanResult {
+  plan: Plan;
+  traces: Map<number, RuleTraceStep[]>;
+}
+
+function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
+  const traces = new Map<number, RuleTraceStep[]>();
+  const applyRules = compileBrowserRulePipeline(request);
   const rows = sampleNames.map((originalName, index): PlanRow => {
-    const proposedName = `${prefix}${originalName}`;
+    const sourceId = index + 1;
+    const { proposedName, trace } = applyRules(originalName);
+    traces.set(sourceId, trace);
     const illegal = [...proposedName].some((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
       return codePoint < 32 || illegalWindowsCharacters.includes(character);
@@ -157,7 +172,7 @@ function browserPlan(prefix: string): Plan {
     ];
 
     return {
-      sourceId: index + 1,
+      sourceId,
       originalName,
       proposedName,
       status: blocked ? 'blocked' : proposedName === originalName ? 'unchanged' : 'changed',
@@ -168,12 +183,15 @@ function browserPlan(prefix: string): Plan {
   const blockedCount = rows.filter((row) => row.status === 'blocked').length;
 
   return {
-    planId: nextBrowserPlanId++,
-    generation: 1,
-    rows,
-    changedCount,
-    blockedCount,
-    canApply: changedCount > 0 && blockedCount === 0,
+    plan: {
+      planId: nextBrowserPlanId++,
+      generation: 1,
+      rows,
+      changedCount,
+      blockedCount,
+      canApply: changedCount > 0 && blockedCount === 0,
+    },
+    traces,
   };
 }
 
@@ -217,10 +235,12 @@ function undoCommandError(cause: unknown): Error {
 
 export function createPlanningClient(): PlanningClient {
   const nativeSelectionAvailable = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-  let latestBrowserPlan: { prefix: string; plan: Plan } | undefined;
-  const createBrowserPlan = (prefix: string) => {
-    const plan = browserPlan(prefix);
-    latestBrowserPlan = { prefix, plan };
+  let latestBrowserPlan:
+    | { request: RulePipelineRequest; plan: Plan; traces: Map<number, RuleTraceStep[]> }
+    | undefined;
+  const createBrowserPlan = (request: RulePipelineRequest) => {
+    const { plan, traces } = browserPlan(request);
+    latestBrowserPlan = { request: structuredClone(request), plan, traces };
     return plan;
   };
 
@@ -228,15 +248,16 @@ export function createPlanningClient(): PlanningClient {
     if (!latestBrowserPlan || latestBrowserPlan.plan.planId !== planId) {
       throw new Error('The requested plan is no longer current.');
     }
-    const { plan, prefix } = latestBrowserPlan;
+    const { plan, request, traces } = latestBrowserPlan;
     return JSON.stringify(
       {
-        schemaVersion: 1,
-        protocolVersion: 1,
+        schemaVersion: 2,
+        protocolVersion: 2,
+        ruleSchemaVersion: request.schemaVersion,
         product: 'Renamewright',
         planId: plan.planId,
         sourceGeneration: plan.generation,
-        rules: [{ kind: 'prefix', value: prefix }],
+        rules: request.rules,
         summary: {
           sourceCount: plan.rows.length,
           changedCount: plan.changedCount,
@@ -249,7 +270,7 @@ export function createPlanningClient(): PlanningClient {
           proposedDisplay: row.proposedName,
           status: row.status,
           diagnostics: row.diagnostics,
-          trace: [{ ruleIndex: 0, before: row.originalName, after: row.proposedName }],
+          trace: traces.get(row.sourceId) ?? [],
         })),
       },
       null,
@@ -259,12 +280,24 @@ export function createPlanningClient(): PlanningClient {
 
   return {
     nativeSelectionAvailable,
-    loadSample: async (prefix) => createBrowserPlan(prefix),
-    selectSources: async (prefix) => invoke<Plan | null>('select_sources', { prefix }),
-    previewPrefix: async (prefix) =>
-      nativeSelectionAvailable
-        ? invoke<Plan>('preview_prefix', { prefix })
-        : createBrowserPlan(prefix),
+    loadSample: async (request) => createBrowserPlan(request),
+    selectSources: async (request) => {
+      try {
+        return await invoke<Plan | null>('select_sources_with_rules', { request });
+      } catch (cause) {
+        throw planningError(cause);
+      }
+    },
+    previewRules: async (request) => {
+      if (!nativeSelectionAvailable) {
+        return createBrowserPlan(request);
+      }
+      try {
+        return await invoke<Plan>('preview_rules', { request });
+      } catch (cause) {
+        throw planningError(cause);
+      }
+    },
     inspectPlan: async (planId) =>
       nativeSelectionAvailable
         ? invoke<string>('inspect_plan', { planId })

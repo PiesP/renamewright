@@ -15,7 +15,7 @@ test('previews a safe prefix and blocks invalid Windows names', async ({ page })
   await expect(page.getByText('2026-Quarterly review.pdf')).toBeVisible();
   await expect(page.getByText('3 changes')).toBeVisible();
   await page.getByRole('button', { name: 'Inspect JSON' }).click();
-  await expect(page.getByRole('dialog')).toContainText('"schemaVersion": 1');
+  await expect(page.getByRole('dialog')).toContainText('"schemaVersion": 2');
   await expect(page.getByRole('dialog')).not.toContainText('/home/');
   await page.getByRole('button', { name: 'Close' }).click();
 
@@ -27,6 +27,29 @@ test('previews a safe prefix and blocks invalid Windows names', async ({ page })
   await expect(page.getByRole('row')).toHaveCount(4);
   await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
   expect(consoleErrors).toEqual([]);
+});
+
+test('edits and reorders an ordered text rule pipeline', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Load sample' }).click();
+  await page.getByRole('textbox', { name: 'Prefix' }).fill('draft-');
+  await page.getByRole('combobox', { name: 'New rule' }).selectOption('literalReplace');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+
+  const replaceEditor = page.locator('.rule-editor').filter({ hasText: 'Replace text' });
+  await replaceEditor.getByRole('textbox', { name: 'Find' }).fill('draft');
+  await replaceEditor.getByRole('textbox', { name: 'Replace with' }).fill('final');
+  await expect(page.getByText('final-Quarterly review.pdf')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Move Replace text up' }).click();
+  await expect(page.getByText('draft-Quarterly review.pdf')).toBeVisible();
+
+  await page.getByRole('combobox', { name: 'New rule' }).selectOption('regexReplace');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+  const regexEditor = page.locator('.rule-editor').filter({ hasText: 'Replace by pattern' });
+  await regexEditor.getByRole('textbox', { name: 'Rust regex' }).fill('(');
+  await expect(regexEditor).toContainText('Rule 3 uses an invalid regular expression.');
+  await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
 });
 
 test('keeps the workbench inside narrow viewports', async ({ page }) => {
