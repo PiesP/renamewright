@@ -2521,6 +2521,7 @@ name = "renamewright-platform"
 version = "0.1.0"
 dependencies = [
  "renamewright-core",
+ "rustix",
  "tempfile",
 ]
 

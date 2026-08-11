@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod execution_fs;
 mod journal;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +15,12 @@ use renamewright_core::{
     SourceSnapshot, ValidationEnvironment,
 };
 
+#[cfg(target_os = "linux")]
+pub use execution_fs::LinuxExecutionFileSystem;
+pub use execution_fs::{
+    ExecutionFileSystem, ExecutionFsError, ExecutionFsErrorKind, NativeExecutionFileSystem,
+    temporary_name,
+};
 pub use journal::{
     JOURNAL_SCHEMA_VERSION, JournalCodecError, JournalCodecErrorKind, JournalFrame,
     JournalStorageError, JournalStorageErrorKind, JournalWriter, MAX_JOURNAL_PAYLOAD_BYTES,
