@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt::{self, Display, Formatter};
@@ -54,6 +55,8 @@ pub struct LedgerEntry {
     status: LedgerStatus,
     attention_step: Option<usize>,
     recovery_available: bool,
+    undo_of_plan_id: Option<PlanId>,
+    undo_available: bool,
 }
 
 impl LedgerEntry {
@@ -95,6 +98,16 @@ impl LedgerEntry {
     #[must_use]
     pub const fn recovery_available(self) -> bool {
         self.recovery_available
+    }
+
+    #[must_use]
+    pub const fn undo_of_plan_id(self) -> Option<PlanId> {
+        self.undo_of_plan_id
+    }
+
+    #[must_use]
+    pub const fn undo_available(self) -> bool {
+        self.undo_available
     }
 }
 
@@ -193,6 +206,20 @@ impl RenameLedger {
                 inspection,
             });
         }
+        let superseded_plan_ids = items
+            .iter()
+            .filter(|item| item.projection.status != LedgerStatus::RolledBack)
+            .filter_map(|item| item.projection.undo_of_plan_id)
+            .collect::<BTreeSet<_>>();
+        for item in &mut items {
+            if item
+                .projection
+                .plan_id
+                .is_some_and(|plan_id| superseded_plan_ids.contains(&plan_id))
+            {
+                item.projection.undo_available = false;
+            }
+        }
         Ok(Self {
             root: Some(root.to_path_buf()),
             items,
@@ -224,6 +251,19 @@ impl RenameLedger {
                     .map(|inspection| (item.native_path.as_path(), inspection))
             })
     }
+
+    pub(crate) fn entry(&self, ledger_id: LedgerId) -> Option<LedgerEntry> {
+        self.items
+            .iter()
+            .find(|item| item.projection.ledger_id == ledger_id)
+            .map(|item| item.projection)
+    }
+
+    pub(crate) fn journal_path_for_plan(&self, plan_id: PlanId) -> Option<PathBuf> {
+        self.root
+            .as_ref()
+            .map(|root| root.join(format!("undo-{:016x}.rwj", plan_id.value())))
+    }
 }
 
 fn empty_projection(ledger_id: LedgerId, status: LedgerStatus) -> LedgerEntry {
@@ -236,6 +276,8 @@ fn empty_projection(ledger_id: LedgerId, status: LedgerStatus) -> LedgerEntry {
         status,
         attention_step: None,
         recovery_available: false,
+        undo_of_plan_id: None,
+        undo_available: false,
     }
 }
 
@@ -256,9 +298,29 @@ fn project_inspection(ledger_id: LedgerId, inspection: &JournalInspection) -> Le
         .frames()
         .first()
         .map(|frame| frame.schema_version());
-    let (plan_id, source_generation, source_count) = header
-        .map(|(plan_id, generation, entries)| (Some(plan_id), Some(generation), entries.len()))
-        .unwrap_or((None, None, 0));
+    let (
+        plan_id,
+        source_generation,
+        source_count,
+        undo_of_plan_id,
+        has_native_parents,
+        has_consistent_lineage,
+    ) = header
+        .map(|(plan_id, generation, entries)| {
+            let undo_of_plan_id = entries.first().and_then(|entry| entry.undo_of_plan_id());
+            let has_consistent_lineage = entries
+                .iter()
+                .all(|entry| entry.undo_of_plan_id() == undo_of_plan_id);
+            (
+                Some(plan_id),
+                Some(generation),
+                entries.len(),
+                undo_of_plan_id,
+                !entries.is_empty() && entries.iter().all(|entry| entry.native_parent().is_some()),
+                has_consistent_lineage,
+            )
+        })
+        .unwrap_or((None, None, 0, None, false, true));
 
     if let Some(issue) = inspection.issue() {
         let status = match issue.kind() {
@@ -277,6 +339,8 @@ fn project_inspection(ledger_id: LedgerId, inspection: &JournalInspection) -> Le
             status,
             attention_step: Some(issue.frame_index()),
             recovery_available: false,
+            undo_of_plan_id,
+            undo_available: false,
         };
     }
 
@@ -285,6 +349,20 @@ fn project_inspection(ledger_id: LedgerId, inspection: &JournalInspection) -> Le
         .iter()
         .map(|frame| frame.record().clone())
         .collect::<Vec<_>>();
+    if !has_consistent_lineage {
+        return LedgerEntry {
+            ledger_id,
+            plan_id,
+            source_generation,
+            schema_version,
+            source_count,
+            status: LedgerStatus::Damaged,
+            attention_step: None,
+            recovery_available: false,
+            undo_of_plan_id,
+            undo_available: false,
+        };
+    }
     let Ok(journal_status) = replay_journal(&records) else {
         return LedgerEntry {
             ledger_id,
@@ -295,6 +373,8 @@ fn project_inspection(ledger_id: LedgerId, inspection: &JournalInspection) -> Le
             status: LedgerStatus::Damaged,
             attention_step: None,
             recovery_available: false,
+            undo_of_plan_id,
+            undo_available: false,
         };
     };
     let has_recovery_locators = header
@@ -316,6 +396,10 @@ fn project_inspection(ledger_id: LedgerId, inspection: &JournalInspection) -> Le
         status,
         attention_step,
         recovery_available,
+        undo_of_plan_id,
+        undo_available: status == LedgerStatus::Completed
+            && undo_of_plan_id.is_none()
+            && has_native_parents,
     }
 }
 

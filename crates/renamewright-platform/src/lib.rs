@@ -5,6 +5,7 @@ mod executor;
 mod journal;
 mod ledger;
 mod recovery;
+mod undo;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -45,6 +46,11 @@ pub use recovery::{
     RecoveryLocation, RecoveryLocationState, RecoveryObservation, RecoveryReadiness,
     RecoveryTransactionInspection, inspect_prepared_step, inspect_recovery_transaction,
     reconcile_prepared_step, recover_transaction,
+};
+pub use undo::{
+    PreparedUndo, UndoBlockReason, UndoError, UndoErrorKind, UndoReadiness,
+    UndoTransactionInspection, execute_prepared_undo, inspect_undo_transaction,
+    prepare_undo_transaction,
 };
 
 /// Applying a newly planned rename remains unavailable.

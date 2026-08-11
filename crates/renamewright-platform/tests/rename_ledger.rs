@@ -28,6 +28,27 @@ fn header() -> JournalRecord {
     }
 }
 
+fn undo_header(plan_id: u64, undo_of: u64) -> JournalRecord {
+    let JournalRecord::TransactionStarted {
+        source_generation,
+        step_count,
+        entries,
+        ..
+    } = header()
+    else {
+        unreachable!();
+    };
+    JournalRecord::TransactionStarted {
+        plan_id: PlanId::new(plan_id),
+        source_generation,
+        step_count,
+        entries: entries
+            .into_iter()
+            .map(|entry| entry.into_undo_of(PlanId::new(undo_of)))
+            .collect(),
+    }
+}
+
 #[test]
 fn projects_terminal_and_interrupted_transactions_without_native_paths()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -63,11 +84,51 @@ fn projects_terminal_and_interrupted_transactions_without_native_paths()
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].status(), LedgerStatus::Completed);
     assert!(!entries[0].recovery_available());
+    assert!(entries[0].undo_available());
+    assert_eq!(entries[0].undo_of_plan_id(), None);
     assert_eq!(entries[1].status(), LedgerStatus::ReconciliationRequired);
     assert_eq!(entries[1].attention_step(), Some(0));
     assert!(entries[1].recovery_available());
     assert_eq!(entries[1].plan_id(), Some(PlanId::new(7)));
     assert_eq!(entries[1].source_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_non_rolled_back_undo_supersedes_the_original_transaction()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let completed = |header| {
+        vec![
+            header,
+            JournalRecord::ForwardStepPrepared { step_index: 0 },
+            JournalRecord::ForwardStepCompleted {
+                step_index: 0,
+                observed_identity: ExecutionIdentity::new(23, [29; 16]),
+            },
+            JournalRecord::ForwardStepPrepared { step_index: 1 },
+            JournalRecord::ForwardStepCompleted {
+                step_index: 1,
+                observed_identity: ExecutionIdentity::new(23, [29; 16]),
+            },
+            JournalRecord::TransactionCompleted,
+        ]
+    };
+    fs::write(
+        directory.path().join("a-original.rwj"),
+        encode_journal(&completed(header()))?,
+    )?;
+    fs::write(
+        directory.path().join("b-undo.rwj"),
+        encode_journal(&completed(undo_header(9, 7)))?,
+    )?;
+
+    let ledger = RenameLedger::discover(directory.path())?;
+    let entries = ledger.entries().collect::<Vec<_>>();
+
+    assert!(!entries[0].undo_available());
+    assert_eq!(entries[1].undo_of_plan_id(), Some(PlanId::new(7)));
+    assert!(!entries[1].undo_available());
     Ok(())
 }
 
