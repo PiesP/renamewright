@@ -16,6 +16,7 @@ export function App(props: AppProps) {
   const [error, setError] = createSignal('');
   const [notice, setNotice] = createSignal('');
   let requestSequence = 0;
+  let planInspector: HTMLDialogElement | undefined;
 
   const setResult = (result: Plan | null) => {
     if (result) {
@@ -89,6 +90,14 @@ export function App(props: AppProps) {
       setError(cause instanceof Error ? cause.message : 'The plan document could not be exported.');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const closePlanInspector = () => {
+    if (planInspector && typeof planInspector.close === 'function') {
+      planInspector.close();
+    } else {
+      setPlanDocument(undefined);
     }
   };
 
@@ -284,13 +293,21 @@ export function App(props: AppProps) {
         {(document) => (
           <dialog
             class="plan-inspector"
-            open
             aria-labelledby="plan-inspector-heading"
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                setPlanDocument(undefined);
+            ref={(element) => {
+              planInspector = element;
+              if (typeof element.showModal === 'function') {
+                queueMicrotask(() => {
+                  if (element.isConnected && !element.open) {
+                    element.showModal();
+                  }
+                });
+              } else {
+                element.setAttribute('open', '');
               }
             }}
+            onCancel={() => setPlanDocument(undefined)}
+            onClose={() => setPlanDocument(undefined)}
           >
             <div class="inspector-heading">
               <div>
@@ -300,7 +317,7 @@ export function App(props: AppProps) {
               <button
                 class="button button-secondary button-compact"
                 type="button"
-                onClick={() => setPlanDocument(undefined)}
+                onClick={closePlanInspector}
               >
                 Close
               </button>
