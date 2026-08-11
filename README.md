@@ -1,7 +1,11 @@
-# DarkNamer Next
+# Renamewright
 
-DarkNamer Next is a planned Windows-first desktop application for building,
-reviewing, and safely executing bulk file rename plans.
+**Plan every rename.**
+
+Renamewright is a planned Windows-first desktop application for building,
+reviewing, and safely executing bulk file rename plans. The public product,
+repository, and executable share the `Renamewright` name; machine-facing
+identifiers use `renamewright`.
 
 This is a redesign, not a source or bug-compatible reconstruction of the legacy
 `DarkNamer.exe`. The old executable is used only as evidence of useful jobs; the

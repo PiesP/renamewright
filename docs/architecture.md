@@ -21,17 +21,17 @@ The implementation phase will introduce this structure incrementally:
 
 ```text
 crates/
-  rename-domain/   rules, plans, diagnostics, platform-neutral validation
-  rename-fs/       discovery, snapshots, conflict graph, journal, executor
+  renamewright-core/      rules, plans, diagnostics, platform-neutral validation
+  renamewright-platform/  discovery, snapshots, conflict graph, journal, executor
 src/               Solid UI and typed IPC client
-src-tauri/         Tauri composition root, commands, state, capabilities
+src-tauri/         renamewright-app composition root, commands, state, capabilities
 tests/             cross-crate behavioural fixtures where unit tests are insufficient
 ```
 
-`rename-domain` cannot depend on Tauri or frontend concepts. `rename-fs` depends
-on the domain crate and contains narrowly isolated platform modules. `src-tauri`
-adapts commands to use cases and owns application state; it does not contain rule
-algorithms.
+`renamewright-core` cannot depend on Tauri or frontend concepts.
+`renamewright-platform` depends on the core crate and contains narrowly isolated
+platform modules. The `renamewright-app` package in `src-tauri` adapts commands
+to use cases and owns application state; it does not contain rule algorithms.
 
 ## Core model
 
@@ -129,6 +129,11 @@ The UI describes partial or unavailable undo explicitly.
 Journals contain paths and therefore remain local application data. Logs use
 entry IDs and structured error categories by default; path logging is opt-in for
 diagnostics and never sent remotely.
+
+The UI presents completed transactions, recovery state, and validated undo as
+the **Rename Ledger**. The name does not change the append-only journal boundary:
+the ledger is a projection over journal data rather than a second persistence
+mechanism.
 
 ## Dependency policy
 

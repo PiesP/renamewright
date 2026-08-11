@@ -4,10 +4,15 @@
 
 ## Product definition
 
-DarkNamer Next is a local-first rename workbench. Its primary job is not to
+Renamewright is a local-first rename workbench. Its primary job is not to
 offer many isolated rename commands; it is to let a user compose a deterministic
 rule pipeline, understand every proposed path, resolve risks, and then execute a
 recoverable plan.
+
+The product line is “Plan every rename.” The public application, repository, and
+executable use `Renamewright`; machine-facing identifiers use `renamewright`.
+The durable activity, recovery, and undo surface is named **Rename Ledger**. It
+is a feature within Renamewright, not a separate product or financial metaphor.
 
 The working audience is people who rename tens to thousands of files on Windows,
 from occasional users organising downloads to advanced users preparing media,
@@ -45,7 +50,7 @@ and status carried by hierarchy rather than decorative cards or animation.
 4. Open the review drawer to see collisions, invalid names, stale metadata, and
    the exact execution scope.
 5. Apply the plan. Progress is streamed from the Rust executor.
-6. Review the activity record or request an undo after revalidation.
+6. Review the Rename Ledger or request an undo after revalidation.
 
 The Apply action stays unavailable while any blocking diagnostic exists. A
 confirmation modal is not the main safety mechanism; the persistent review
@@ -65,7 +70,7 @@ cards:
   metadata. It supports virtualization, column visibility, sorting, selection,
   and per-item overrides without changing rule order.
 - **Review bar and drawer:** changed/unchanged/blocked counts, diagnostics, Apply,
-  cancellation state, activity, and Undo.
+  cancellation state, Rename Ledger, and Undo.
 
 At narrower window widths, the rule rail becomes a resizable overlay and the
 review drawer occupies the full content region. The preview never silently hides
