@@ -104,6 +104,16 @@ impl EntryIdentitySignal {
     pub const fn new(primary: u64, secondary: u64) -> Self {
         Self { primary, secondary }
     }
+
+    #[must_use]
+    pub const fn primary(self) -> u64 {
+        self.primary
+    }
+
+    #[must_use]
+    pub const fn secondary(self) -> u64 {
+        self.secondary
+    }
 }
 
 impl SourceFingerprint {
@@ -125,6 +135,21 @@ impl SourceFingerprint {
     #[must_use]
     pub const fn entry_kind(&self) -> EntryKind {
         self.entry_kind
+    }
+
+    #[must_use]
+    pub const fn entry_identity_signal(&self) -> Option<EntryIdentitySignal> {
+        self.entry_identity_signal
+    }
+
+    #[must_use]
+    pub const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    #[must_use]
+    pub const fn modified_nanos(&self) -> Option<u128> {
+        self.modified_nanos
     }
 }
 

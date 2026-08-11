@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod journal;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -10,6 +12,11 @@ use std::time::UNIX_EPOCH;
 use renamewright_core::{
     EntryIdentitySignal, EntryKind, OccupiedName, ParentId, SourceFingerprint, SourceId,
     SourceSnapshot, ValidationEnvironment,
+};
+
+pub use journal::{
+    JOURNAL_SCHEMA_VERSION, JournalCodecError, JournalCodecErrorKind, JournalFrame,
+    MAX_JOURNAL_PAYLOAD_BYTES, decode_journal, encode_journal,
 };
 
 /// Filesystem mutation remains unavailable during the planning milestone.
