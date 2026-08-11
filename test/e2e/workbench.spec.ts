@@ -132,3 +132,65 @@ test('renders the path-free startup ledger at supported narrow widths', async ({
     expect(sizes.scroll, `ledger overflow at ${width}px`).toBeLessThanOrEqual(sizes.client);
   }
 });
+
+test('keeps forward recovery cancellation above the mobile review bar', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 900 });
+  await page.addInitScript(() => {
+    window.__TAURI_INTERNALS__ = {
+      invoke: async (command: string) => {
+        if (command === 'list_ledger') {
+          return [
+            {
+              ledgerId: 3,
+              planId: 73,
+              sourceGeneration: 5,
+              schemaVersion: 2,
+              sourceCount: 2,
+              status: 'forwardPending',
+              attentionStep: 1,
+              recoveryAvailable: true,
+            },
+          ];
+        }
+        if (command === 'poll_source_changes') {
+          return null;
+        }
+        if (command === 'inspect_recovery') {
+          return {
+            ledgerId: 3,
+            direction: 'forward',
+            stepIndex: 1,
+            readiness: 'ready',
+            disposition: null,
+            resumeAvailable: true,
+            rollbackAvailable: true,
+            reconcileAvailable: false,
+          };
+        }
+        if (command === 'apply_recovery_action') {
+          return new Promise(() => undefined);
+        }
+        if (command === 'cancel_recovery') {
+          return true;
+        }
+        throw new Error(`Unexpected command: ${command}`);
+      },
+    };
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Inspect plan 73 recovery' }).click();
+  await page.getByRole('button', { name: 'Resume' }).click();
+  await page.getByRole('button', { name: 'Cancel and roll back' }).click();
+  await expect(page.getByRole('button', { name: 'Cancellation requested' })).toBeDisabled();
+
+  const inspectionBox = await page
+    .getByRole('status')
+    .filter({ hasText: 'Identity checks passed' })
+    .boundingBox();
+  const reviewBarBox = await page.locator('.review-bar').boundingBox();
+  expect(inspectionBox).not.toBeNull();
+  expect(reviewBarBox).not.toBeNull();
+  expect((inspectionBox?.y ?? 0) + (inspectionBox?.height ?? 0)).toBeLessThanOrEqual(
+    reviewBarBox?.y ?? 0
+  );
+});

@@ -98,6 +98,7 @@ export interface PlanningClient {
     action: RecoveryCommandAction,
     inspection: RecoveryInspection
   ): Promise<RecoveryCommandResult>;
+  cancelRecovery(): Promise<boolean>;
   watchSourceChanges(onChange: (change: SourceChange) => void): () => void;
 }
 
@@ -241,6 +242,16 @@ export function createPlanningClient(): PlanningClient {
         return await invoke<RecoveryCommandResult>('apply_recovery_action', {
           request: { action, inspection },
         });
+      } catch (cause) {
+        throw recoveryCommandError(cause);
+      }
+    },
+    cancelRecovery: async () => {
+      if (!nativeSelectionAvailable) {
+        throw new Error('Recovery actions are available in the Windows desktop app.');
+      }
+      try {
+        return await invoke<boolean>('cancel_recovery');
       } catch (cause) {
         throw recoveryCommandError(cause);
       }

@@ -28,6 +28,9 @@ export function App(props: AppProps) {
   const [recoveryInspection, setRecoveryInspection] = createSignal<RecoveryInspection>();
   const [inspectingLedgerId, setInspectingLedgerId] = createSignal<number>();
   const [recoveryBusyAction, setRecoveryBusyAction] = createSignal<RecoveryCommandAction>();
+  const [recoveryCancellationState, setRecoveryCancellationState] = createSignal<
+    'requesting' | 'accepted'
+  >();
   let requestSequence = 0;
   let planInspector: HTMLDialogElement | undefined;
   let planInspectorOpener: HTMLButtonElement | undefined;
@@ -159,6 +162,8 @@ export function App(props: AppProps) {
       return;
     }
     setRecoveryBusyAction(action);
+    setRecoveryCancellationState(undefined);
+    queueMicrotask(() => recoveryInspectionPanel?.scrollIntoView?.({ block: 'center' }));
     setError('');
     setNotice('');
     try {
@@ -181,7 +186,34 @@ export function App(props: AppProps) {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The recovery action could not run.');
     } finally {
+      setRecoveryCancellationState(undefined);
       setRecoveryBusyAction(undefined);
+    }
+  };
+
+  const requestRecoveryCancellation = async () => {
+    if (
+      recoveryBusyAction() !== 'resume' ||
+      recoveryInspection()?.direction !== 'forward' ||
+      recoveryCancellationState()
+    ) {
+      return;
+    }
+    setRecoveryCancellationState('requesting');
+    setError('');
+    try {
+      if (await planningClient.cancelRecovery()) {
+        setRecoveryCancellationState('accepted');
+        queueMicrotask(() => recoveryInspectionPanel?.scrollIntoView?.({ block: 'center' }));
+      } else {
+        setRecoveryCancellationState(undefined);
+        setNotice('No active forward recovery accepted the cancellation request.');
+      }
+    } catch (cause) {
+      setRecoveryCancellationState(undefined);
+      setError(
+        cause instanceof Error ? cause.message : 'Recovery cancellation could not be requested.'
+      );
     }
   };
 
@@ -211,6 +243,12 @@ export function App(props: AppProps) {
     const current = plan();
     if (error()) {
       return error();
+    }
+    if (recoveryCancellationState() === 'accepted') {
+      return 'Cancellation requested. Renamewright will roll back at the next safe step…';
+    }
+    if (recoveryCancellationState() === 'requesting') {
+      return 'Requesting recovery cancellation…';
     }
     if (recoveryBusyAction()) {
       return 'Waiting for native confirmation or recovery completion…';
@@ -457,6 +495,25 @@ export function App(props: AppProps) {
                           : recoveryInspection()?.direction === 'forward'
                             ? 'Resume'
                             : 'Continue rollback'}
+                      </button>
+                    </Show>
+                    <Show
+                      when={
+                        recoveryBusyAction() === 'resume' &&
+                        recoveryInspection()?.direction === 'forward'
+                      }
+                    >
+                      <button
+                        class="button button-secondary button-compact"
+                        type="button"
+                        disabled={recoveryCancellationState() !== undefined}
+                        onClick={() => void requestRecoveryCancellation()}
+                      >
+                        {recoveryCancellationState() === 'accepted'
+                          ? 'Cancellation requested'
+                          : recoveryCancellationState() === 'requesting'
+                            ? 'Requesting cancellation…'
+                            : 'Cancel and roll back'}
                       </button>
                     </Show>
                     <Show when={recoveryInspection()?.rollbackAvailable}>

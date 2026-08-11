@@ -27,7 +27,54 @@ pub struct AppState {
     source_changes: Mutex<SourceChanges>,
     latest_plan: Mutex<Option<StoredPlan>>,
     mutation_lock: Mutex<()>,
+    recovery_control: Mutex<RecoveryControl>,
     ledger: Mutex<RenameLedger>,
+}
+
+#[derive(Debug, Default)]
+struct RecoveryControl {
+    active: bool,
+    cancellable: bool,
+    cancel_requested: bool,
+}
+
+struct RecoverySession<'a> {
+    control: &'a Mutex<RecoveryControl>,
+}
+
+impl<'a> RecoverySession<'a> {
+    fn begin(
+        control: &'a Mutex<RecoveryControl>,
+        cancellable: bool,
+    ) -> Result<Self, RecoveryCommandErrorKind> {
+        let mut state = control
+            .lock()
+            .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
+        if state.active {
+            return Err(RecoveryCommandErrorKind::Busy);
+        }
+        state.active = true;
+        state.cancellable = cancellable;
+        state.cancel_requested = false;
+        drop(state);
+        Ok(Self { control })
+    }
+
+    fn cancel_requested(&self) -> bool {
+        self.control
+            .lock()
+            .map_or(true, |state| state.cancel_requested)
+    }
+}
+
+impl Drop for RecoverySession<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.control.lock() {
+            state.active = false;
+            state.cancellable = false;
+            state.cancel_requested = false;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -97,6 +144,7 @@ impl Default for AppState {
             source_changes: Mutex::new(SourceChanges::default()),
             latest_plan: Mutex::new(None),
             mutation_lock: Mutex::new(()),
+            recovery_control: Mutex::new(RecoveryControl::default()),
             ledger: Mutex::new(RenameLedger::default()),
         }
     }
@@ -381,6 +429,11 @@ async fn apply_recovery_action(
 }
 
 #[tauri::command]
+fn cancel_recovery(state: State<'_, AppState>) -> Result<bool, RecoveryCommandErrorDto> {
+    request_recovery_cancellation(&state).map_err(RecoveryCommandErrorDto::from)
+}
+
+#[tauri::command]
 fn inspect_plan(plan_id: u64, state: State<'_, AppState>) -> Result<String, String> {
     plan_document_json(plan_id, &state)
 }
@@ -606,6 +659,11 @@ where
     if !recovery_action_is_available(request.action, inspection) {
         return Err(RecoveryCommandErrorKind::ActionUnavailable);
     }
+    let recovery_session = RecoverySession::begin(
+        &state.recovery_control,
+        request.action == RecoveryCommandAction::Resume
+            && inspection.direction() == ExecutionDirection::Forward,
+    )?;
     if !confirm(request.action, inspection) {
         return Ok(RecoveryCommandResultDto {
             performed: false,
@@ -620,7 +678,7 @@ where
             ledger_id,
             filesystem,
             RecoveryAction::Resume,
-            || false,
+            || recovery_session.cancel_requested(),
         )
         .map(recovery_outcome_name),
         RecoveryCommandAction::Rollback => recover_transaction(
@@ -643,6 +701,18 @@ where
         outcome,
         ledger: ledger.entries().map(LedgerEntryDto::from).collect(),
     })
+}
+
+fn request_recovery_cancellation(state: &AppState) -> Result<bool, RecoveryCommandErrorKind> {
+    let mut control = state
+        .recovery_control
+        .lock()
+        .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
+    if !control.active || !control.cancellable {
+        return Ok(false);
+    }
+    control.cancel_requested = true;
+    Ok(true)
 }
 
 const fn recovery_action_is_available(
@@ -864,6 +934,7 @@ pub fn run() {
             list_ledger,
             inspect_recovery,
             apply_recovery_action,
+            cancel_recovery,
             inspect_plan,
             export_plan
         ])
@@ -899,8 +970,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::{
         PrepareExecutionError, RecoveryCommandAction, RecoveryCommandErrorKind,
-        RecoveryExpectationDto, RecoveryInspectionDto, RecoveryRequestDto,
-        perform_recovery_request, prepare_latest_execution,
+        RecoveryExpectationDto, RecoveryInspectionDto, RecoveryRequestDto, RecoverySession,
+        perform_recovery_request, prepare_latest_execution, request_recovery_cancellation,
     };
 
     #[test]
@@ -1130,6 +1201,66 @@ mod tests {
         assert!(!serialized.contains("private-final"));
         assert!(!serialized.contains("private-journal"));
         assert!(!serialized.contains(&directory.path().display().to_string()));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forward_recovery_accepts_cancellation_only_while_active() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source.txt");
+        fs::write(&source, b"source")?;
+        let mut registry = renamewright_platform::SourceRegistry::new();
+        registry.admit_paths([source.clone()])?;
+        let plan = build_plan_with_environment(
+            PlanId::new(70),
+            registry.generation(),
+            &registry.snapshots(),
+            &[RenameRule::prefix("recovered-")],
+            TargetPolicy::windows(),
+            &registry.validation_environment(),
+        );
+        let filesystem = LinuxExecutionFileSystem::new();
+        let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
+        fs::write(
+            directory.path().join("cancel-journal.rwj"),
+            renamewright_platform::encode_journal(&[frozen.initial_record()])?,
+        )?;
+        let state = AppState::default();
+        *state.ledger.lock().map_err(|_| "ledger lock failed")? =
+            renamewright_platform::RenameLedger::discover(directory.path())?;
+        let inspection = {
+            let ledger = state.ledger.lock().map_err(|_| "ledger lock failed")?;
+            let ledger_id = ledger
+                .entries()
+                .next()
+                .ok_or("ledger was empty")?
+                .ledger_id();
+            inspect_recovery_transaction(&ledger, ledger_id, &filesystem)?
+        };
+        let request = RecoveryRequestDto {
+            action: RecoveryCommandAction::Resume,
+            inspection: RecoveryExpectationDto::from(inspection),
+        };
+
+        assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
+        let non_cancellable = RecoverySession::begin(&state.recovery_control, false)
+            .map_err(|_| "recovery session unavailable")?;
+        assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
+        drop(non_cancellable);
+        let cancellation_accepted = Cell::new(false);
+        let result = perform_recovery_request(&state, &request, &filesystem, |_, _| {
+            cancellation_accepted.set(request_recovery_cancellation(&state).unwrap_or(false));
+            true
+        })
+        .map_err(|_| "cancelled recovery failed")?;
+
+        assert!(cancellation_accepted.get());
+        assert!(result.performed);
+        assert_eq!(result.outcome, "rolledBack");
+        assert!(source.exists());
+        assert!(!directory.path().join("recovered-source.txt").exists());
+        assert!(!request_recovery_cancellation(&state).map_err(|_| "cancel state unavailable")?);
         Ok(())
     }
 

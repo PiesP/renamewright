@@ -2,7 +2,12 @@ import { cleanup, render, screen } from '@solidjs/testing-library';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../src/App';
-import type { Plan, PlanningClient, SourceChange } from '../../src/planning/client';
+import type {
+  Plan,
+  PlanningClient,
+  RecoveryCommandResult,
+  SourceChange,
+} from '../../src/planning/client';
 
 const sources = ['invoice.pdf', 'CON.txt', 'notes.txt'];
 
@@ -47,6 +52,7 @@ function fakeClient(): PlanningClient {
     applyRecoveryAction: async () => {
       throw new Error('No recovery action fixture was configured.');
     },
+    cancelRecovery: async () => false,
     watchSourceChanges: () => () => undefined,
   };
 }
@@ -145,6 +151,81 @@ test('offers resume and rollback only when the fresh inspection allows them', as
   expect(await screen.findByRole('button', { name: 'Resume' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Roll back' })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Record observation' })).not.toBeInTheDocument();
+});
+
+test('requests cancellation only while forward recovery is active', async () => {
+  const user = userEvent.setup();
+  const client = fakeClient();
+  client.listLedger = async () => [
+    {
+      ledgerId: 3,
+      planId: 73,
+      sourceGeneration: 5,
+      schemaVersion: 2,
+      sourceCount: 2,
+      status: 'forwardPending',
+      attentionStep: 1,
+      recoveryAvailable: true,
+    },
+  ];
+  const inspection = {
+    ledgerId: 3,
+    direction: 'forward',
+    stepIndex: 1,
+    readiness: 'ready',
+    disposition: null,
+    resumeAvailable: true,
+    rollbackAvailable: true,
+    reconcileAvailable: false,
+  } as const;
+  client.inspectRecovery = async () => inspection;
+  let finishRecovery: ((result: RecoveryCommandResult) => void) | undefined;
+  client.applyRecoveryAction = vi.fn(
+    () =>
+      new Promise<RecoveryCommandResult>((resolve) => {
+        finishRecovery = resolve;
+      })
+  );
+  const cancelRecovery = vi.fn(async () => true);
+  client.cancelRecovery = cancelRecovery;
+
+  render(() => <App client={client} />);
+
+  await user.click(await screen.findByRole('button', { name: 'Inspect plan 73 recovery' }));
+  await user.click(await screen.findByRole('button', { name: 'Resume' }));
+  await user.click(await screen.findByRole('button', { name: 'Cancel and roll back' }));
+
+  expect(cancelRecovery).toHaveBeenCalledOnce();
+  expect(screen.getByRole('button', { name: 'Cancellation requested' })).toBeDisabled();
+  expect(
+    screen.getByText('Cancellation requested. Renamewright will roll back at the next safe step…', {
+      selector: '.live-status',
+    })
+  ).toBeInTheDocument();
+
+  finishRecovery?.({
+    performed: true,
+    outcome: 'rolledBack',
+    ledger: [
+      {
+        ledgerId: 3,
+        planId: 73,
+        sourceGeneration: 5,
+        schemaVersion: 2,
+        sourceCount: 2,
+        status: 'rolledBack',
+        attentionStep: null,
+        recoveryAvailable: false,
+      },
+    ],
+  });
+  expect(await screen.findByText('Rolled back')).toBeInTheDocument();
+  expect(
+    screen.getByText('The interrupted rename transaction was rolled back.', {
+      selector: '.live-status',
+    })
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Cancel and roll back' })).not.toBeInTheDocument();
 });
 
 test('loads sample sources and previews a prefix rule', async () => {
