@@ -472,6 +472,8 @@ test('adds, reorders, and disables rules without losing stable editing state', a
     throw new Error('Prefix editor was not rendered.');
   }
   await user.click(within(prefixEditor).getByRole('checkbox', { name: 'Enabled' }));
+  expect(prefixEditor).toHaveAttribute('data-disabled', 'true');
+  expect(within(prefixEditor).getByRole('checkbox', { name: 'Enabled' })).not.toBeChecked();
   expect(await screen.findByRole('button', { name: 'Unchanged 2' })).toBeInTheDocument();
   expect(screen.getAllByRole('cell', { name: /Unchanged/u })).toHaveLength(2);
 });

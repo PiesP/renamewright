@@ -601,11 +601,13 @@ export function App(props: AppProps) {
               {(rule, index) => {
                 const inputId = (field: string) => `rule-${rule.ruleId}-${field}`;
                 const invalid = () => ruleError()?.ruleId === rule.ruleId;
+                const enabled = () =>
+                  rules().find((candidate) => candidate.ruleId === rule.ruleId)?.enabled ?? false;
                 return (
                   <section
                     class="rule-editor"
                     aria-labelledby={inputId('heading')}
-                    data-disabled={rule.enabled ? 'false' : 'true'}
+                    data-disabled={enabled() ? 'false' : 'true'}
                     data-invalid={invalid() ? 'true' : 'false'}
                   >
                     <div class="rule-title">
@@ -645,7 +647,7 @@ export function App(props: AppProps) {
                     <label class="rule-toggle">
                       <input
                         type="checkbox"
-                        checked={rule.enabled}
+                        checked={enabled()}
                         onChange={(event) =>
                           replaceRule(rule.ruleId, (current) => ({
                             ...current,

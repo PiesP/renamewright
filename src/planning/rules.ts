@@ -254,17 +254,12 @@ function expandReplacement(
   groups: Record<string, string | undefined>
 ): string {
   return template.replace(
-    /\$(?:\$|\{([^}]+)\}|([A-Za-z_][A-Za-z0-9_]*)|([0-9]+))/gu,
-    (
-      token,
-      braced: string | undefined,
-      named: string | undefined,
-      numbered: string | undefined
-    ) => {
+    /\$(?:\$|\{([^}]+)\}|([0-9A-Za-z_]+))/gu,
+    (token, braced: string | undefined, unbraced: string | undefined) => {
       if (token === '$$') {
         return '$';
       }
-      const key = braced ?? named ?? numbered ?? '';
+      const key = braced ?? unbraced ?? '';
       if (/^[0-9]+$/u.test(key)) {
         return captures[Number(key)] ?? '';
       }

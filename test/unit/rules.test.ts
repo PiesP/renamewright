@@ -50,6 +50,23 @@ test('expands numbered and named Rust-style regex captures', () => {
   expect(applyBrowserRules('notes.txt', request).proposedName).toBe('notes-copy.txt');
 });
 
+test('parses unbraced replacement references with Rust longest-match semantics', () => {
+  const request: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    rules: [
+      {
+        kind: 'regexReplace',
+        ruleId: 37,
+        enabled: true,
+        pattern: '^(notes)',
+        replacement: `$1a-\${1}a`,
+      },
+    ],
+  };
+
+  expect(applyBrowserRules('notes.txt', request).proposedName).toBe('-notesa.txt');
+});
+
 test('rejects invalid and Rust-unsupported regex features with a path-free rule ID', () => {
   const request: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
