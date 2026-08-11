@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::path::PathBuf;
 use std::path::{Component, Path};
 
@@ -17,6 +17,7 @@ pub enum ExecutionFsErrorKind {
     StaleIdentity,
     DestinationExists,
     AccessDenied,
+    SharingViolation,
     PostRenameIdentityMismatch,
     IoFailure,
 }
@@ -117,7 +118,7 @@ pub fn temporary_name(
     Ok(name)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn entry_path(parent: &Path, native_name: &OsStr) -> Result<PathBuf, ExecutionFsError> {
     validate_component(native_name)?;
     Ok(parent.join(native_name))
@@ -128,7 +129,7 @@ fn validate_component(native_name: &OsStr) -> Result<(), ExecutionFsError> {
     let mut components = path.components();
     let is_single_normal =
         matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
-    if is_single_normal {
+    if is_single_normal && windows_component_is_valid(native_name) {
         Ok(())
     } else {
         Err(ExecutionFsError::new(
@@ -136,6 +137,20 @@ fn validate_component(native_name: &OsStr) -> Result<(), ExecutionFsError> {
             None,
         ))
     }
+}
+
+#[cfg(windows)]
+fn windows_component_is_valid(native_name: &OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    native_name.encode_wide().all(|unit| {
+        unit != 0 && unit != u16::from(b'/') && unit != u16::from(b'\\') && unit != u16::from(b':')
+    })
+}
+
+#[cfg(not(windows))]
+const fn windows_component_is_valid(_native_name: &OsStr) -> bool {
+    true
 }
 
 #[cfg(target_os = "linux")]
@@ -229,6 +244,7 @@ fn map_std_io_error(error: std::io::Error) -> ExecutionFsError {
     ExecutionFsError::new(kind, error.raw_os_error())
 }
 
+#[cfg(not(windows))]
 impl ExecutionFileSystem for NativeExecutionFileSystem {
     fn identity(
         &self,
@@ -255,5 +271,98 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
             ExecutionFsErrorKind::UnsupportedPlatform,
             None,
         ))
+    }
+}
+
+#[cfg(windows)]
+impl ExecutionFileSystem for NativeExecutionFileSystem {
+    fn identity(
+        &self,
+        parent: &Path,
+        native_name: &OsStr,
+    ) -> Result<ExecutionIdentity, ExecutionFsError> {
+        let source_path = entry_path(parent, native_name)?;
+        let source = renamewright_windows_native::EntryHandle::open_final_component(&source_path)
+            .map_err(map_windows_io_error)?;
+        renamewright_windows_native::file_identity(source.as_handle())
+            .map(to_execution_identity)
+            .map_err(map_windows_io_error)
+    }
+
+    fn rename_no_replace(
+        &self,
+        parent: &Path,
+        source_name: &OsStr,
+        target_name: &OsStr,
+        expected_identity: ExecutionIdentity,
+    ) -> Result<ExecutionIdentity, ExecutionFsError> {
+        if source_name == target_name {
+            return Err(ExecutionFsError::new(
+                ExecutionFsErrorKind::InvalidName,
+                None,
+            ));
+        }
+        let source_path = entry_path(parent, source_name)?;
+        let target_path = entry_path(parent, target_name)?;
+        let source = renamewright_windows_native::EntryHandle::open_final_component(&source_path)
+            .map_err(map_windows_io_error)?;
+        let current_identity = renamewright_windows_native::file_identity(source.as_handle())
+            .map(to_execution_identity)
+            .map_err(map_windows_io_error)?;
+        if current_identity != expected_identity {
+            return Err(ExecutionFsError::new(
+                ExecutionFsErrorKind::StaleIdentity,
+                None,
+            ));
+        }
+
+        renamewright_windows_native::rename_noreplace(source.as_handle(), parent, target_name)
+            .map_err(|error| map_windows_rename_error(error, &target_path))?;
+        let observed_identity = renamewright_windows_native::file_identity(source.as_handle())
+            .map(to_execution_identity)
+            .map_err(map_windows_io_error)?;
+        if observed_identity != expected_identity {
+            return Err(ExecutionFsError::new(
+                ExecutionFsErrorKind::PostRenameIdentityMismatch,
+                None,
+            ));
+        }
+        Ok(observed_identity)
+    }
+}
+
+#[cfg(windows)]
+fn to_execution_identity(identity: renamewright_windows_native::FileIdentity) -> ExecutionIdentity {
+    ExecutionIdentity::new(identity.volume_serial_number(), identity.file_id())
+}
+
+#[cfg(windows)]
+fn map_windows_io_error(error: std::io::Error) -> ExecutionFsError {
+    let os_code = error.raw_os_error();
+    let kind = match (error.kind(), os_code) {
+        (std::io::ErrorKind::AlreadyExists, _) | (_, Some(80 | 183)) => {
+            ExecutionFsErrorKind::DestinationExists
+        }
+        (_, Some(32)) => ExecutionFsErrorKind::SharingViolation,
+        (std::io::ErrorKind::NotFound, _) => ExecutionFsErrorKind::SourceUnavailable,
+        (std::io::ErrorKind::PermissionDenied, _) => ExecutionFsErrorKind::AccessDenied,
+        (std::io::ErrorKind::InvalidInput, _) => ExecutionFsErrorKind::InvalidName,
+        (std::io::ErrorKind::CrossesDevices, _) | (_, Some(1 | 17 | 50)) => {
+            ExecutionFsErrorKind::UnsupportedFileSystem
+        }
+        _ => ExecutionFsErrorKind::IoFailure,
+    };
+    ExecutionFsError::new(kind, os_code)
+}
+
+#[cfg(windows)]
+fn map_windows_rename_error(error: std::io::Error, target: &Path) -> ExecutionFsError {
+    let mapped = map_windows_io_error(error);
+    if mapped.kind() == ExecutionFsErrorKind::AccessDenied
+        && std::fs::symlink_metadata(target).is_ok()
+    {
+        ExecutionFsError::new(ExecutionFsErrorKind::DestinationExists, mapped.os_code())
+    } else {
+        mapped
     }
 }

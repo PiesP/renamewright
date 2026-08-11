@@ -2,6 +2,7 @@
 members = [
   "crates/renamewright-core",
   "crates/renamewright-platform",
+  "crates/renamewright-windows-native",
   "src-tauri",
 ]
 resolver = "3"
