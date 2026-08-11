@@ -69,7 +69,7 @@ test('reports blocked destinations without enabling execution', async () => {
   expect(
     await screen.findByText((_, element) => element?.textContent === '3 blocked')
   ).toBeInTheDocument();
-  expect(screen.getAllByText('Blocked')).toHaveLength(3);
+  expect(screen.getAllByRole('cell', { name: /Blocked/u })).toHaveLength(3);
   expect(prefix).toHaveAttribute('aria-invalid', 'true');
   expect(screen.getByRole('status')).toHaveTextContent('3 names are blocked');
 });

@@ -1,21 +1,11 @@
-import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { APP_NAME } from './app-meta';
 import { createPlanningClient, type Plan, type PlanningClient } from './planning/client';
+import { VirtualPlanTable } from './planning/VirtualPlanTable';
 
 interface AppProps {
   client?: PlanningClient;
 }
-
-const diagnosticLabels: Record<string, string> = {
-  unchanged: 'No change',
-  emptyName: 'Empty name',
-  illegalCharacter: 'Illegal Windows character',
-  trailingDotOrSpace: 'Trailing dot or space',
-  reservedName: 'Reserved Windows name',
-  nameTooLong: 'Name exceeds 255 characters',
-  duplicateDestination: 'Duplicate destination',
-  unsupportedEncoding: 'Unsupported name encoding',
-};
 
 export function App(props: AppProps) {
   const planningClient = props.client ?? createPlanningClient();
@@ -210,54 +200,7 @@ export function App(props: AppProps) {
               </div>
             }
           >
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">Source</th>
-                    <th scope="col">Proposed</th>
-                    <th scope="col">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <For each={plan()?.rows}>
-                    {(row) => (
-                      <tr data-status={row.status}>
-                        <td data-label="Source">
-                          <span class="file-name">{row.originalName}</span>
-                        </td>
-                        <td data-label="Proposed">
-                          <span class="file-name proposed-name">{row.proposedName}</span>
-                        </td>
-                        <td data-label="Status">
-                          <span class={`status status-${row.status}`}>
-                            <span aria-hidden="true">
-                              {row.status === 'blocked'
-                                ? '×'
-                                : row.status === 'changed'
-                                  ? '→'
-                                  : '—'}
-                            </span>
-                            {row.status === 'blocked'
-                              ? 'Blocked'
-                              : row.status === 'changed'
-                                ? 'Changed'
-                                : 'Unchanged'}
-                          </span>
-                          <Show when={row.diagnostics.length > 0}>
-                            <span class="diagnostic">
-                              {row.diagnostics
-                                .map((code) => diagnosticLabels[code] ?? code)
-                                .join(', ')}
-                            </span>
-                          </Show>
-                        </td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
-            </div>
+            <VirtualPlanTable rows={plan()?.rows ?? []} />
           </Show>
         </section>
       </div>

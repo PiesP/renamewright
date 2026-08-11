@@ -18,6 +18,9 @@ test('previews a safe prefix and blocks invalid Windows names', async ({ page })
   await page.getByRole('textbox', { name: 'Prefix' }).fill('?');
   await expect(page.getByText('3 blocked')).toBeVisible();
   await expect(page.getByRole('status')).toContainText('3 names are blocked');
+  await page.getByRole('button', { name: 'Blocked 3' }).click();
+  await expect(page.getByText('Showing 3 of 3')).toBeVisible();
+  await expect(page.getByRole('row')).toHaveCount(4);
   await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
   expect(consoleErrors).toEqual([]);
 });
