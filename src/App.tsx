@@ -1,32 +1,46 @@
-import { createSignal, For, Show } from 'solid-js';
+import { createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { APP_NAME } from './app-meta';
 import { createPlanningClient, type Plan, type PlanningClient } from './planning/client';
+import { VirtualPlanTable } from './planning/VirtualPlanTable';
 
 interface AppProps {
   client?: PlanningClient;
 }
 
-const diagnosticLabels: Record<string, string> = {
-  unchanged: 'No change',
-  emptyName: 'Empty name',
-  illegalCharacter: 'Illegal Windows character',
-  trailingDotOrSpace: 'Trailing dot or space',
-  reservedName: 'Reserved Windows name',
-  nameTooLong: 'Name exceeds 255 characters',
-  duplicateDestination: 'Duplicate destination',
-  unsupportedEncoding: 'Unsupported name encoding',
-};
-
 export function App(props: AppProps) {
   const planningClient = props.client ?? createPlanningClient();
   const [prefix, setPrefix] = createSignal('');
   const [plan, setPlan] = createSignal<Plan>();
+  const [planDocument, setPlanDocument] = createSignal<string>();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal('');
+  const [notice, setNotice] = createSignal('');
   let requestSequence = 0;
+  let planInspector: HTMLDialogElement | undefined;
+  let planInspectorOpener: HTMLButtonElement | undefined;
+  let previewTimer: number | undefined;
+
+  const dismissPlanInspector = () => {
+    const inspector = planInspector;
+    const opener = planInspectorOpener;
+    planInspector = undefined;
+    planInspectorOpener = undefined;
+    if (inspector?.open && typeof inspector.close === 'function') {
+      inspector.close();
+    }
+    setPlanDocument(undefined);
+    queueMicrotask(() => {
+      if (opener?.isConnected) {
+        opener.focus();
+      }
+    });
+  };
 
   const setResult = (result: Plan | null) => {
     if (result) {
+      if (planDocument()) {
+        dismissPlanInspector();
+      }
       setPlan(result);
     }
   };
@@ -35,6 +49,7 @@ export function App(props: AppProps) {
     const sequence = ++requestSequence;
     setBusy(true);
     setError('');
+    setNotice('');
     try {
       const result = await operation();
       if (sequence === requestSequence) {
@@ -54,7 +69,13 @@ export function App(props: AppProps) {
   const updatePrefix = (value: string) => {
     setPrefix(value);
     if (plan()) {
-      void run(() => planningClient.previewPrefix(value));
+      if (previewTimer !== undefined) {
+        window.clearTimeout(previewTimer);
+      }
+      previewTimer = window.setTimeout(() => {
+        previewTimer = undefined;
+        void run(() => planningClient.previewPrefix(value));
+      }, 120);
     }
   };
 
@@ -62,6 +83,58 @@ export function App(props: AppProps) {
     planningClient.nativeSelectionAvailable
       ? planningClient.selectSources(prefix())
       : planningClient.loadSample(prefix());
+
+  const inspectCurrentPlan = async () => {
+    const current = plan();
+    if (!current) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      setPlanDocument(await planningClient.inspectPlan(current.planId));
+    } catch (cause) {
+      planInspectorOpener = undefined;
+      setError(cause instanceof Error ? cause.message : 'The plan document could not be opened.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportCurrentPlan = async () => {
+    const current = plan();
+    if (!current) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const exported = await planningClient.exportPlan(current.planId);
+      setNotice(exported ? 'Plan JSON exported.' : 'Plan export cancelled.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The plan document could not be exported.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  onMount(() => {
+    const stopWatching = planningClient.watchSourceChanges((change) => {
+      if (change.error) {
+        setError(change.error);
+        return;
+      }
+      void run(() => planningClient.previewPrefix(prefix()));
+    });
+    onCleanup(() => {
+      stopWatching();
+      if (previewTimer !== undefined) {
+        window.clearTimeout(previewTimer);
+      }
+    });
+  });
 
   const statusMessage = () => {
     const current = plan();
@@ -71,11 +144,14 @@ export function App(props: AppProps) {
     if (busy()) {
       return 'Updating the rename plan…';
     }
+    if (notice()) {
+      return notice();
+    }
     if (!current) {
       return 'No sources are loaded.';
     }
     if (current.blockedCount > 0) {
-      return `${current.blockedCount} names are blocked. Edit the prefix before continuing.`;
+      return `${current.blockedCount} names are blocked. Review diagnostics before continuing.`;
     }
     return `${current.changedCount} names are ready for review.`;
   };
@@ -95,6 +171,9 @@ export function App(props: AppProps) {
         </div>
         <div class="source-actions">
           <span class="read-only-badge">Read-only milestone</span>
+          <span class="drop-hint">
+            {planningClient.nativeSelectionAvailable ? 'Drop files anywhere' : 'Desktop drop ready'}
+          </span>
           <button
             class="button button-secondary"
             type="button"
@@ -112,7 +191,7 @@ export function App(props: AppProps) {
           when={planningClient.nativeSelectionAvailable}
           fallback="File selection is available in the desktop app. Use the sample in this browser preview."
         >
-          Native paths stay inside the Rust process.
+          Native picker and drop paths stay inside the Rust process.
         </Show>
       </p>
 
@@ -146,15 +225,18 @@ export function App(props: AppProps) {
             >
               <Show
                 when={plan()?.blockedCount}
-                fallback="Added before every source name. The preview updates immediately."
+                fallback="Added before every source name. The preview updates as you type."
               >
-                Some destinations are invalid on Windows. Remove reserved characters or names.
+                One or more destinations are blocked. Review the row diagnostics before continuing.
               </Show>
             </p>
           </section>
           <div class="scope-note">
             <strong>Current scope</strong>
-            <p>Prefix rules and deterministic Windows name checks. No file operation can run.</p>
+            <p>
+              Prefix rules with deterministic name, occupancy, and stale-source checks. No file
+              operation can run.
+            </p>
           </div>
         </aside>
 
@@ -164,7 +246,20 @@ export function App(props: AppProps) {
               <h2 id="preview-heading">Proposed names</h2>
               <p>Original names remain untouched while you inspect this plan.</p>
             </div>
-            <span class="generation">Generation {plan()?.generation ?? 0}</span>
+            <div class="plan-heading-actions">
+              <span class="generation">Generation {plan()?.generation ?? 0}</span>
+              <button
+                class="button button-secondary button-compact"
+                type="button"
+                disabled={!plan() || busy()}
+                onClick={(event) => {
+                  planInspectorOpener = event.currentTarget;
+                  void inspectCurrentPlan();
+                }}
+              >
+                Inspect JSON
+              </button>
+            </div>
           </div>
 
           <Show
@@ -176,7 +271,8 @@ export function App(props: AppProps) {
                 </span>
                 <h2>No sources in this plan</h2>
                 <p>
-                  Load the local sample to test a prefix, or open the desktop app to select files.
+                  Load the local sample to test a prefix, or select and drop files in the desktop
+                  app.
                 </p>
                 <button
                   class="button button-primary"
@@ -195,54 +291,7 @@ export function App(props: AppProps) {
               </div>
             }
           >
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">Source</th>
-                    <th scope="col">Proposed</th>
-                    <th scope="col">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <For each={plan()?.rows}>
-                    {(row) => (
-                      <tr data-status={row.status}>
-                        <td data-label="Source">
-                          <span class="file-name">{row.originalName}</span>
-                        </td>
-                        <td data-label="Proposed">
-                          <span class="file-name proposed-name">{row.proposedName}</span>
-                        </td>
-                        <td data-label="Status">
-                          <span class={`status status-${row.status}`}>
-                            <span aria-hidden="true">
-                              {row.status === 'blocked'
-                                ? '×'
-                                : row.status === 'changed'
-                                  ? '→'
-                                  : '—'}
-                            </span>
-                            {row.status === 'blocked'
-                              ? 'Blocked'
-                              : row.status === 'changed'
-                                ? 'Changed'
-                                : 'Unchanged'}
-                          </span>
-                          <Show when={row.diagnostics.length > 0}>
-                            <span class="diagnostic">
-                              {row.diagnostics
-                                .map((code) => diagnosticLabels[code] ?? code)
-                                .join(', ')}
-                            </span>
-                          </Show>
-                        </td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
-            </div>
+            <VirtualPlanTable rows={plan()?.rows ?? []} />
           </Show>
         </section>
       </div>
@@ -267,8 +316,71 @@ export function App(props: AppProps) {
         </div>
       </footer>
 
+      <Show when={planDocument()}>
+        {(document) => (
+          <dialog
+            class="plan-inspector"
+            aria-labelledby="plan-inspector-heading"
+            ref={(element) => {
+              planInspector = element;
+              if (typeof element.showModal === 'function') {
+                queueMicrotask(() => {
+                  if (element.isConnected && !element.open) {
+                    element.showModal();
+                  }
+                });
+              } else {
+                element.setAttribute('open', '');
+              }
+            }}
+            onCancel={(event) => {
+              event.preventDefault();
+              dismissPlanInspector();
+            }}
+            onClose={dismissPlanInspector}
+          >
+            <div class="inspector-heading">
+              <div>
+                <span class="inspector-kicker">Versioned plan document</span>
+                <h2 id="plan-inspector-heading">Plan {plan()?.planId}</h2>
+              </div>
+              <button
+                class="button button-secondary button-compact"
+                type="button"
+                onClick={dismissPlanInspector}
+              >
+                Close
+              </button>
+            </div>
+            <p>Display projections and opaque IDs only. Native paths are never included.</p>
+            <pre>{document()}</pre>
+            <div class="inspector-actions">
+              <button
+                class="button button-primary"
+                type="button"
+                disabled={!planningClient.nativeSelectionAvailable || busy()}
+                title={
+                  planningClient.nativeSelectionAvailable
+                    ? undefined
+                    : 'Export is available in the desktop app.'
+                }
+                onClick={() => void exportCurrentPlan()}
+              >
+                Export JSON…
+              </button>
+            </div>
+          </dialog>
+        )}
+      </Show>
+
       <p
-        class={error() ? 'live-status live-status-error' : 'live-status'}
+        class={
+          error()
+            ? 'live-status live-status-error'
+            : notice()
+              ? 'live-status live-status-active'
+              : 'live-status'
+        }
         role="status"
         aria-live="polite"
       >

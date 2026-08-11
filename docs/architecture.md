@@ -60,9 +60,12 @@ The UI may request a new proposal, but only the backend creates a plan and only 
 current validated plan ID can be executed.
 
 The current IPC surface is deliberately smaller than the eventual protocol. It
-exposes `select_sources` and `preview_prefix`; neither command accepts a path from
-the WebView, and no execution command is registered. The browser-only sample is
-a presentation fixture and does not cross the native admission boundary.
+exposes source selection and preview, an opaque drop-change poll, and plan JSON
+inspection/export by current plan ID. No command accepts a path from the WebView,
+the export destination is selected and opened exclusively in Rust with
+create-new semantics, and no execution command is registered. The browser-only
+sample is a presentation fixture and does not cross the native admission
+boundary.
 
 ## Admission boundary
 
@@ -76,6 +79,13 @@ Native picker and drag/drop paths enter one admission use case. The backend:
 4. captures a source snapshot and stores native paths in the session registry;
 5. returns opaque IDs and display projections;
 6. requires later operations to use those IDs rather than arbitrary write paths.
+
+The planning snapshot currently records entry type, size, modification time, and
+host metadata or identity signals available through stable standard-library
+APIs. Linux tests cover inode replacement and symlink-entry preservation.
+Execution-grade Windows volume/file identity remains part of the reviewed
+journal/executor milestone; metadata validation alone will not authorize a
+rename.
 
 The Tauri WebView receives no general shell permission and no broad filesystem
 write capability. Capabilities are explicitly listed for the main window, remote

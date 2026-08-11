@@ -2506,8 +2506,10 @@ dependencies = [
  "renamewright-platform",
  "rfd",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
 ]
 
 [[package]]

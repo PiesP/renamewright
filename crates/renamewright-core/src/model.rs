@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 
 macro_rules! numeric_id {
@@ -28,6 +29,7 @@ pub struct SourceSnapshot {
     id: SourceId,
     parent_id: ParentId,
     native_name: OsString,
+    fingerprint: Option<SourceFingerprint>,
 }
 
 impl SourceSnapshot {
@@ -37,6 +39,22 @@ impl SourceSnapshot {
             id,
             parent_id,
             native_name,
+            fingerprint: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_fingerprint(
+        id: SourceId,
+        parent_id: ParentId,
+        native_name: OsString,
+        fingerprint: SourceFingerprint,
+    ) -> Self {
+        Self {
+            id,
+            parent_id,
+            native_name,
+            fingerprint: Some(fingerprint),
         }
     }
 
@@ -53,6 +71,123 @@ impl SourceSnapshot {
     #[must_use]
     pub fn native_name(&self) -> &OsStr {
         &self.native_name
+    }
+
+    #[must_use]
+    pub const fn fingerprint(&self) -> Option<&SourceFingerprint> {
+        self.fingerprint.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Symlink,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFingerprint {
+    entry_kind: EntryKind,
+    entry_identity_signal: Option<EntryIdentitySignal>,
+    byte_len: u64,
+    modified_nanos: Option<u128>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryIdentitySignal {
+    primary: u64,
+    secondary: u64,
+}
+
+impl EntryIdentitySignal {
+    #[must_use]
+    pub const fn new(primary: u64, secondary: u64) -> Self {
+        Self { primary, secondary }
+    }
+}
+
+impl SourceFingerprint {
+    #[must_use]
+    pub const fn new(
+        entry_kind: EntryKind,
+        entry_identity_signal: Option<EntryIdentitySignal>,
+        byte_len: u64,
+        modified_nanos: Option<u128>,
+    ) -> Self {
+        Self {
+            entry_kind,
+            entry_identity_signal,
+            byte_len,
+            modified_nanos,
+        }
+    }
+
+    #[must_use]
+    pub const fn entry_kind(&self) -> EntryKind {
+        self.entry_kind
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OccupiedName {
+    parent_id: ParentId,
+    native_name: OsString,
+}
+
+impl OccupiedName {
+    #[must_use]
+    pub fn new(parent_id: ParentId, native_name: OsString) -> Self {
+        Self {
+            parent_id,
+            native_name,
+        }
+    }
+
+    #[must_use]
+    pub const fn parent_id(&self) -> ParentId {
+        self.parent_id
+    }
+
+    #[must_use]
+    pub fn native_name(&self) -> &OsStr {
+        &self.native_name
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ValidationEnvironment {
+    stale_sources: BTreeSet<SourceId>,
+    unavailable_parents: BTreeSet<ParentId>,
+    occupied_names: Vec<OccupiedName>,
+}
+
+impl ValidationEnvironment {
+    #[must_use]
+    pub fn new(
+        stale_sources: BTreeSet<SourceId>,
+        unavailable_parents: BTreeSet<ParentId>,
+        occupied_names: Vec<OccupiedName>,
+    ) -> Self {
+        Self {
+            stale_sources,
+            unavailable_parents,
+            occupied_names,
+        }
+    }
+
+    #[must_use]
+    pub fn stale_sources(&self) -> &BTreeSet<SourceId> {
+        &self.stale_sources
+    }
+
+    #[must_use]
+    pub fn unavailable_parents(&self) -> &BTreeSet<ParentId> {
+        &self.unavailable_parents
+    }
+
+    #[must_use]
+    pub fn occupied_names(&self) -> &[OccupiedName] {
+        &self.occupied_names
     }
 }
 
@@ -96,6 +231,9 @@ pub enum DiagnosticCode {
     NameTooLong,
     DuplicateDestination,
     UnsupportedEncoding,
+    OccupiedDestination,
+    StaleSource,
+    ParentUnavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

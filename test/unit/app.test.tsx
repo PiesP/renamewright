@@ -2,7 +2,7 @@ import { cleanup, render, screen } from '@solidjs/testing-library';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from '../../src/App';
-import type { Plan, PlanningClient } from '../../src/planning/client';
+import type { Plan, PlanningClient, SourceChange } from '../../src/planning/client';
 
 const sources = ['invoice.pdf', 'CON.txt', 'notes.txt'];
 
@@ -22,6 +22,7 @@ function makePlan(prefix: string): Plan {
   });
 
   return {
+    planId: 9,
     generation: 1,
     rows,
     changedCount: rows.filter((row) => row.status === 'changed').length,
@@ -36,6 +37,10 @@ function fakeClient(): PlanningClient {
     loadSample: async (prefix) => makePlan(prefix),
     selectSources: async (prefix) => makePlan(prefix),
     previewPrefix: async (prefix) => makePlan(prefix),
+    inspectPlan: async (planId) =>
+      JSON.stringify({ schemaVersion: 1, planId, rows: makePlan('').rows }, null, 2),
+    exportPlan: async () => false,
+    watchSourceChanges: () => () => undefined,
   };
 }
 
@@ -68,7 +73,7 @@ test('reports blocked destinations without enabling execution', async () => {
   expect(
     await screen.findByText((_, element) => element?.textContent === '3 blocked')
   ).toBeInTheDocument();
-  expect(screen.getAllByText('Blocked')).toHaveLength(3);
+  expect(screen.getAllByRole('cell', { name: /Blocked/u })).toHaveLength(3);
   expect(prefix).toHaveAttribute('aria-invalid', 'true');
   expect(screen.getByRole('status')).toHaveTextContent('3 names are blocked');
 });
@@ -86,4 +91,47 @@ test('uses the native picker instead of browser samples in the desktop shell', a
 
   expect(selectSources).toHaveBeenCalledWith('');
   expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
+});
+
+test('refreshes the plan after Rust admits dropped sources', async () => {
+  let notify: ((change: SourceChange) => void) | undefined;
+  const client = fakeClient();
+  client.nativeSelectionAvailable = true;
+  client.watchSourceChanges = (onChange) => {
+    notify = onChange;
+    return () => undefined;
+  };
+  const previewPrefix = vi.fn(client.previewPrefix);
+  client.previewPrefix = previewPrefix;
+  render(() => <App client={client} />);
+
+  notify?.({ revision: 1, error: null });
+
+  expect(previewPrefix).toHaveBeenCalledWith('');
+  expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
+});
+
+test('inspects and exports only the current opaque plan ID', async () => {
+  const user = userEvent.setup();
+  const client = fakeClient();
+  client.nativeSelectionAvailable = true;
+  const inspectPlan = vi.fn(client.inspectPlan);
+  const exportPlan = vi.fn(async () => true);
+  client.inspectPlan = inspectPlan;
+  client.exportPlan = exportPlan;
+  render(() => <App client={client} />);
+
+  await user.click(
+    screen.getAllByRole('button', { name: 'Add files' }).at(-1) as HTMLButtonElement
+  );
+  const inspectButton = screen.getByRole('button', { name: 'Inspect JSON' });
+  await user.click(inspectButton);
+
+  expect(inspectPlan).toHaveBeenCalledWith(9);
+  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 1');
+  await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
+  expect(exportPlan).toHaveBeenCalledWith(9);
+  expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');
+  await user.click(screen.getByRole('button', { name: 'Close' }));
+  expect(inspectButton).toHaveFocus();
 });

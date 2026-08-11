@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::model::{
     Diagnostic, DiagnosticCode, PlanId, PlanRow, RenamePlan, RenameRule, SourceSnapshot,
-    TargetPolicy, TraceStep,
+    TargetPolicy, TraceStep, ValidationEnvironment,
 };
 use crate::windows::{comparison_key, validate_name};
 
@@ -14,12 +14,34 @@ pub fn build_plan(
     rules: &[RenameRule],
     policy: TargetPolicy,
 ) -> RenamePlan {
+    build_plan_with_environment(
+        plan_id,
+        generation,
+        sources,
+        rules,
+        policy,
+        &ValidationEnvironment::default(),
+    )
+}
+
+#[must_use]
+pub fn build_plan_with_environment(
+    plan_id: PlanId,
+    generation: u64,
+    sources: &[SourceSnapshot],
+    rules: &[RenameRule],
+    policy: TargetPolicy,
+    environment: &ValidationEnvironment,
+) -> RenamePlan {
     let mut rows = sources
         .iter()
         .map(|source| build_row(source, rules, policy))
         .collect::<Vec<_>>();
 
+    mark_stale_sources(&mut rows, environment);
+    mark_unavailable_parents(&mut rows, environment);
     mark_duplicates(&mut rows, policy);
+    mark_occupied_destinations(&mut rows, policy, environment);
     RenamePlan::new(plan_id, generation, rows)
 }
 
@@ -79,6 +101,56 @@ fn mark_duplicates(rows: &mut [PlanRow], policy: TargetPolicy) {
     for indices in destinations.values().filter(|indices| indices.len() > 1) {
         for &index in indices {
             rows[index].block(DiagnosticCode::DuplicateDestination);
+        }
+    }
+}
+
+fn mark_stale_sources(rows: &mut [PlanRow], environment: &ValidationEnvironment) {
+    for row in rows {
+        if environment.stale_sources().contains(&row.source_id()) {
+            row.block(DiagnosticCode::StaleSource);
+        }
+    }
+}
+
+fn mark_unavailable_parents(rows: &mut [PlanRow], environment: &ValidationEnvironment) {
+    for row in rows {
+        if environment.unavailable_parents().contains(&row.parent_id()) {
+            row.block(DiagnosticCode::ParentUnavailable);
+        }
+    }
+}
+
+fn mark_occupied_destinations(
+    rows: &mut [PlanRow],
+    policy: TargetPolicy,
+    environment: &ValidationEnvironment,
+) {
+    let occupied = environment
+        .occupied_names()
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.native_name().to_str()?;
+            let key = if policy.uses_windows_names() {
+                comparison_key(name)
+            } else {
+                name.to_owned()
+            };
+            Some((entry.parent_id(), key))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for row in rows {
+        let Some(name) = row.proposed_name().to_str() else {
+            continue;
+        };
+        let key = if policy.uses_windows_names() {
+            comparison_key(name)
+        } else {
+            name.to_owned()
+        };
+        if occupied.contains(&(row.parent_id(), key)) {
+            row.block(DiagnosticCode::OccupiedDestination);
         }
     }
 }

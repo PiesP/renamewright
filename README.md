@@ -13,11 +13,12 @@ new product owns its interaction model, safety guarantees, and implementation.
 
 ## Status
 
-The repository contains the approved planning baseline and a working read-only
-Rust/Tauri/Solid vertical slice. The desktop picker admits files into a
-Rust-owned source registry, the Workbench previews a prefix rule, and Windows
-name diagnostics block invalid proposals. Filesystem mutation is not exposed to
-the application.
+The repository contains the complete read-only planning milestone. Native picker
+and drag/drop admission retain paths in Rust, the Workbench virtualises and
+filters large prefix plans, and Windows name, occupied-destination, and stale
+source diagnostics block unsafe proposals. Plans can be inspected as versioned,
+path-free JSON and exported through a native create-new dialog. Source filesystem
+mutation is not exposed to the application.
 
 ## Development
 
