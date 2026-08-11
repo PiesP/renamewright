@@ -9,6 +9,8 @@ import {
   type RecoveryCommandAction,
   type RecoveryDisposition,
   type RecoveryInspection,
+  type UndoBlockReason,
+  type UndoInspection,
 } from './planning/client';
 import { VirtualPlanTable } from './planning/VirtualPlanTable';
 
@@ -26,15 +28,22 @@ export function App(props: AppProps) {
   const [notice, setNotice] = createSignal('');
   const [ledger, setLedger] = createSignal<LedgerEntry[]>([]);
   const [recoveryInspection, setRecoveryInspection] = createSignal<RecoveryInspection>();
+  const [undoInspection, setUndoInspection] = createSignal<UndoInspection>();
   const [inspectingLedgerId, setInspectingLedgerId] = createSignal<number>();
+  const [inspectingUndoLedgerId, setInspectingUndoLedgerId] = createSignal<number>();
   const [recoveryBusyAction, setRecoveryBusyAction] = createSignal<RecoveryCommandAction>();
+  const [undoBusy, setUndoBusy] = createSignal(false);
   const [recoveryCancellationState, setRecoveryCancellationState] = createSignal<
+    'requesting' | 'accepted' | 'rejected'
+  >();
+  const [undoCancellationState, setUndoCancellationState] = createSignal<
     'requesting' | 'accepted' | 'rejected'
   >();
   let requestSequence = 0;
   let planInspector: HTMLDialogElement | undefined;
   let planInspectorOpener: HTMLButtonElement | undefined;
   let recoveryInspectionPanel: HTMLDivElement | undefined;
+  let undoInspectionPanel: HTMLDivElement | undefined;
   let ledgerHeading: HTMLHeadingElement | undefined;
   let previewTimer: number | undefined;
 
@@ -141,6 +150,7 @@ export function App(props: AppProps) {
   const inspectLedgerEntry = async (entry: LedgerEntry) => {
     setInspectingLedgerId(entry.ledgerId);
     setRecoveryInspection(undefined);
+    setUndoInspection(undefined);
     setError('');
     try {
       setRecoveryInspection(await planningClient.inspectRecovery(entry.ledgerId));
@@ -153,6 +163,23 @@ export function App(props: AppProps) {
       );
     } finally {
       setInspectingLedgerId(undefined);
+    }
+  };
+
+  const inspectUndoEntry = async (entry: LedgerEntry) => {
+    setInspectingUndoLedgerId(entry.ledgerId);
+    setUndoInspection(undefined);
+    setRecoveryInspection(undefined);
+    setError('');
+    try {
+      setUndoInspection(await planningClient.inspectUndo(entry.ledgerId));
+      queueMicrotask(() => {
+        undoInspectionPanel?.scrollIntoView?.({ block: 'nearest' });
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Undo could not be inspected.');
+    } finally {
+      setInspectingUndoLedgerId(undefined);
     }
   };
 
@@ -217,6 +244,65 @@ export function App(props: AppProps) {
     }
   };
 
+  const applyUndo = async () => {
+    const inspection = undoInspection();
+    if (!inspection?.undoAvailable) {
+      return;
+    }
+    setUndoBusy(true);
+    setUndoCancellationState(undefined);
+    queueMicrotask(() => undoInspectionPanel?.scrollIntoView?.({ block: 'center' }));
+    setError('');
+    setNotice('');
+    try {
+      const result = await planningClient.applyUndo(inspection);
+      setLedger(result.ledger);
+      if (!result.performed) {
+        setNotice('Undo cancelled. No journal or file was changed.');
+        return;
+      }
+      setUndoInspection(undefined);
+      const messages = {
+        cancelled: 'Undo was cancelled and rolled back safely.',
+        completed: 'The completed rename transaction was undone.',
+        rolledBack: 'Undo could not finish and all completed steps were rolled back.',
+        recoveryRequired: 'Undo stopped safely. Use the new ledger recovery entry to continue.',
+      } as const;
+      setNotice(messages[result.outcome]);
+      queueMicrotask(() => ledgerHeading?.focus({ preventScroll: true }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Undo could not run.');
+    } finally {
+      setUndoCancellationState(undefined);
+      setUndoBusy(false);
+    }
+  };
+
+  const requestUndoCancellation = async () => {
+    if (
+      !undoBusy() ||
+      undoCancellationState() === 'requesting' ||
+      undoCancellationState() === 'accepted'
+    ) {
+      return;
+    }
+    setUndoCancellationState('requesting');
+    setError('');
+    try {
+      if (await planningClient.cancelUndo()) {
+        setUndoCancellationState('accepted');
+        queueMicrotask(() => undoInspectionPanel?.scrollIntoView?.({ block: 'center' }));
+      } else {
+        setUndoCancellationState('rejected');
+      }
+    } catch (cause) {
+      setUndoCancellationState(undefined);
+      setError(
+        cause instanceof Error ? cause.message : 'Undo cancellation could not be requested.'
+      );
+    }
+  };
+
   onMount(() => {
     void planningClient
       .listLedger()
@@ -243,6 +329,18 @@ export function App(props: AppProps) {
     const current = plan();
     if (error()) {
       return error();
+    }
+    if (undoCancellationState() === 'accepted') {
+      return 'Cancellation requested. Undo will roll back at the next safe step…';
+    }
+    if (undoCancellationState() === 'requesting') {
+      return 'Requesting Undo cancellation…';
+    }
+    if (undoCancellationState() === 'rejected') {
+      return 'Cancellation was not accepted because Undo is not active yet. Try again after confirmation.';
+    }
+    if (undoBusy()) {
+      return 'Waiting for native confirmation or Undo completion…';
     }
     if (recoveryCancellationState() === 'accepted') {
       return 'Cancellation requested. Renamewright will roll back at the next safe step…';
@@ -334,6 +432,17 @@ export function App(props: AppProps) {
       : 'Continue rollback only after native confirmation and a fresh identity check.';
   };
 
+  const undoBlockDescription = (reason: UndoBlockReason | null) => {
+    switch (reason) {
+      case 'sourceChanged':
+        return 'A renamed source no longer has the recorded identity. No file was changed.';
+      case 'destinationOccupied':
+        return 'An original name is occupied. Renamewright will not replace that entry.';
+      default:
+        return 'The transaction no longer passes the Undo safety checks.';
+    }
+  };
+
   return (
     <main class="workbench">
       <header class="source-bar">
@@ -412,8 +521,8 @@ export function App(props: AppProps) {
           <div class="scope-note">
             <strong>Current scope</strong>
             <p>
-              New plan execution remains locked. Startup recovery requires inspection and native
-              confirmation.
+              New plan execution remains locked. Recovery and Undo require fresh identity checks and
+              native confirmation.
             </p>
           </div>
           <Show when={ledger().length > 0}>
@@ -424,20 +533,32 @@ export function App(props: AppProps) {
                 </h2>
                 <span>{ledger().length}</span>
               </div>
-              <p>Inspect a transaction before any native-confirmed recovery action.</p>
+              <p>
+                Inspect interrupted work or a completed rename before any native-confirmed action.
+              </p>
               <ul aria-label="Rename journal status">
                 {ledger().map((entry) => (
                   <li>
                     <div class="ledger-entry-summary">
                       <strong>
-                        {entry.planId === null
-                          ? `Ledger ${entry.ledgerId}`
-                          : `Plan ${entry.planId}`}
+                        {entry.undoOfPlanId !== null
+                          ? `Undo of plan ${entry.undoOfPlanId}`
+                          : entry.planId === null
+                            ? `Ledger ${entry.ledgerId}`
+                            : `Plan ${entry.planId}`}
                       </strong>
-                      <span>{entry.sourceCount} sources</span>
+                      <span>
+                        {entry.undoOfPlanId !== null && entry.planId !== null
+                          ? `Plan ${entry.planId} · `
+                          : ''}
+                        {entry.sourceCount} sources
+                      </span>
                     </div>
                     <div class="ledger-entry-actions">
-                      <span data-recovery={entry.recoveryAvailable ? 'true' : 'false'}>
+                      <span
+                        data-recovery={entry.recoveryAvailable ? 'true' : 'false'}
+                        data-undo={entry.undoAvailable ? 'true' : 'false'}
+                      >
                         {ledgerStatusLabel(entry.status)}
                       </span>
                       <Show when={entry.recoveryAvailable}>
@@ -445,12 +566,33 @@ export function App(props: AppProps) {
                           class="button button-secondary button-compact ledger-inspect-button"
                           type="button"
                           disabled={
-                            inspectingLedgerId() !== undefined || recoveryBusyAction() !== undefined
+                            inspectingLedgerId() !== undefined ||
+                            inspectingUndoLedgerId() !== undefined ||
+                            recoveryBusyAction() !== undefined ||
+                            undoBusy()
                           }
                           aria-label={`Inspect ${entry.planId === null ? `ledger ${entry.ledgerId}` : `plan ${entry.planId}`} recovery`}
                           onClick={() => void inspectLedgerEntry(entry)}
                         >
                           {inspectingLedgerId() === entry.ledgerId ? 'Inspecting…' : 'Inspect'}
+                        </button>
+                      </Show>
+                      <Show when={entry.undoAvailable}>
+                        <button
+                          class="button button-secondary button-compact ledger-inspect-button"
+                          type="button"
+                          disabled={
+                            inspectingLedgerId() !== undefined ||
+                            inspectingUndoLedgerId() !== undefined ||
+                            recoveryBusyAction() !== undefined ||
+                            undoBusy()
+                          }
+                          aria-label={`Inspect ${entry.planId === null ? `ledger ${entry.ledgerId}` : `plan ${entry.planId}`} Undo`}
+                          onClick={() => void inspectUndoEntry(entry)}
+                        >
+                          {inspectingUndoLedgerId() === entry.ledgerId
+                            ? 'Inspecting…'
+                            : 'Inspect Undo'}
                         </button>
                       </Show>
                     </div>
@@ -537,6 +679,67 @@ export function App(props: AppProps) {
                   </fieldset>
                 </div>
               </Show>
+              <Show when={undoInspection()}>
+                {(inspection) => (
+                  <div
+                    class="ledger-inspection ledger-undo-inspection"
+                    data-readiness={inspection().readiness}
+                    role="status"
+                    aria-live="polite"
+                    ref={undoInspectionPanel}
+                  >
+                    <strong>
+                      {inspection().readiness === 'ready'
+                        ? 'Undo checks passed'
+                        : 'Undo is blocked'}
+                    </strong>
+                    <p>
+                      {inspection().readiness === 'ready'
+                        ? 'Native confirmation and one more identity check are required before the reverse transaction starts.'
+                        : undoBlockDescription(inspection().blockReason)}
+                    </p>
+                    <span>
+                      Plan {inspection().originalPlanId} · {inspection().sourceCount} sources
+                    </span>
+                    <Show when={inspection().undoAvailable}>
+                      <fieldset class="ledger-recovery-actions">
+                        <legend class="visually-hidden">Available Undo actions</legend>
+                        <button
+                          class="button button-primary button-compact ledger-action-button"
+                          data-state={undoBusy() ? 'loading' : 'default'}
+                          type="button"
+                          disabled={undoBusy() || recoveryBusyAction() !== undefined}
+                          onClick={() => void applyUndo()}
+                        >
+                          {undoBusy() ? 'Undoing…' : 'Undo rename'}
+                        </button>
+                        <Show when={undoBusy()}>
+                          <button
+                            class="button button-secondary button-compact ledger-action-button"
+                            data-state={
+                              undoCancellationState() === 'accepted' ? 'success' : 'default'
+                            }
+                            type="button"
+                            disabled={
+                              undoCancellationState() === 'requesting' ||
+                              undoCancellationState() === 'accepted'
+                            }
+                            onClick={() => void requestUndoCancellation()}
+                          >
+                            {undoCancellationState() === 'accepted'
+                              ? 'Cancellation requested'
+                              : undoCancellationState() === 'requesting'
+                                ? 'Requesting cancellation…'
+                                : undoCancellationState() === 'rejected'
+                                  ? 'Try cancel again'
+                                  : 'Cancel and roll back'}
+                          </button>
+                        </Show>
+                      </fieldset>
+                    </Show>
+                  </div>
+                )}
+              </Show>
             </section>
           </Show>
         </aside>
@@ -610,7 +813,7 @@ export function App(props: AppProps) {
           </span>
         </div>
         <div class="execution-lock">
-          <span>New rename execution remains unavailable while startup recovery is enabled.</span>
+          <span>New plan execution remains locked. Ledger Recovery and Undo stay available.</span>
           <button class="button button-locked" type="button" disabled>
             Execution unavailable
           </button>

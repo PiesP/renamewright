@@ -1,4 +1,8 @@
 /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V4 · genre: modern-minimal · macrostructure: Workbench · theme: Cobalt · anchor: cobalt blue · nav: desktop source bar · footer: persistent review bar · contrast: pass (40–41) · slop: pass (42–49) · mobile: pass (34, 49–57) */
+/* Hallmark · component: Rename Ledger Undo · genre: modern-minimal · theme: Cobalt
+ * states: default · hover · focus · active · disabled · loading · error · success
+ * contrast: pass (40–41)
+ */
 @import "../../tokens.css";
 
 *,
@@ -404,6 +408,10 @@ input:focus-visible {
   color: var(--color-error);
 }
 
+.ledger-entry-actions > span[data-undo="true"] {
+  color: var(--color-accent);
+}
+
 .ledger-inspect-button {
   min-height: var(--control-height);
 }
@@ -415,6 +423,18 @@ input:focus-visible {
   border: var(--rule-thin) solid var(--color-rule-strong);
   border-radius: var(--radius-sm);
   background: var(--color-paper-soft);
+}
+
+.ledger-undo-inspection[data-readiness="ready"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-ink);
+}
+
+.ledger-undo-inspection[data-readiness="blocked"] {
+  border-color: var(--color-error);
+  background: var(--color-error-soft);
+  color: var(--color-ink);
 }
 
 .ledger-inspection strong,
@@ -447,6 +467,26 @@ input:focus-visible {
   margin-block-start: var(--space-3);
   padding: 0;
   border: 0;
+}
+
+.ledger-recovery-actions .button {
+  min-height: var(--control-height);
+}
+
+.ledger-action-button[data-state="loading"] {
+  cursor: wait;
+}
+
+.ledger-action-button[data-state="error"] {
+  border-color: var(--color-error);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+}
+
+.ledger-action-button[data-state="success"] {
+  border-color: var(--color-success);
+  background: var(--color-success-soft);
+  color: var(--color-success);
 }
 
 .preview-pane {

@@ -49,6 +49,28 @@ export interface LedgerEntry {
   status: LedgerStatus;
   attentionStep: number | null;
   recoveryAvailable: boolean;
+  undoOfPlanId: number | null;
+  undoAvailable: boolean;
+}
+
+export type UndoReadiness = 'ready' | 'blocked';
+export type UndoBlockReason = 'sourceChanged' | 'destinationOccupied';
+
+export interface UndoInspection {
+  ledgerId: number;
+  originalPlanId: number;
+  sourceCount: number;
+  readiness: UndoReadiness;
+  blockReason: UndoBlockReason | null;
+  undoAvailable: boolean;
+}
+
+export type UndoCommandOutcome = 'cancelled' | 'completed' | 'rolledBack' | 'recoveryRequired';
+
+export interface UndoCommandResult {
+  performed: boolean;
+  outcome: UndoCommandOutcome;
+  ledger: LedgerEntry[];
 }
 
 export type RecoveryDirection = 'forward' | 'rollback';
@@ -99,6 +121,9 @@ export interface PlanningClient {
     inspection: RecoveryInspection
   ): Promise<RecoveryCommandResult>;
   cancelRecovery(): Promise<boolean>;
+  inspectUndo(ledgerId: number): Promise<UndoInspection>;
+  applyUndo(inspection: UndoInspection): Promise<UndoCommandResult>;
+  cancelUndo(): Promise<boolean>;
   watchSourceChanges(onChange: (change: SourceChange) => void): () => void;
 }
 
@@ -168,6 +193,24 @@ function recoveryCommandError(cause: unknown): Error {
     typeof code === 'string' && code in messages
       ? messages[code]
       : 'The recovery action could not be completed.'
+  );
+}
+
+function undoCommandError(cause: unknown): Error {
+  const code =
+    typeof cause === 'object' && cause !== null && 'code' in cause
+      ? (cause as { code?: unknown }).code
+      : undefined;
+  const messages: Record<string, string> = {
+    busy: 'Another filesystem operation is already active.',
+    stateUnavailable: 'The Undo worker is unavailable.',
+    inspectionChanged: 'The files changed. Inspect Undo again before continuing.',
+    actionUnavailable: 'Undo is no longer available for that transaction.',
+    undoFailed: 'Undo stopped safely. Inspect the Rename Ledger before continuing.',
+    ledgerRefreshFailed: 'The Rename Ledger could not be refreshed. Inspect it again.',
+  };
+  return new Error(
+    typeof code === 'string' && code in messages ? messages[code] : 'Undo could not be completed.'
   );
 }
 
@@ -254,6 +297,38 @@ export function createPlanningClient(): PlanningClient {
         return await invoke<boolean>('cancel_recovery');
       } catch (cause) {
         throw recoveryCommandError(cause);
+      }
+    },
+    inspectUndo: async (ledgerId) => {
+      if (!nativeSelectionAvailable) {
+        throw new Error('Undo inspection is available in the Windows desktop app.');
+      }
+      try {
+        return await invoke<UndoInspection>('inspect_undo', { ledgerId });
+      } catch (cause) {
+        throw undoCommandError(cause);
+      }
+    },
+    applyUndo: async (inspection) => {
+      if (!nativeSelectionAvailable) {
+        throw new Error('Undo is available in the Windows desktop app.');
+      }
+      try {
+        return await invoke<UndoCommandResult>('apply_undo', {
+          request: { inspection },
+        });
+      } catch (cause) {
+        throw undoCommandError(cause);
+      }
+    },
+    cancelUndo: async () => {
+      if (!nativeSelectionAvailable) {
+        throw new Error('Undo is available in the Windows desktop app.');
+      }
+      try {
+        return await invoke<boolean>('cancel_undo');
+      } catch (cause) {
+        throw undoCommandError(cause);
       }
     },
     watchSourceChanges: (onChange) => {

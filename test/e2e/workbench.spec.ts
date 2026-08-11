@@ -59,6 +59,8 @@ test('renders the path-free startup ledger at supported narrow widths', async ({
               status: 'reconciliationRequired',
               attentionStep: 2,
               recoveryAvailable: true,
+              undoOfPlanId: null,
+              undoAvailable: false,
             },
           ];
         }
@@ -91,6 +93,8 @@ test('renders the path-free startup ledger at supported narrow widths', async ({
                 status: 'forwardPending',
                 attentionStep: 2,
                 recoveryAvailable: true,
+                undoOfPlanId: null,
+                undoAvailable: false,
               },
             ],
           };
@@ -149,6 +153,8 @@ test('keeps forward recovery cancellation above the mobile review bar', async ({
               status: 'forwardPending',
               attentionStep: 1,
               recoveryAvailable: true,
+              undoOfPlanId: null,
+              undoAvailable: false,
             },
           ];
         }
@@ -192,5 +198,125 @@ test('keeps forward recovery cancellation above the mobile review bar', async ({
   expect(reviewBarBox).not.toBeNull();
   expect((inspectionBox?.y ?? 0) + (inspectionBox?.height ?? 0)).toBeLessThanOrEqual(
     reviewBarBox?.y ?? 0
+  );
+});
+
+test('keeps the path-free Undo inspection usable at supported widths', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__TAURI_INTERNALS__ = {
+      invoke: async (command: string) => {
+        if (command === 'list_ledger') {
+          return [
+            {
+              ledgerId: 4,
+              planId: 80,
+              sourceGeneration: 6,
+              schemaVersion: 3,
+              sourceCount: 3,
+              status: 'completed',
+              attentionStep: null,
+              recoveryAvailable: false,
+              undoOfPlanId: null,
+              undoAvailable: true,
+            },
+          ];
+        }
+        if (command === 'poll_source_changes') {
+          return null;
+        }
+        if (command === 'inspect_undo') {
+          return {
+            ledgerId: 4,
+            originalPlanId: 80,
+            sourceCount: 3,
+            readiness: 'ready',
+            blockReason: null,
+            undoAvailable: true,
+          };
+        }
+        throw new Error(`Unexpected command: ${command}`);
+      },
+    };
+  });
+
+  for (const width of [320, 375, 414, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Inspect plan 80 Undo' }).click();
+    const inspection = page.getByRole('status').filter({ hasText: 'Undo checks passed' });
+    await expect(inspection).toBeVisible();
+    const undoButton = page.getByRole('button', { name: 'Undo rename' });
+    await expect(undoButton).toBeVisible();
+    const buttonBox = await undoButton.boundingBox();
+    expect(buttonBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+
+    const sizes = await page.evaluate(() => ({
+      client: document.documentElement.clientWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(sizes.scroll, `Undo ledger overflow at ${width}px`).toBeLessThanOrEqual(sizes.client);
+    const reviewBarBox = await page.locator('.review-bar').boundingBox();
+    const inspectionBox = await inspection.boundingBox();
+    expect(inspectionBox).not.toBeNull();
+    expect(reviewBarBox).not.toBeNull();
+    expect((inspectionBox?.y ?? 0) + (inspectionBox?.height ?? 0)).toBeLessThanOrEqual(
+      reviewBarBox?.y ?? 0
+    );
+  }
+});
+
+test('offers safe cancellation while Undo is active', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 900 });
+  await page.addInitScript(() => {
+    window.__TAURI_INTERNALS__ = {
+      invoke: async (command: string) => {
+        if (command === 'list_ledger') {
+          return [
+            {
+              ledgerId: 4,
+              planId: 80,
+              sourceGeneration: 6,
+              schemaVersion: 3,
+              sourceCount: 3,
+              status: 'completed',
+              attentionStep: null,
+              recoveryAvailable: false,
+              undoOfPlanId: null,
+              undoAvailable: true,
+            },
+          ];
+        }
+        if (command === 'poll_source_changes') {
+          return null;
+        }
+        if (command === 'inspect_undo') {
+          return {
+            ledgerId: 4,
+            originalPlanId: 80,
+            sourceCount: 3,
+            readiness: 'ready',
+            blockReason: null,
+            undoAvailable: true,
+          };
+        }
+        if (command === 'apply_undo') {
+          return new Promise(() => undefined);
+        }
+        if (command === 'cancel_undo') {
+          return true;
+        }
+        throw new Error(`Unexpected command: ${command}`);
+      },
+    };
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Inspect plan 80 Undo' }).click();
+  await page.getByRole('button', { name: 'Undo rename' }).click();
+  await page.getByRole('button', { name: 'Cancel and roll back' }).click();
+
+  await expect(page.getByRole('button', { name: 'Cancellation requested' })).toBeDisabled();
+  await expect(page.getByRole('status').last()).toContainText(
+    'Cancellation requested. Undo will roll back at the next safe step…'
   );
 });
