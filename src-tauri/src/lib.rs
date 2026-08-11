@@ -104,7 +104,7 @@ struct StoredPlan {
 }
 
 impl StoredPlan {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     fn prefix(plan: RenamePlan, prefix: impl Into<String>) -> Self {
         Self {
             plan,
@@ -1640,9 +1640,10 @@ mod tests {
     use std::fs;
 
     use renamewright_core::{
-        ParentId, PlanId, RenameRule, SourceId, SourceSnapshot, TargetPolicy,
-        build_plan_with_environment, build_plan_with_rule_pipeline,
+        ParentId, PlanId, SourceId, SourceSnapshot, TargetPolicy, build_plan_with_rule_pipeline,
     };
+    #[cfg(target_os = "linux")]
+    use renamewright_core::{RenameRule, build_plan_with_environment};
     #[cfg(target_os = "linux")]
     use renamewright_platform::{
         ExecutionOutcome, LinuxExecutionFileSystem, execute_frozen_plan, freeze_execution_plan,
