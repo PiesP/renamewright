@@ -3,22 +3,26 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
     DiagnosticCode, NameStatus, PROTOCOL_VERSION, PlanId, RenamePlan, RenameRule, TargetPolicy,
     build_plan_with_environment,
 };
-use renamewright_platform::SourceRegistry;
+use renamewright_platform::{
+    ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
+    FrozenExecutionPlan, SourceRegistry, execute_frozen_plan, freeze_execution_plan,
+};
 use serde::Serialize;
 use tauri::{DragDropEvent, Manager, State, WindowEvent};
 
 #[derive(Debug)]
-struct AppState {
+pub struct AppState {
     registry: Mutex<SourceRegistry>,
     next_plan_id: Mutex<u64>,
     source_changes: Mutex<SourceChanges>,
     latest_plan: Mutex<Option<StoredPlan>>,
+    mutation_lock: Mutex<()>,
 }
 
 #[derive(Debug, Default)]
@@ -33,6 +37,53 @@ struct StoredPlan {
     prefix: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrepareExecutionError {
+    Busy,
+    MutationLockUnavailable,
+    RegistryUnavailable,
+    LatestPlanUnavailable,
+    PlanMismatch,
+    Freeze { kind: FreezeExecutionErrorKind },
+}
+
+impl std::fmt::Display for PrepareExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the latest execution could not be prepared ({self:?})"
+        )
+    }
+}
+
+impl std::error::Error for PrepareExecutionError {}
+
+#[derive(Debug)]
+pub struct PreparedExecution<'a> {
+    frozen: FrozenExecutionPlan,
+    mutation_guard: MutexGuard<'a, ()>,
+}
+
+impl PreparedExecution<'_> {
+    pub fn execute<F, C>(
+        self,
+        filesystem: &F,
+        journal_path: &Path,
+        should_cancel: C,
+    ) -> Result<ExecutionOutcome, ExecutionStartError>
+    where
+        F: ExecutionFileSystem + ?Sized,
+        C: Fn() -> bool,
+    {
+        let Self {
+            frozen,
+            mutation_guard,
+        } = self;
+        let _mutation_guard = mutation_guard;
+        execute_frozen_plan(frozen, filesystem, journal_path, should_cancel)
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
@@ -40,6 +91,7 @@ impl Default for AppState {
             next_plan_id: Mutex::new(1),
             source_changes: Mutex::new(SourceChanges::default()),
             latest_plan: Mutex::new(None),
+            mutation_lock: Mutex::new(()),
         }
     }
 }
@@ -248,6 +300,44 @@ fn plan_from_registry(
     Ok(dto)
 }
 
+pub fn prepare_latest_execution<'a, F: ExecutionFileSystem + ?Sized>(
+    state: &'a AppState,
+    plan_id: PlanId,
+    filesystem: &F,
+) -> Result<PreparedExecution<'a>, PrepareExecutionError> {
+    let mutation_guard = match state.mutation_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => return Err(PrepareExecutionError::Busy),
+        Err(TryLockError::Poisoned(_)) => {
+            return Err(PrepareExecutionError::MutationLockUnavailable);
+        }
+    };
+    let registry = state
+        .registry
+        .lock()
+        .map_err(|_| PrepareExecutionError::RegistryUnavailable)?;
+    let mut latest_plan = state
+        .latest_plan
+        .lock()
+        .map_err(|_| PrepareExecutionError::LatestPlanUnavailable)?;
+    let stored = latest_plan
+        .as_ref()
+        .ok_or(PrepareExecutionError::LatestPlanUnavailable)?;
+    if stored.plan.id() != plan_id {
+        return Err(PrepareExecutionError::PlanMismatch);
+    }
+    let frozen = freeze_execution_plan(&registry, &stored.plan, filesystem)
+        .map_err(|error| PrepareExecutionError::Freeze { kind: error.kind() })?;
+    *latest_plan = None;
+    drop(latest_plan);
+    drop(registry);
+
+    Ok(PreparedExecution {
+        frozen,
+        mutation_guard,
+    })
+}
+
 impl From<&RenamePlan> for PlanDto {
     fn from(plan: &RenamePlan) -> Self {
         Self {
@@ -408,11 +498,14 @@ mod tests {
 
     use renamewright_core::{
         ParentId, PlanId, RenameRule, SourceId, SourceSnapshot, TargetPolicy, build_plan,
+        build_plan_with_environment,
     };
+    #[cfg(target_os = "linux")]
+    use renamewright_platform::{ExecutionOutcome, LinuxExecutionFileSystem};
 
     use super::{
-        AppState, StoredPlan, admit_dropped_sources, export_write_error, plan_document_json,
-        write_new_document,
+        AppState, PrepareExecutionError, StoredPlan, admit_dropped_sources, export_write_error,
+        plan_document_json, prepare_latest_execution, write_new_document,
     };
 
     #[test]
@@ -481,6 +574,59 @@ mod tests {
             "the export file already exists; choose a new file name"
         );
         assert_eq!(fs::read_to_string(export)?, "first");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepared_execution_is_single_use_and_holds_the_mutation_lock() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source.txt");
+        fs::write(&source, b"source")?;
+        let state = AppState::default();
+        let plan = {
+            let mut registry = state.registry.lock().map_err(|_| "registry lock failed")?;
+            registry.admit_paths([source])?;
+            build_plan_with_environment(
+                PlanId::new(71),
+                registry.generation(),
+                &registry.snapshots(),
+                &[RenameRule::prefix("final-")],
+                TargetPolicy::windows(),
+                &registry.validation_environment(),
+            )
+        };
+        *state.latest_plan.lock().map_err(|_| "plan lock failed")? = Some(StoredPlan {
+            plan,
+            prefix: "final-".to_owned(),
+        });
+        let filesystem = LinuxExecutionFileSystem::new();
+
+        let mismatch = prepare_latest_execution(&state, PlanId::new(70), &filesystem)
+            .err()
+            .ok_or("a mismatched plan was prepared")?;
+        assert_eq!(mismatch, PrepareExecutionError::PlanMismatch);
+
+        let prepared = prepare_latest_execution(&state, PlanId::new(71), &filesystem)?;
+        let busy = prepare_latest_execution(&state, PlanId::new(71), &filesystem)
+            .err()
+            .ok_or("a concurrent execution was prepared")?;
+        assert_eq!(busy, PrepareExecutionError::Busy);
+
+        let journal = directory.path().join("transaction.rwj");
+        assert_eq!(
+            prepared.execute(&filesystem, &journal, || false)?,
+            ExecutionOutcome::Completed
+        );
+        let consumed = prepare_latest_execution(&state, PlanId::new(71), &filesystem)
+            .err()
+            .ok_or("the same plan was prepared twice")?;
+        assert_eq!(consumed, PrepareExecutionError::LatestPlanUnavailable);
+        assert_eq!(
+            fs::read(directory.path().join("final-source.txt"))?,
+            b"source"
+        );
         Ok(())
     }
 }

@@ -18,6 +18,7 @@ pub enum ExecutionFsErrorKind {
     DestinationExists,
     AccessDenied,
     SharingViolation,
+    PostRenameIdentityUnavailable,
     PostRenameIdentityMismatch,
     IoFailure,
 }
@@ -31,6 +32,12 @@ pub struct ExecutionFsError {
 impl ExecutionFsError {
     const fn new(kind: ExecutionFsErrorKind, os_code: Option<i32>) -> Self {
         Self { kind, os_code }
+    }
+
+    /// Creates a pathless error for an implementation of [`ExecutionFileSystem`].
+    #[must_use]
+    pub const fn from_kind(kind: ExecutionFsErrorKind) -> Self {
+        Self::new(kind, None)
     }
 
     #[must_use]
@@ -58,8 +65,11 @@ impl Error for ExecutionFsError {}
 
 /// Filesystem operations required by the journaled executor.
 ///
-/// Implementations must reject occupied destinations atomically. Native paths
-/// remain behind this Rust-owned boundary and must not appear in returned errors.
+/// Implementations must reject occupied destinations atomically. An error from
+/// `rename_no_replace` must mean that no rename occurred, except for
+/// `PostRenameIdentityUnavailable` and `PostRenameIdentityMismatch`, which
+/// explicitly require journal reconciliation. Native paths remain behind this
+/// Rust-owned boundary and must not appear in returned errors.
 pub trait ExecutionFileSystem: Send + Sync {
     fn identity(
         &self,
@@ -202,7 +212,9 @@ impl ExecutionFileSystem for LinuxExecutionFileSystem {
 
         renameat_with(CWD, &source, CWD, &target, RenameFlags::NOREPLACE)
             .map_err(map_rustix_error)?;
-        let observed_identity = self.identity(parent, target_name)?;
+        let observed_identity = self.identity(parent, target_name).map_err(|_| {
+            ExecutionFsError::new(ExecutionFsErrorKind::PostRenameIdentityUnavailable, None)
+        })?;
         if observed_identity != expected_identity {
             return Err(ExecutionFsError::new(
                 ExecutionFsErrorKind::PostRenameIdentityMismatch,
@@ -320,7 +332,12 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
             .map_err(|error| map_windows_rename_error(error, &target_path))?;
         let observed_identity = renamewright_windows_native::file_identity(source.as_handle())
             .map(to_execution_identity)
-            .map_err(map_windows_io_error)?;
+            .map_err(|error| {
+                ExecutionFsError::new(
+                    ExecutionFsErrorKind::PostRenameIdentityUnavailable,
+                    error.raw_os_error(),
+                )
+            })?;
         if observed_identity != expected_identity {
             return Err(ExecutionFsError::new(
                 ExecutionFsErrorKind::PostRenameIdentityMismatch,
