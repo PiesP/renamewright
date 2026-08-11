@@ -304,8 +304,6 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
         }
         let source_path = entry_path(parent, source_name)?;
         let target_path = entry_path(parent, target_name)?;
-        let destination_directory = renamewright_windows_native::DirectoryHandle::open(parent)
-            .map_err(map_windows_io_error)?;
         let source = renamewright_windows_native::EntryHandle::open_final_component(&source_path)
             .map_err(map_windows_io_error)?;
         let current_identity = renamewright_windows_native::file_identity(source.as_handle())
@@ -318,12 +316,8 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
             ));
         }
 
-        renamewright_windows_native::rename_noreplace(
-            source.as_handle(),
-            destination_directory.as_handle(),
-            target_name,
-        )
-        .map_err(|error| map_windows_rename_error(error, &target_path))?;
+        renamewright_windows_native::rename_noreplace(source.as_handle(), parent, target_name)
+            .map_err(|error| map_windows_rename_error(error, &target_path))?;
         let observed_identity = renamewright_windows_native::file_identity(source.as_handle())
             .map(to_execution_identity)
             .map_err(map_windows_io_error)?;

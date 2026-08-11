@@ -9,9 +9,8 @@ use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+    DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FileIdInfo, FileRenameInfoEx, GetFileInformationByHandleEx, SetFileInformationByHandle,
 };
 
@@ -56,33 +55,6 @@ impl EntryHandle {
     }
 }
 
-#[derive(Debug)]
-pub struct DirectoryHandle {
-    file: File,
-}
-
-impl DirectoryHandle {
-    pub fn open(path: &Path) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .access_mode(
-                FILE_LIST_DIRECTORY
-                    | FILE_ADD_FILE
-                    | FILE_ADD_SUBDIRECTORY
-                    | FILE_TRAVERSE
-                    | FILE_READ_ATTRIBUTES,
-            )
-            .share_mode(SHARE_ALL)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)?;
-        Ok(Self { file })
-    }
-
-    #[must_use]
-    pub fn as_handle(&self) -> BorrowedHandle<'_> {
-        self.file.as_handle()
-    }
-}
-
 pub fn file_identity(source: BorrowedHandle<'_>) -> io::Result<FileIdentity> {
     let mut info = FILE_ID_INFO::default();
     let buffer_size = u32::try_from(size_of::<FILE_ID_INFO>())
@@ -115,10 +87,10 @@ pub fn file_identity(source: BorrowedHandle<'_>) -> io::Result<FileIdentity> {
 
 pub fn rename_noreplace(
     source: BorrowedHandle<'_>,
-    destination_directory: BorrowedHandle<'_>,
+    destination_parent: &Path,
     destination_name: &OsStr,
 ) -> io::Result<()> {
-    let encoded_name = encode_leaf_name(destination_name)?;
+    let encoded_name = encode_destination(destination_parent, destination_name)?;
     let name_bytes = encoded_name
         .len()
         .checked_mul(size_of::<u16>())
@@ -139,10 +111,9 @@ pub fn rename_noreplace(
     let element_count = buffer_bytes.div_ceil(size_of::<FILE_RENAME_INFO>());
     let mut buffer = vec![FILE_RENAME_INFO::default(); element_count];
     let header = &mut buffer[0];
-    // `FileRenameInfoEx` passes the handle-relative name through to the native
-    // rename operation. Zero flags preserve ordinary no-replace semantics.
+    // Zero flags preserve ordinary no-replace semantics.
     header.Anonymous.Flags = 0;
-    header.RootDirectory = destination_directory.as_raw_handle();
+    header.RootDirectory = ptr::null_mut();
     header.FileNameLength = file_name_length;
 
     // SAFETY: `buffer` is a zero-initialized `Vec<FILE_RENAME_INFO>`, so its
@@ -162,10 +133,10 @@ pub fn rename_noreplace(
         ptr::copy_nonoverlapping(encoded_name.as_ptr(), file_name, encoded_name.len());
     }
 
-    // SAFETY: `source` and `destination_directory` stay borrowed for the call.
+    // SAFETY: `source` stays borrowed for the call.
     // `buffer` is correctly aligned, fully initialized for `buffer_size` bytes,
-    // has zero rename flags, a live root-directory handle, a checked
-    // byte-length field excluding the trailing NUL, and a matching UTF-16 name.
+    // has zero rename flags, a null root-directory handle, a checked byte-length
+    // field excluding the trailing NUL, and a matching absolute UTF-16 path.
     // Win32 consumes the buffer synchronously and does not retain its pointer.
     // The generic Semgrep unsafe-usage rule is suppressed only at this audited
     // FFI boundary; the safety proof and crate-level unsafe lints remain active.
@@ -200,6 +171,30 @@ fn encode_leaf_name(name: &OsStr) -> io::Result<Vec<u16>> {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "destination name must be one native leaf component",
+        ))
+    } else {
+        Ok(encoded)
+    }
+}
+
+fn encode_destination(parent: &Path, name: &OsStr) -> io::Result<Vec<u16>> {
+    let _ = encode_leaf_name(name)?;
+    if !parent.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination parent must be absolute",
+        ));
+    }
+
+    let encoded = parent
+        .join(name)
+        .as_os_str()
+        .encode_wide()
+        .collect::<Vec<_>>();
+    if encoded.contains(&0) {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination path contains an interior NUL",
         ))
     } else {
         Ok(encoded)
