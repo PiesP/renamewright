@@ -105,6 +105,7 @@ pub enum ExecutionDirection {
 pub enum RollbackCause {
     Cancelled,
     ForwardStepFailed { step_index: usize },
+    RecoveryRequested,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,6 +280,9 @@ pub enum JournalRecord {
     RollbackStepFailed {
         step_index: usize,
     },
+    RollbackRecoveryStarted {
+        step_index: usize,
+    },
     TransactionCompleted,
     TransactionRolledBack,
 }
@@ -373,6 +377,7 @@ enum ReplayMode {
     RecoveryRequired {
         cause: RollbackCause,
         failed_step: usize,
+        remaining_steps: VecDeque<usize>,
     },
 }
 
@@ -437,9 +442,22 @@ fn apply_record(
             remaining_steps,
             prepared_step,
         } => apply_rollback_record(cause, remaining_steps, prepared_step, record, record_index),
-        ReplayMode::Completed
-        | ReplayMode::RolledBack { .. }
-        | ReplayMode::RecoveryRequired { .. } => Err(JournalReplayError::new(
+        ReplayMode::RecoveryRequired {
+            cause,
+            failed_step,
+            remaining_steps,
+        } => match record {
+            JournalRecord::RollbackRecoveryStarted { step_index } => {
+                require_step(failed_step, *step_index, record_index)?;
+                Ok(ReplayMode::Rollback {
+                    cause,
+                    remaining_steps,
+                    prepared_step: None,
+                })
+            }
+            _ => unexpected(record_index),
+        },
+        ReplayMode::Completed | ReplayMode::RolledBack { .. } => Err(JournalReplayError::new(
             record_index,
             JournalReplayErrorKind::RecordAfterTerminal,
         )),
@@ -487,6 +505,7 @@ fn apply_forward_record(
         JournalRecord::RollbackStarted { cause } => {
             match *cause {
                 RollbackCause::Cancelled if prepared_step.is_none() => {}
+                RollbackCause::RecoveryRequested if prepared_step.is_none() => {}
                 RollbackCause::ForwardStepFailed { step_index }
                     if prepared_step == Some(step_index) =>
                 {
@@ -553,6 +572,7 @@ fn apply_rollback_record(
             Ok(ReplayMode::RecoveryRequired {
                 cause,
                 failed_step: *step_index,
+                remaining_steps,
             })
         }
         JournalRecord::TransactionRolledBack
@@ -633,8 +653,8 @@ fn status_for(mode: ReplayMode, step_count: usize) -> JournalStatus {
         ),
         ReplayMode::Completed => JournalStatus::Completed,
         ReplayMode::RolledBack { cause } => JournalStatus::RolledBack { cause },
-        ReplayMode::RecoveryRequired { cause, failed_step } => {
-            JournalStatus::RecoveryRequired { cause, failed_step }
-        }
+        ReplayMode::RecoveryRequired {
+            cause, failed_step, ..
+        } => JournalStatus::RecoveryRequired { cause, failed_step },
     }
 }

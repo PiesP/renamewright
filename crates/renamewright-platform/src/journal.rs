@@ -771,6 +771,10 @@ fn encode_record(
             put_usize(payload, *step_index, frame_index)?;
             Ok(7)
         }
+        JournalRecord::RollbackRecoveryStarted { step_index } => {
+            put_usize(payload, *step_index, frame_index)?;
+            Ok(12)
+        }
         JournalRecord::TransactionCompleted => Ok(8),
         JournalRecord::TransactionRolledBack => Ok(9),
     }
@@ -824,6 +828,9 @@ fn decode_record(
             step_index: cursor.read_usize()?,
         },
         7 => JournalRecord::RollbackStepFailed {
+            step_index: cursor.read_usize()?,
+        },
+        12 => JournalRecord::RollbackRecoveryStarted {
             step_index: cursor.read_usize()?,
         },
         8 => JournalRecord::TransactionCompleted,
@@ -976,6 +983,7 @@ fn encode_rollback_cause(
             payload.push(2);
             put_usize(payload, step_index, frame_index)?;
         }
+        RollbackCause::RecoveryRequested => payload.push(3),
     }
     Ok(())
 }
@@ -988,6 +996,7 @@ fn decode_rollback_cause(
         2 => Ok(RollbackCause::ForwardStepFailed {
             step_index: cursor.read_usize()?,
         }),
+        3 => Ok(RollbackCause::RecoveryRequested),
         _ => Err(cursor.error(JournalCodecErrorKind::InvalidPayload)),
     }
 }

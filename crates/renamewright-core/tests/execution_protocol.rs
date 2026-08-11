@@ -302,6 +302,64 @@ fn rollback_failure_remains_recovery_required() {
 }
 
 #[test]
+fn recovery_request_can_roll_back_a_completed_forward_prefix() {
+    let cause = RollbackCause::RecoveryRequested;
+    let records = [
+        started(4),
+        JournalRecord::ForwardStepPrepared { step_index: 0 },
+        forward_completed(0),
+        JournalRecord::RollbackStarted { cause },
+    ];
+
+    assert_eq!(
+        replay_journal(&records),
+        Ok(JournalStatus::RollbackPending {
+            cause,
+            next_step: 0,
+        })
+    );
+}
+
+#[test]
+fn failed_rollback_requires_an_exact_explicit_recovery_start()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cause = RollbackCause::Cancelled;
+    let failed = vec![
+        started(4),
+        JournalRecord::ForwardStepPrepared { step_index: 0 },
+        forward_completed(0),
+        JournalRecord::RollbackStarted { cause },
+        JournalRecord::RollbackStepPrepared { step_index: 0 },
+        JournalRecord::RollbackStepFailed { step_index: 0 },
+    ];
+
+    let mut wrong_step = failed.clone();
+    wrong_step.push(JournalRecord::RollbackRecoveryStarted { step_index: 1 });
+    let Err(error) = replay_journal(&wrong_step) else {
+        return Err("a different rollback step cannot be authorised".into());
+    };
+    assert_eq!(
+        error.kind(),
+        JournalReplayErrorKind::UnexpectedStep {
+            expected: 0,
+            actual: 1,
+        }
+    );
+
+    let mut resumed = failed;
+    resumed.extend([
+        JournalRecord::RollbackRecoveryStarted { step_index: 0 },
+        JournalRecord::RollbackStepPrepared { step_index: 0 },
+        rollback_completed(0),
+    ]);
+    assert_eq!(
+        replay_journal(&resumed),
+        Ok(JournalStatus::RollbackCompletionPending { cause })
+    );
+    Ok(())
+}
+
+#[test]
 fn replay_rejects_out_of_order_and_post_terminal_records() -> Result<(), Box<dyn std::error::Error>>
 {
     let out_of_order = [

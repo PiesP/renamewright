@@ -129,8 +129,11 @@ fn round_trips_rollback_records() -> Result<(), Box<dyn std::error::Error>> {
             observed_identity: identity(47),
         },
         JournalRecord::RollbackStarted {
-            cause: RollbackCause::ForwardStepFailed { step_index: 1 },
+            cause: RollbackCause::RecoveryRequested,
         },
+        JournalRecord::RollbackStepPrepared { step_index: 0 },
+        JournalRecord::RollbackStepFailed { step_index: 0 },
+        JournalRecord::RollbackRecoveryStarted { step_index: 0 },
         JournalRecord::RollbackStepPrepared { step_index: 0 },
         JournalRecord::RollbackStepCompleted {
             step_index: 0,
