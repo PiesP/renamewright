@@ -43,3 +43,46 @@ test('keeps the workbench inside narrow viewports', async ({ page }) => {
     await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeVisible();
   }
 });
+
+test('renders the path-free startup ledger at supported narrow widths', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__TAURI_INTERNALS__ = {
+      invoke: async (command: string) => {
+        if (command === 'list_ledger') {
+          return [
+            {
+              ledgerId: 1,
+              planId: 67,
+              sourceGeneration: 3,
+              schemaVersion: 2,
+              sourceCount: 4,
+              status: 'reconciliationRequired',
+              attentionStep: 2,
+              recoveryAvailable: true,
+            },
+          ];
+        }
+        if (command === 'poll_source_changes') {
+          return null;
+        }
+        throw new Error(`Unexpected command: ${command}`);
+      },
+    };
+  });
+
+  for (const width of [320, 375, 414, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/');
+
+    await expect(page.getByRole('heading', { name: 'Rename Ledger' })).toBeVisible();
+    await expect(page.getByText('Plan 67')).toBeVisible();
+    await expect(page.getByText('Inspection required')).toBeVisible();
+    await expect(page.getByRole('button', { name: /recover/iu })).toHaveCount(0);
+
+    const sizes = await page.evaluate(() => ({
+      client: document.documentElement.clientWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(sizes.scroll, `ledger overflow at ${width}px`).toBeLessThanOrEqual(sizes.client);
+  }
+});

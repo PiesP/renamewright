@@ -322,6 +322,76 @@ input:focus-visible {
   margin: var(--space-1) 0 0;
 }
 
+.ledger-panel {
+  margin-block-start: var(--space-5);
+  padding-block-start: var(--space-5);
+  border-block-start: var(--rule-thin) solid var(--color-rule);
+}
+
+.ledger-heading,
+.ledger-panel li,
+.ledger-panel li div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.ledger-heading h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.ledger-heading span,
+.ledger-panel li > span {
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.ledger-panel > p {
+  margin: var(--space-2) 0 var(--space-3);
+  color: var(--color-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.ledger-panel ul {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ledger-panel li {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+
+.ledger-panel li div {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.ledger-panel li strong {
+  font-size: 0.875rem;
+}
+
+.ledger-panel li div span {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+
+.ledger-panel li > span[data-recovery="true"] {
+  color: var(--color-error);
+}
+
 .preview-pane {
   min-width: 0;
   padding: var(--space-6) var(--space-4) var(--space-12);

@@ -24,6 +24,33 @@ export interface SourceChange {
   error: string | null;
 }
 
+export type LedgerStatus =
+  | 'completed'
+  | 'rolledBack'
+  | 'forwardPending'
+  | 'completionPending'
+  | 'rollbackPending'
+  | 'rollbackCompletionPending'
+  | 'reconciliationRequired'
+  | 'recoveryRequired'
+  | 'legacyInspectionRequired'
+  | 'torn'
+  | 'damaged'
+  | 'unsupportedVersion'
+  | 'tooLarge'
+  | 'unreadable';
+
+export interface LedgerEntry {
+  ledgerId: number;
+  planId: number | null;
+  sourceGeneration: number | null;
+  schemaVersion: number | null;
+  sourceCount: number;
+  status: LedgerStatus;
+  attentionStep: number | null;
+  recoveryAvailable: boolean;
+}
+
 export interface PlanningClient {
   nativeSelectionAvailable: boolean;
   loadSample(prefix: string): Promise<Plan>;
@@ -31,6 +58,7 @@ export interface PlanningClient {
   previewPrefix(prefix: string): Promise<Plan>;
   inspectPlan(planId: number): Promise<string>;
   exportPlan(planId: number): Promise<boolean>;
+  listLedger(): Promise<LedgerEntry[]>;
   watchSourceChanges(onChange: (change: SourceChange) => void): () => void;
 }
 
@@ -139,6 +167,7 @@ export function createPlanningClient(): PlanningClient {
         : inspectBrowserPlan(planId),
     exportPlan: async (planId) =>
       nativeSelectionAvailable ? invoke<boolean>('export_plan', { planId }) : false,
+    listLedger: async () => (nativeSelectionAvailable ? invoke<LedgerEntry[]>('list_ledger') : []),
     watchSourceChanges: (onChange) => {
       if (!nativeSelectionAvailable) {
         return () => undefined;

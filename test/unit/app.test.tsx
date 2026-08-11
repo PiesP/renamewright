@@ -40,9 +40,34 @@ function fakeClient(): PlanningClient {
     inspectPlan: async (planId) =>
       JSON.stringify({ schemaVersion: 1, planId, rows: makePlan('').rows }, null, 2),
     exportPlan: async () => false,
+    listLedger: async () => [],
     watchSourceChanges: () => () => undefined,
   };
 }
+
+test('shows path-free startup ledger status without enabling recovery actions', async () => {
+  const client = fakeClient();
+  client.listLedger = async () => [
+    {
+      ledgerId: 1,
+      planId: 67,
+      sourceGeneration: 3,
+      schemaVersion: 2,
+      sourceCount: 4,
+      status: 'reconciliationRequired',
+      attentionStep: 2,
+      recoveryAvailable: true,
+    },
+  ];
+
+  render(() => <App client={client} />);
+
+  expect(await screen.findByRole('heading', { name: 'Rename Ledger' })).toBeInTheDocument();
+  expect(screen.getByText('Plan 67')).toBeInTheDocument();
+  expect(screen.getByText('4 sources')).toBeInTheDocument();
+  expect(screen.getByText('Inspection required')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /recover/iu })).not.toBeInTheDocument();
+});
 
 test('loads sample sources and previews a prefix rule', async () => {
   const user = userEvent.setup();

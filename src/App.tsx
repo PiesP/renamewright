@@ -1,6 +1,12 @@
 import { createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { APP_NAME } from './app-meta';
-import { createPlanningClient, type Plan, type PlanningClient } from './planning/client';
+import {
+  createPlanningClient,
+  type LedgerEntry,
+  type LedgerStatus,
+  type Plan,
+  type PlanningClient,
+} from './planning/client';
 import { VirtualPlanTable } from './planning/VirtualPlanTable';
 
 interface AppProps {
@@ -15,6 +21,7 @@ export function App(props: AppProps) {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal('');
   const [notice, setNotice] = createSignal('');
+  const [ledger, setLedger] = createSignal<LedgerEntry[]>([]);
   let requestSequence = 0;
   let planInspector: HTMLDialogElement | undefined;
   let planInspectorOpener: HTMLButtonElement | undefined;
@@ -121,6 +128,12 @@ export function App(props: AppProps) {
   };
 
   onMount(() => {
+    void planningClient
+      .listLedger()
+      .then(setLedger)
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : 'The Rename Ledger could not be loaded.');
+      });
     const stopWatching = planningClient.watchSourceChanges((change) => {
       if (change.error) {
         setError(change.error);
@@ -154,6 +167,26 @@ export function App(props: AppProps) {
       return `${current.blockedCount} names are blocked. Review diagnostics before continuing.`;
     }
     return `${current.changedCount} names are ready for review.`;
+  };
+
+  const ledgerStatusLabel = (status: LedgerStatus) => {
+    const labels: Record<LedgerStatus, string> = {
+      completed: 'Completed',
+      rolledBack: 'Rolled back',
+      forwardPending: 'Forward recovery pending',
+      completionPending: 'Completion record pending',
+      rollbackPending: 'Rollback pending',
+      rollbackCompletionPending: 'Rollback record pending',
+      reconciliationRequired: 'Inspection required',
+      recoveryRequired: 'Recovery required',
+      legacyInspectionRequired: 'Legacy inspection required',
+      torn: 'Torn journal',
+      damaged: 'Damaged journal',
+      unsupportedVersion: 'Unsupported journal',
+      tooLarge: 'Journal too large',
+      unreadable: 'Journal unreadable',
+    };
+    return labels[status];
   };
 
   return (
@@ -238,6 +271,32 @@ export function App(props: AppProps) {
               operation can run.
             </p>
           </div>
+          <Show when={ledger().length > 0}>
+            <section class="ledger-panel" aria-labelledby="ledger-heading">
+              <div class="ledger-heading">
+                <h2 id="ledger-heading">Rename Ledger</h2>
+                <span>{ledger().length}</span>
+              </div>
+              <p>Local transaction status. Recovery actions remain locked.</p>
+              <ul aria-label="Rename journal status">
+                {ledger().map((entry) => (
+                  <li>
+                    <div>
+                      <strong>
+                        {entry.planId === null
+                          ? `Ledger ${entry.ledgerId}`
+                          : `Plan ${entry.planId}`}
+                      </strong>
+                      <span>{entry.sourceCount} sources</span>
+                    </div>
+                    <span data-recovery={entry.recoveryAvailable ? 'true' : 'false'}>
+                      {ledgerStatusLabel(entry.status)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </Show>
         </aside>
 
         <section class="preview-pane" aria-labelledby="preview-heading">
