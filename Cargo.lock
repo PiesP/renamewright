@@ -2521,8 +2521,17 @@ name = "renamewright-platform"
 version = "0.1.0"
 dependencies = [
  "renamewright-core",
+ "renamewright-windows-native",
  "rustix",
  "tempfile",
+]
+
+[[package]]
+name = "renamewright-windows-native"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

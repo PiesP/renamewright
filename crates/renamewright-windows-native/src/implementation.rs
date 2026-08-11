@@ -1,0 +1,190 @@
+use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::mem::{offset_of, size_of};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle};
+use std::path::Path;
+use std::ptr;
+
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FileIdInfo, FileRenameInfo,
+    GetFileInformationByHandleEx, SetFileInformationByHandle,
+};
+
+const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileIdentity {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+}
+
+impl FileIdentity {
+    #[must_use]
+    pub const fn volume_serial_number(self) -> u64 {
+        self.volume_serial_number
+    }
+
+    #[must_use]
+    pub const fn file_id(self) -> [u8; 16] {
+        self.file_id
+    }
+}
+
+#[derive(Debug)]
+pub struct EntryHandle {
+    file: File,
+}
+
+impl EntryHandle {
+    pub fn open_final_component(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+            .share_mode(SHARE_ALL)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        Ok(Self { file })
+    }
+
+    #[must_use]
+    pub fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.file.as_handle()
+    }
+}
+
+#[derive(Debug)]
+pub struct DirectoryHandle {
+    file: File,
+}
+
+impl DirectoryHandle {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES)
+            .share_mode(SHARE_ALL)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        Ok(Self { file })
+    }
+
+    #[must_use]
+    pub fn as_handle(&self) -> BorrowedHandle<'_> {
+        self.file.as_handle()
+    }
+}
+
+pub fn file_identity(source: BorrowedHandle<'_>) -> io::Result<FileIdentity> {
+    let mut info = FILE_ID_INFO::default();
+    let buffer_size = u32::try_from(size_of::<FILE_ID_INFO>())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "identity buffer is too large"))?;
+
+    // SAFETY: `source` is borrowed for the full call and is not owned or closed
+    // by Win32. `info` is a writable, correctly aligned `FILE_ID_INFO`, and the
+    // supplied byte count is exactly its initialized allocation size. The API
+    // does not retain the pointer after returning.
+    let succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            source.as_raw_handle(),
+            FileIdInfo,
+            ptr::from_mut(&mut info).cast(),
+            buffer_size,
+        )
+    };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(FileIdentity {
+        volume_serial_number: info.VolumeSerialNumber,
+        file_id: info.FileId.Identifier,
+    })
+}
+
+pub fn rename_noreplace(
+    source: BorrowedHandle<'_>,
+    destination_directory: BorrowedHandle<'_>,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    let encoded_name = encode_leaf_name(destination_name)?;
+    let name_bytes = encoded_name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "destination name is too large")
+        })?;
+    let file_name_length = u32::try_from(name_bytes).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "destination name is too large")
+    })?;
+    let terminated_name_bytes = name_bytes.checked_add(size_of::<u16>()).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "destination name is too large")
+    })?;
+    let buffer_bytes = offset_of!(FILE_RENAME_INFO, FileName)
+        .checked_add(terminated_name_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "rename buffer is too large"))?;
+    let buffer_size = u32::try_from(buffer_bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "rename buffer is too large"))?;
+    let element_count = buffer_bytes.div_ceil(size_of::<FILE_RENAME_INFO>());
+    let mut buffer = vec![FILE_RENAME_INFO::default(); element_count];
+    let header = &mut buffer[0];
+    header.Anonymous.ReplaceIfExists = false;
+    header.RootDirectory = destination_directory.as_raw_handle();
+    header.FileNameLength = file_name_length;
+
+    // SAFETY: `buffer` is a zero-initialized `Vec<FILE_RENAME_INFO>`, so its
+    // allocation has the required header alignment. `element_count` covers
+    // `buffer_bytes`, including a trailing UTF-16 NUL. `FileName` begins at the
+    // standard-layout offset used above, and `encoded_name.len()` initialized
+    // u16 values fit before that NUL. The vector does not move during the copy.
+    unsafe {
+        let file_name = buffer
+            .as_mut_ptr()
+            .cast::<u8>()
+            .add(offset_of!(FILE_RENAME_INFO, FileName))
+            .cast::<u16>();
+        ptr::copy_nonoverlapping(encoded_name.as_ptr(), file_name, encoded_name.len());
+    }
+
+    // SAFETY: `source` and `destination_directory` stay borrowed for the call.
+    // `buffer` is correctly aligned, fully initialized for `buffer_size` bytes,
+    // has a zero replacement flag, a live root-directory handle, a checked
+    // byte-length field excluding the trailing NUL, and a matching UTF-16 name.
+    // Win32 consumes the buffer synchronously and does not retain its pointer.
+    let succeeded = unsafe {
+        SetFileInformationByHandle(
+            source.as_raw_handle(),
+            FileRenameInfo,
+            buffer.as_ptr().cast(),
+            buffer_size,
+        )
+    };
+    if succeeded == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn encode_leaf_name(name: &OsStr) -> io::Result<Vec<u16>> {
+    let encoded = name.encode_wide().collect::<Vec<_>>();
+    let invalid = encoded.is_empty()
+        || encoded == [u16::from(b'.')]
+        || encoded == [u16::from(b'.'), u16::from(b'.')]
+        || encoded.iter().any(|unit| {
+            *unit == 0
+                || *unit == u16::from(b'/')
+                || *unit == u16::from(b'\\')
+                || *unit == u16::from(b':')
+        });
+    if invalid {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination name must be one native leaf component",
+        ))
+    } else {
+        Ok(encoded)
+    }
+}
