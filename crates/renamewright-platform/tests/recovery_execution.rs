@@ -378,8 +378,16 @@ fn refuses_changed_identity_without_appending_to_the_journal()
     let fixture = fixture(&directory, 94)?;
     let journal = directory.path().join("stale.rwj");
     fs::write(&journal, encode_journal(&[fixture.header])?)?;
-    fs::remove_file(directory.path().join("source.txt"))?;
+    fs::rename(
+        directory.path().join("source.txt"),
+        directory.path().join("retired-source.txt"),
+    )?;
     fs::write(directory.path().join("source.txt"), b"replacement")?;
+    assert_ne!(
+        filesystem().identity(directory.path(), "source.txt".as_ref())?,
+        fixture.identity,
+        "the fixture must retain the original entry so its identity cannot be reused"
+    );
     let before = fs::read(&journal)?;
     let ledger = RenameLedger::discover(directory.path())?;
 
