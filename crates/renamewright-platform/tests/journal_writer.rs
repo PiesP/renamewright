@@ -47,6 +47,7 @@ fn create_new_and_append_produce_a_replayable_journal() -> Result<(), Box<dyn st
 
     assert_eq!(writer.next_sequence(), 6);
     assert!(writer.is_terminal());
+    drop(writer);
     let records = decode_journal(&fs::read(path)?)?
         .into_iter()
         .map(|frame| frame.into_record())
