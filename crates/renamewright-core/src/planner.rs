@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 
 use crate::model::{
-    Diagnostic, DiagnosticCode, PlanId, PlanRow, RenamePlan, SourceSnapshot, TargetPolicy,
-    TraceStep, ValidationEnvironment,
+    Diagnostic, DiagnosticCode, ParentId, PlanId, PlanRow, RenamePlan, SourceId, SourceSnapshot,
+    TargetPolicy, TraceStep, ValidationEnvironment,
 };
-use crate::rules::{RenameRule, RulePipeline};
+use crate::rules::{
+    RenameRule, RuleApplicationError, RulePipeline, SequenceAllocation, SequenceOrder,
+    SequenceScope,
+};
 use crate::windows::{comparison_key, validate_name};
 
 #[must_use]
@@ -74,9 +77,16 @@ pub fn build_plan_with_rule_pipeline_and_environment(
     policy: TargetPolicy,
     environment: &ValidationEnvironment,
 ) -> RenamePlan {
+    let sequence_values = (0..pipeline.rules().len())
+        .map(|rule_index| {
+            pipeline
+                .sequence_allocation(rule_index)
+                .map(|allocation| allocate_sequence(sources, allocation))
+        })
+        .collect::<Vec<_>>();
     let mut rows = sources
         .iter()
-        .map(|source| build_row(source, pipeline, policy))
+        .map(|source| build_row(source, pipeline, &sequence_values, policy))
         .collect::<Vec<_>>();
 
     mark_stale_sources(&mut rows, environment);
@@ -86,19 +96,33 @@ pub fn build_plan_with_rule_pipeline_and_environment(
     RenamePlan::new(plan_id, generation, rows)
 }
 
-fn build_row(source: &SourceSnapshot, pipeline: &RulePipeline, policy: TargetPolicy) -> PlanRow {
+fn build_row(
+    source: &SourceSnapshot,
+    pipeline: &RulePipeline,
+    sequence_values: &[Option<BTreeMap<SourceId, Option<u64>>>],
+    policy: TargetPolicy,
+) -> PlanRow {
     let mut proposed = source.native_name().to_os_string();
     let mut trace = Vec::with_capacity(pipeline.rules().len());
 
     for rule_index in 0..pipeline.rules().len() {
         let before = proposed.to_string_lossy().into_owned();
-        let Ok(after) = pipeline.apply_rule(rule_index, &proposed) else {
-            return PlanRow::new(
-                source,
-                proposed,
-                trace,
-                vec![Diagnostic::blocked(DiagnosticCode::UnsupportedEncoding)],
-            );
+        let sequence_value = sequence_values
+            .get(rule_index)
+            .and_then(Option::as_ref)
+            .and_then(|values| values.get(&source.id()).copied())
+            .flatten();
+        let after = match pipeline.apply_rule(rule_index, &proposed, sequence_value) {
+            Ok(after) => after,
+            Err(error) => {
+                let code = match error {
+                    RuleApplicationError::UnsupportedEncoding => {
+                        DiagnosticCode::UnsupportedEncoding
+                    }
+                    RuleApplicationError::SequenceOverflow => DiagnosticCode::SequenceOverflow,
+                };
+                return PlanRow::new(source, proposed, trace, vec![Diagnostic::blocked(code)]);
+            }
         };
         proposed = after;
         let after = proposed.to_string_lossy().into_owned();
@@ -111,6 +135,46 @@ fn build_row(source: &SourceSnapshot, pipeline: &RulePipeline, policy: TargetPol
     }
 
     PlanRow::new(source, proposed, trace, diagnostics)
+}
+
+fn allocate_sequence(
+    sources: &[SourceSnapshot],
+    allocation: SequenceAllocation,
+) -> BTreeMap<SourceId, Option<u64>> {
+    let mut ordered = sources.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| match allocation.order {
+        SequenceOrder::Source => left.id().cmp(&right.id()),
+        SequenceOrder::NameAscending => left
+            .native_name()
+            .cmp(right.native_name())
+            .then_with(|| left.id().cmp(&right.id())),
+    });
+
+    let mut global_ordinal = 0_u64;
+    let mut parent_ordinals = BTreeMap::<ParentId, u64>::new();
+    ordered
+        .into_iter()
+        .map(|source| {
+            let ordinal = match allocation.scope {
+                SequenceScope::AllSources => {
+                    let ordinal = global_ordinal;
+                    global_ordinal = global_ordinal.saturating_add(1);
+                    ordinal
+                }
+                SequenceScope::PerParent => {
+                    let ordinal = parent_ordinals.entry(source.parent_id()).or_default();
+                    let current = *ordinal;
+                    *ordinal = ordinal.saturating_add(1);
+                    current
+                }
+            };
+            let value = allocation
+                .step
+                .checked_mul(ordinal)
+                .and_then(|offset| allocation.start.checked_add(offset));
+            (source.id(), value)
+        })
+        .collect()
 }
 
 fn invalid_rule_plan(plan_id: PlanId, generation: u64, sources: &[SourceSnapshot]) -> RenamePlan {

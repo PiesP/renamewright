@@ -236,6 +236,7 @@ pub enum DiagnosticCode {
     StaleSource,
     ParentUnavailable,
     InvalidRule,
+    SequenceOverflow,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
