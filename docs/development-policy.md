@@ -50,10 +50,11 @@ is never executed by a privileged `workflow_run` job, and secrets are not made
 available to untrusted forks.
 
 Fast CI covers formatting, linting, strict frontend types, Rust formatting and
-Clippy, unit coverage, workspace tests on Linux and Windows, the frontend build,
-and a Windows Tauri compile. Security CI covers CodeQL for JavaScript/TypeScript,
-Rust, and Actions plus dependency advisories. Expensive mutation, packaging, and
-signed-release work are added only when the corresponding implementation exists.
+Clippy, unit coverage, rendered Chromium behaviour, workspace tests, and a
+Windows Tauri build. Security CI covers CodeQL for JavaScript/TypeScript, Rust,
+and Actions plus OSV dependency advisories and Semgrep. Expensive mutation,
+packaging, and signed-release work are added only when the corresponding
+implementation exists.
 
 ## Dependency policy
 
