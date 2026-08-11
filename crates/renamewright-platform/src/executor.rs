@@ -25,6 +25,8 @@ pub enum FreezeExecutionErrorKind {
     SourceUnavailable,
     SourceMismatch,
     MissingFingerprint,
+    MissingExecutionIdentity,
+    StaleSource,
     TemporaryNameExhausted,
     Schedule { kind: ScheduleError },
     Filesystem { kind: ExecutionFsErrorKind },
@@ -578,6 +580,12 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
                 FreezeExecutionErrorKind::MissingFingerprint,
             )
         })?;
+        let admitted_identity = registry.execution_identity_for(source_id).ok_or_else(|| {
+            FreezeExecutionError::new(
+                Some(source_id),
+                FreezeExecutionErrorKind::MissingExecutionIdentity,
+            )
+        })?;
         let execution_identity =
             filesystem
                 .identity(parent, row.original_name())
@@ -587,6 +595,12 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
                         FreezeExecutionErrorKind::Filesystem { kind: error.kind() },
                     )
                 })?;
+        if execution_identity != admitted_identity {
+            return Err(FreezeExecutionError::new(
+                Some(source_id),
+                FreezeExecutionErrorKind::StaleSource,
+            ));
+        }
         let temporary = available_temporary_name(filesystem, parent, plan.id(), source_id)?;
 
         entries.push(FrozenExecutionEntry {

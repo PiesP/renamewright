@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use renamewright_core::{
     JournalEntry, JournalNameGraph, JournalRecord, JournalStatus, PlanId, ScheduleError, SourceId,
-    replay_journal,
+    replay_journal, windows_name_comparison_key,
 };
 
 use crate::executor::available_temporary_name;
@@ -165,6 +166,7 @@ pub fn inspect_undo_transaction<F: ExecutionFileSystem + ?Sized>(
     {
         return Err(UndoError::new(None, UndoErrorKind::ActionUnavailable));
     }
+    let owned_final_destinations = owned_final_destinations(entries)?;
 
     let mut readiness = UndoReadiness::Ready;
     for entry in entries {
@@ -172,8 +174,6 @@ pub fn inspect_undo_transaction<F: ExecutionFileSystem + ?Sized>(
             UndoError::new(Some(entry.source_id()), UndoErrorKind::MissingNativeParent)
         })?;
         let final_state = identity_state(filesystem, parent, entry.names().final_name(), entry)?;
-        let original_state =
-            identity_state(filesystem, parent, entry.names().original_name(), entry)?;
         let temporary_state =
             identity_state(filesystem, parent, entry.names().temporary_name(), entry)?;
 
@@ -183,7 +183,13 @@ pub fn inspect_undo_transaction<F: ExecutionFileSystem + ?Sized>(
             };
             break;
         }
-        if original_state != IdentityState::Absent {
+        if !undo_destination_is_available(
+            filesystem,
+            parent,
+            entry.names().original_name(),
+            entry,
+            &owned_final_destinations,
+        )? {
             readiness = UndoReadiness::Blocked {
                 reason: UndoBlockReason::DestinationOccupied,
             };
@@ -313,6 +319,54 @@ enum IdentityState {
     Absent,
     Expected,
     Other,
+}
+
+fn owned_final_destinations(
+    entries: &[JournalEntry],
+) -> Result<
+    BTreeMap<(std::path::PathBuf, std::ffi::OsString), renamewright_core::ExecutionIdentity>,
+    UndoError,
+> {
+    let mut destinations = BTreeMap::new();
+    for entry in entries {
+        let parent = entry.native_parent().ok_or_else(|| {
+            UndoError::new(Some(entry.source_id()), UndoErrorKind::MissingNativeParent)
+        })?;
+        let key = (
+            parent.to_path_buf(),
+            windows_name_comparison_key(entry.names().final_name()),
+        );
+        if destinations
+            .insert(key, entry.execution_identity())
+            .is_some()
+        {
+            return Err(UndoError::new(None, UndoErrorKind::InvalidProtocol));
+        }
+    }
+    Ok(destinations)
+}
+
+fn undo_destination_is_available<F: ExecutionFileSystem + ?Sized>(
+    filesystem: &F,
+    parent: &std::path::Path,
+    name: &std::ffi::OsStr,
+    entry: &JournalEntry,
+    owned_final_destinations: &BTreeMap<
+        (std::path::PathBuf, std::ffi::OsString),
+        renamewright_core::ExecutionIdentity,
+    >,
+) -> Result<bool, UndoError> {
+    match filesystem.identity(parent, name) {
+        Ok(identity) => Ok(owned_final_destinations
+            .get(&(parent.to_path_buf(), windows_name_comparison_key(name)))
+            .is_some_and(|expected| *expected == identity)),
+        Err(error) if error.kind() == ExecutionFsErrorKind::SourceUnavailable => Ok(true),
+        Err(error) if error.kind() == ExecutionFsErrorKind::UnsupportedEntry => Ok(false),
+        Err(error) => Err(UndoError::new(
+            Some(entry.source_id()),
+            UndoErrorKind::Filesystem { kind: error.kind() },
+        )),
+    }
 }
 
 fn identity_state<F: ExecutionFileSystem + ?Sized>(

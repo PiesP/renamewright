@@ -343,7 +343,7 @@ export function App(props: AppProps) {
       return 'Requesting Undo cancellation…';
     }
     if (undoCancellationState() === 'rejected') {
-      return 'Cancellation was not accepted because Undo is not active yet. Try again after confirmation.';
+      return 'Cancellation was not confirmed, or Undo is no longer active. Try again if the operation is still running.';
     }
     if (undoBusy()) {
       return 'Waiting for native confirmation or Undo completion…';
@@ -355,7 +355,7 @@ export function App(props: AppProps) {
       return 'Requesting recovery cancellation…';
     }
     if (recoveryCancellationState() === 'rejected') {
-      return 'Cancellation was not accepted because forward recovery is not active yet. Try again after confirmation.';
+      return 'Cancellation was not confirmed, or forward recovery is no longer active. Try again if the operation is still running.';
     }
     if (recoveryBusyAction()) {
       return 'Waiting for native confirmation or recovery completion…';
@@ -390,6 +390,7 @@ export function App(props: AppProps) {
       damaged: 'Damaged journal',
       unsupportedVersion: 'Unsupported journal',
       tooLarge: 'Journal too large',
+      discoveryLimitExceeded: 'Discovery limit reached',
       unreadable: 'Journal unreadable',
     };
     return labels[status];

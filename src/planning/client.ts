@@ -38,6 +38,7 @@ export type LedgerStatus =
   | 'damaged'
   | 'unsupportedVersion'
   | 'tooLarge'
+  | 'discoveryLimitExceeded'
   | 'unreadable';
 
 export interface LedgerEntry {

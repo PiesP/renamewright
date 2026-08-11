@@ -174,6 +174,53 @@ fn blocks_undo_when_the_source_identity_changes_or_destination_is_occupied()
 }
 
 #[test]
+fn undo_allows_destinations_owned_by_the_same_rename_graph()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    fs::write(directory.path().join("a.txt"), b"first")?;
+    fs::write(directory.path().join("final-a.txt"), b"second")?;
+    let mut registry = SourceRegistry::new();
+    registry.admit_paths([
+        directory.path().join("a.txt"),
+        directory.path().join("final-a.txt"),
+    ])?;
+    let plan = build_plan_with_environment(
+        PlanId::new(91),
+        registry.generation(),
+        &registry.snapshots(),
+        &[RenameRule::prefix("final-")],
+        TargetPolicy::windows(),
+        &registry.validation_environment(),
+    );
+    let filesystem = LinuxExecutionFileSystem::new();
+    let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
+    assert_eq!(
+        execute_frozen_plan(
+            frozen,
+            &filesystem,
+            &directory.path().join("chain-original.rwj"),
+            || false,
+        )?,
+        ExecutionOutcome::Completed
+    );
+    let ledger = RenameLedger::discover(directory.path())?;
+    let ledger_id = first_ledger_id(&ledger)?;
+
+    let inspection = inspect_undo_transaction(&ledger, ledger_id, &filesystem)?;
+
+    assert_eq!(inspection.readiness(), UndoReadiness::Ready);
+    let prepared = prepare_undo_transaction(&ledger, ledger_id, PlanId::new(92), &filesystem)?;
+    assert_eq!(
+        execute_prepared_undo(prepared, &filesystem, || false)?,
+        ExecutionOutcome::Completed
+    );
+    assert_eq!(fs::read(directory.path().join("a.txt"))?, b"first");
+    assert_eq!(fs::read(directory.path().join("final-a.txt"))?, b"second");
+    assert!(!directory.path().join("final-final-a.txt").exists());
+    Ok(())
+}
+
+#[test]
 fn destination_race_rolls_back_without_replacing_either_entry()
 -> Result<(), Box<dyn std::error::Error>> {
     let (directory, ledger) = completed_fixture()?;
