@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 
 use std::fs;
 
@@ -7,10 +7,18 @@ use renamewright_core::{
     build_plan_with_environment, replay_journal,
 };
 use renamewright_platform::{
-    ExecutionFileSystem, ExecutionOutcome, LinuxExecutionFileSystem, RecoveryAction,
-    RecoveryActionErrorKind, RenameLedger, SourceRegistry, decode_journal, encode_journal,
-    freeze_execution_plan, recover_transaction,
+    ExecutionFileSystem, ExecutionOutcome, RecoveryAction, RecoveryActionErrorKind, RenameLedger,
+    SourceRegistry, decode_journal, encode_journal, freeze_execution_plan, recover_transaction,
 };
+
+#[cfg(target_os = "linux")]
+use renamewright_platform::LinuxExecutionFileSystem as TestExecutionFileSystem;
+#[cfg(windows)]
+use renamewright_platform::NativeExecutionFileSystem as TestExecutionFileSystem;
+
+fn filesystem() -> TestExecutionFileSystem {
+    TestExecutionFileSystem::new()
+}
 
 struct RecoveryFixture {
     header: JournalRecord,
@@ -34,7 +42,7 @@ fn fixture(
         TargetPolicy::windows(),
         &registry.validation_environment(),
     );
-    let filesystem = LinuxExecutionFileSystem::new();
+    let filesystem = filesystem();
     let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
     let header = frozen.initial_record();
     let JournalRecord::TransactionStarted { entries, .. } = &header else {
@@ -78,7 +86,7 @@ fn resumes_a_forward_pending_transaction() -> Result<(), Box<dyn std::error::Err
     let outcome = recover_transaction(
         &ledger,
         ledger_id(&ledger)?,
-        &LinuxExecutionFileSystem::new(),
+        &filesystem(),
         RecoveryAction::Resume,
         || false,
     )?;
@@ -115,7 +123,7 @@ fn explicitly_rolls_back_a_completed_forward_prefix() -> Result<(), Box<dyn std:
     let outcome = recover_transaction(
         &ledger,
         ledger_id(&ledger)?,
-        &LinuxExecutionFileSystem::new(),
+        &filesystem(),
         RecoveryAction::Rollback,
         || false,
     )?;
@@ -167,7 +175,7 @@ fn explicitly_retries_a_failed_rollback_step() -> Result<(), Box<dyn std::error:
     let outcome = recover_transaction(
         &ledger,
         ledger_id(&ledger)?,
-        &LinuxExecutionFileSystem::new(),
+        &filesystem(),
         RecoveryAction::Resume,
         || false,
     )?;
@@ -227,7 +235,7 @@ fn completes_pending_terminal_records_without_repeating_a_rename()
         recover_transaction(
             &ledger,
             ledger_id(&ledger)?,
-            &LinuxExecutionFileSystem::new(),
+            &filesystem(),
             RecoveryAction::Resume,
             || false,
         )?,
@@ -252,7 +260,7 @@ fn completes_pending_terminal_records_without_repeating_a_rename()
         recover_transaction(
             &ledger,
             ledger_id(&ledger)?,
-            &LinuxExecutionFileSystem::new(),
+            &filesystem(),
             RecoveryAction::Resume,
             || false,
         )?,
@@ -281,15 +289,12 @@ fn prepared_step_must_be_reconciled_before_any_recovery_action()
     let ledger = RenameLedger::discover(directory.path())?;
 
     for action in [RecoveryAction::Resume, RecoveryAction::Rollback] {
-        let error = recover_transaction(
-            &ledger,
-            ledger_id(&ledger)?,
-            &LinuxExecutionFileSystem::new(),
-            action,
-            || false,
-        )
-        .err()
-        .ok_or("a prepared step was resumed without reconciliation")?;
+        let error =
+            recover_transaction(&ledger, ledger_id(&ledger)?, &filesystem(), action, || {
+                false
+            })
+            .err()
+            .ok_or("a prepared step was resumed without reconciliation")?;
         assert_eq!(
             error.kind(),
             RecoveryActionErrorKind::RequiresReconciliation
@@ -312,7 +317,7 @@ fn cancellation_during_forward_recovery_rolls_back_at_a_step_boundary()
         recover_transaction(
             &ledger,
             ledger_id(&ledger)?,
-            &LinuxExecutionFileSystem::new(),
+            &filesystem(),
             RecoveryAction::Resume,
             || true,
         )?,
@@ -344,7 +349,7 @@ fn occupied_recovery_destination_is_preserved_and_the_source_is_rolled_back()
         recover_transaction(
             &ledger,
             ledger_id(&ledger)?,
-            &LinuxExecutionFileSystem::new(),
+            &filesystem(),
             RecoveryAction::Resume,
             || false,
         )?,
@@ -381,7 +386,7 @@ fn refuses_changed_identity_without_appending_to_the_journal()
     let error = recover_transaction(
         &ledger,
         ledger_id(&ledger)?,
-        &LinuxExecutionFileSystem::new(),
+        &filesystem(),
         RecoveryAction::Resume,
         || false,
     )
@@ -401,7 +406,7 @@ fn recovery_uses_the_filesystem_identity_boundary() -> Result<(), Box<dyn std::e
         return Err("frozen plan had no entries".into());
     };
     assert_eq!(
-        LinuxExecutionFileSystem::new().identity(directory.path(), "source.txt".as_ref())?,
+        filesystem().identity(directory.path(), "source.txt".as_ref())?,
         entries[0].execution_identity()
     );
     Ok(())
