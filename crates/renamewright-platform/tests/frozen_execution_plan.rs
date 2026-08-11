@@ -150,6 +150,32 @@ fn rejects_a_plan_built_from_a_foreign_source_projection() -> Result<(), Box<dyn
 }
 
 #[test]
+fn rejects_a_source_replaced_after_admission() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("source.txt");
+    let retained_original = directory.path().join("retained-original.txt");
+    fs::write(&source, b"original")?;
+    let mut registry = SourceRegistry::new();
+    registry.admit_paths([source.clone()])?;
+    let plan = current_plan(&registry, 24, "final-");
+
+    fs::hard_link(&source, &retained_original)?;
+    fs::remove_file(&source)?;
+    fs::write(&source, b"replacement")?;
+
+    let result = freeze_execution_plan(&registry, &plan, &LinuxExecutionFileSystem::new());
+
+    let error = result
+        .err()
+        .ok_or("a replacement source was frozen for execution")?;
+    assert_eq!(error.source_id(), Some(SourceId::new(1)));
+    assert_eq!(error.kind(), FreezeExecutionErrorKind::StaleSource);
+    assert_eq!(fs::read(source)?, b"replacement");
+    assert_eq!(fs::read(retained_original)?, b"original");
+    Ok(())
+}
+
+#[test]
 fn skips_an_occupied_deterministic_temporary_name() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("source.txt");

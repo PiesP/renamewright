@@ -1784,4 +1784,56 @@ mod tests {
         );
         Ok(())
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepared_execution_rejects_a_source_replaced_after_admission() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source.txt");
+        let retained_original = directory.path().join("retained-original.txt");
+        fs::write(&source, b"original")?;
+        let state = AppState::default();
+        let plan = {
+            let mut registry = state.registry.lock().map_err(|_| "registry lock failed")?;
+            registry.admit_paths([source.clone()])?;
+            build_plan_with_environment(
+                PlanId::new(72),
+                registry.generation(),
+                &registry.snapshots(),
+                &[RenameRule::prefix("final-")],
+                TargetPolicy::windows(),
+                &registry.validation_environment(),
+            )
+        };
+        *state.latest_plan.lock().map_err(|_| "plan lock failed")? = Some(StoredPlan {
+            plan,
+            prefix: "final-".to_owned(),
+        });
+        fs::hard_link(&source, &retained_original)?;
+        fs::remove_file(&source)?;
+        fs::write(&source, b"replacement")?;
+
+        let error =
+            prepare_latest_execution(&state, PlanId::new(72), &LinuxExecutionFileSystem::new())
+                .err()
+                .ok_or("a replacement source was prepared for execution")?;
+
+        assert_eq!(
+            error,
+            PrepareExecutionError::Freeze {
+                kind: renamewright_platform::FreezeExecutionErrorKind::StaleSource,
+            }
+        );
+        assert_eq!(fs::read(source)?, b"replacement");
+        assert_eq!(fs::read(retained_original)?, b"original");
+        assert!(
+            state
+                .latest_plan
+                .lock()
+                .map_err(|_| "plan lock failed")?
+                .is_some()
+        );
+        Ok(())
+    }
 }

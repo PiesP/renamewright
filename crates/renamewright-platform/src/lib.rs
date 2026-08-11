@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use renamewright_core::{
-    EntryIdentitySignal, EntryKind, OccupiedName, ParentId, SourceFingerprint, SourceId,
-    SourceSnapshot, ValidationEnvironment,
+    EntryIdentitySignal, EntryKind, ExecutionIdentity, OccupiedName, ParentId, SourceFingerprint,
+    SourceId, SourceSnapshot, ValidationEnvironment,
 };
 
 #[cfg(target_os = "linux")]
@@ -88,6 +88,7 @@ impl Error for AdmissionError {}
 pub struct SourceRegistry {
     paths: BTreeMap<SourceId, PathBuf>,
     snapshots: BTreeMap<SourceId, SourceSnapshot>,
+    execution_identities: BTreeMap<SourceId, ExecutionIdentity>,
     source_ids: BTreeMap<PathBuf, SourceId>,
     parent_ids: BTreeMap<PathBuf, ParentId>,
     next_source_id: u64,
@@ -124,6 +125,13 @@ impl SourceRegistry {
                 continue;
             }
 
+            let execution_identity = admission_execution_identity(&path);
+            let current_fingerprint = fs::symlink_metadata(&path)
+                .ok()
+                .and_then(|metadata| fingerprint_for(&metadata));
+            if current_fingerprint.as_ref() != Some(&fingerprint) {
+                return Err(AdmissionError::Unavailable(path));
+            }
             let source_id = SourceId::new(self.next_source_id);
             self.next_source_id = self.next_source_id.saturating_add(1);
             let parent = path
@@ -149,6 +157,10 @@ impl SourceRegistry {
             self.source_ids.insert(path.clone(), source_id);
             self.paths.insert(source_id, path);
             self.snapshots.insert(source_id, snapshot);
+            if let Some(execution_identity) = execution_identity {
+                self.execution_identities
+                    .insert(source_id, execution_identity);
+            }
             changed = true;
         }
 
@@ -172,6 +184,11 @@ impl SourceRegistry {
     #[must_use]
     pub fn path_for(&self, source_id: SourceId) -> Option<&Path> {
         self.paths.get(&source_id).map(PathBuf::as_path)
+    }
+
+    #[must_use]
+    pub(crate) fn execution_identity_for(&self, source_id: SourceId) -> Option<ExecutionIdentity> {
+        self.execution_identities.get(&source_id).copied()
     }
 
     #[must_use]
@@ -215,6 +232,25 @@ impl SourceRegistry {
 
         ValidationEnvironment::new(stale_sources, unavailable_parents, occupied_names)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn admission_execution_identity(path: &Path) -> Option<ExecutionIdentity> {
+    let parent = path.parent()?;
+    let name = path.file_name()?;
+    LinuxExecutionFileSystem::new().identity(parent, name).ok()
+}
+
+#[cfg(windows)]
+fn admission_execution_identity(path: &Path) -> Option<ExecutionIdentity> {
+    let parent = path.parent()?;
+    let name = path.file_name()?;
+    NativeExecutionFileSystem::new().identity(parent, name).ok()
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+const fn admission_execution_identity(_path: &Path) -> Option<ExecutionIdentity> {
+    None
 }
 
 fn normalize_entry_path(path: PathBuf) -> Result<(PathBuf, SourceFingerprint), AdmissionError> {
