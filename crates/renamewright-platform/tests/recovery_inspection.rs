@@ -7,8 +7,8 @@ use renamewright_core::{
 };
 use renamewright_platform::{
     LinuxExecutionFileSystem, PreparedStepDisposition, RecoveryLocation, RecoveryLocationState,
-    RenameLedger, SourceRegistry, encode_journal, freeze_execution_plan, inspect_prepared_step,
-    reconcile_prepared_step,
+    RecoveryReadiness, RenameLedger, SourceRegistry, encode_journal, freeze_execution_plan,
+    inspect_prepared_step, inspect_recovery_transaction, reconcile_prepared_step,
 };
 
 fn interrupted_fixture(
@@ -218,5 +218,38 @@ fn explicit_reconciliation_refuses_an_ambiguous_identity() -> Result<(), Box<dyn
         renamewright_platform::RecoveryActionErrorKind::DispositionNotDeterministic
     );
     assert_eq!(fs::read(journal_path)?, before);
+    Ok(())
+}
+
+#[test]
+fn recovery_inspection_exposes_only_path_free_action_readiness()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let (ledger, _, _) = interrupted_fixture(&directory)?;
+    let ledger_id = ledger
+        .entries()
+        .next()
+        .ok_or("ledger was empty")?
+        .ledger_id();
+
+    let prepared =
+        inspect_recovery_transaction(&ledger, ledger_id, &LinuxExecutionFileSystem::new())?;
+    assert_eq!(
+        prepared.readiness(),
+        RecoveryReadiness::ReconciliationRequired {
+            disposition: PreparedStepDisposition::NotApplied,
+        }
+    );
+    assert!(prepared.reconcile_available());
+    assert!(!prepared.resume_available());
+    assert!(!prepared.rollback_available());
+
+    reconcile_prepared_step(&ledger, ledger_id, &LinuxExecutionFileSystem::new())?;
+    let ledger = RenameLedger::discover(directory.path())?;
+    let ready = inspect_recovery_transaction(&ledger, ledger_id, &LinuxExecutionFileSystem::new())?;
+    assert_eq!(ready.readiness(), RecoveryReadiness::Ready);
+    assert!(ready.resume_available());
+    assert!(ready.rollback_available());
+    assert!(!ready.reconcile_available());
     Ok(())
 }

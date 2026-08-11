@@ -42,7 +42,8 @@ pub use ledger::{
 pub use recovery::{
     PreparedStepDisposition, PreparedStepInspection, RecoveryAction, RecoveryActionError,
     RecoveryActionErrorKind, RecoveryInspectionError, RecoveryInspectionErrorKind,
-    RecoveryLocation, RecoveryLocationState, RecoveryObservation, inspect_prepared_step,
+    RecoveryLocation, RecoveryLocationState, RecoveryObservation, RecoveryReadiness,
+    RecoveryTransactionInspection, inspect_prepared_step, inspect_recovery_transaction,
     reconcile_prepared_step, recover_transaction,
 };
 

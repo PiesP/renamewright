@@ -24,6 +24,63 @@ pub enum RecoveryAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryReadiness {
+    Ready,
+    ReconciliationRequired {
+        disposition: PreparedStepDisposition,
+    },
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveryTransactionInspection {
+    ledger_id: LedgerId,
+    direction: ExecutionDirection,
+    step_index: Option<usize>,
+    readiness: RecoveryReadiness,
+    resume_available: bool,
+    rollback_available: bool,
+    reconcile_available: bool,
+}
+
+impl RecoveryTransactionInspection {
+    #[must_use]
+    pub const fn ledger_id(self) -> LedgerId {
+        self.ledger_id
+    }
+
+    #[must_use]
+    pub const fn direction(self) -> ExecutionDirection {
+        self.direction
+    }
+
+    #[must_use]
+    pub const fn step_index(self) -> Option<usize> {
+        self.step_index
+    }
+
+    #[must_use]
+    pub const fn readiness(self) -> RecoveryReadiness {
+        self.readiness
+    }
+
+    #[must_use]
+    pub const fn resume_available(self) -> bool {
+        self.resume_available
+    }
+
+    #[must_use]
+    pub const fn rollback_available(self) -> bool {
+        self.rollback_available
+    }
+
+    #[must_use]
+    pub const fn reconcile_available(self) -> bool {
+        self.reconcile_available
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveryLocation {
     Original,
     Temporary,
@@ -224,6 +281,113 @@ pub fn inspect_prepared_step<F: ExecutionFileSystem + ?Sized>(
         .map(|frame| frame.record().clone())
         .collect::<Vec<_>>();
     inspect_prepared_records(ledger_id, &records, filesystem)
+}
+
+pub fn inspect_recovery_transaction<F: ExecutionFileSystem + ?Sized>(
+    ledger: &RenameLedger,
+    ledger_id: LedgerId,
+    filesystem: &F,
+) -> Result<RecoveryTransactionInspection, RecoveryInspectionError> {
+    let (_, journal_inspection) = ledger.item(ledger_id).ok_or_else(|| {
+        RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::JournalUnavailable)
+    })?;
+    if journal_inspection.issue().is_some() {
+        return Err(RecoveryInspectionError::new(
+            None,
+            RecoveryInspectionErrorKind::JournalDamaged,
+        ));
+    }
+    let records = journal_inspection
+        .frames()
+        .iter()
+        .map(|frame| frame.record().clone())
+        .collect::<Vec<_>>();
+    let status = replay_journal(&records).map_err(|_| {
+        RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::InvalidProtocol)
+    })?;
+
+    if let JournalStatus::ReconciliationRequired {
+        direction,
+        step_index,
+    } = status
+    {
+        let prepared = inspect_prepared_records(ledger_id, &records, filesystem)?;
+        let disposition = prepared.disposition();
+        let reconcile_available = matches!(
+            disposition,
+            PreparedStepDisposition::Applied | PreparedStepDisposition::NotApplied
+        );
+        return Ok(RecoveryTransactionInspection {
+            ledger_id,
+            direction,
+            step_index: Some(step_index),
+            readiness: if reconcile_available {
+                RecoveryReadiness::ReconciliationRequired { disposition }
+            } else {
+                RecoveryReadiness::Blocked
+            },
+            resume_available: false,
+            rollback_available: false,
+            reconcile_available,
+        });
+    }
+
+    let (direction, step_index, resume_available, rollback_available) = match status {
+        JournalStatus::ForwardPending { next_step } => {
+            (ExecutionDirection::Forward, Some(next_step), true, true)
+        }
+        JournalStatus::CompletionPending => (ExecutionDirection::Forward, None, true, true),
+        JournalStatus::RollbackPending { next_step, .. } => {
+            (ExecutionDirection::Rollback, Some(next_step), true, false)
+        }
+        JournalStatus::RollbackCompletionPending { .. } => {
+            (ExecutionDirection::Rollback, None, true, false)
+        }
+        JournalStatus::RecoveryRequired { failed_step, .. } => {
+            (ExecutionDirection::Rollback, Some(failed_step), true, false)
+        }
+        JournalStatus::Completed
+        | JournalStatus::RolledBack { .. }
+        | JournalStatus::ReconciliationRequired { .. } => {
+            return Err(RecoveryInspectionError::new(
+                None,
+                RecoveryInspectionErrorKind::StateNotReconcilable,
+            ));
+        }
+    };
+    let plan = RecoveryPlan::from_records(&records).map_err(action_to_inspection_error)?;
+    let readiness = match validate_recorded_state(&records, &plan, filesystem) {
+        Ok(()) => RecoveryReadiness::Ready,
+        Err(error) if error.kind() == RecoveryActionErrorKind::IdentityStateChanged => {
+            RecoveryReadiness::Blocked
+        }
+        Err(error) => return Err(action_to_inspection_error(error)),
+    };
+    Ok(RecoveryTransactionInspection {
+        ledger_id,
+        direction,
+        step_index,
+        readiness,
+        resume_available: resume_available && readiness == RecoveryReadiness::Ready,
+        rollback_available: rollback_available && readiness == RecoveryReadiness::Ready,
+        reconcile_available: false,
+    })
+}
+
+fn action_to_inspection_error(error: RecoveryActionError) -> RecoveryInspectionError {
+    match error.kind() {
+        RecoveryActionErrorKind::Inspection { kind } => {
+            RecoveryInspectionError::new(error.source_id(), kind)
+        }
+        RecoveryActionErrorKind::IdentityStateChanged => RecoveryInspectionError::new(
+            error.source_id(),
+            RecoveryInspectionErrorKind::StateNotReconcilable,
+        ),
+        _ => RecoveryInspectionError::new(
+            error.source_id(),
+            RecoveryInspectionErrorKind::InvalidProtocol,
+        ),
+    }
 }
 
 pub fn reconcile_prepared_step<F: ExecutionFileSystem + ?Sized>(
