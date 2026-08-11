@@ -186,7 +186,7 @@ test('requests cancellation only while forward recovery is active', async () => 
         finishRecovery = resolve;
       })
   );
-  const cancelRecovery = vi.fn(async () => true);
+  const cancelRecovery = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
   client.cancelRecovery = cancelRecovery;
 
   render(() => <App client={client} />);
@@ -195,7 +195,15 @@ test('requests cancellation only while forward recovery is active', async () => 
   await user.click(await screen.findByRole('button', { name: 'Resume' }));
   await user.click(await screen.findByRole('button', { name: 'Cancel and roll back' }));
 
-  expect(cancelRecovery).toHaveBeenCalledOnce();
+  expect(
+    screen.getByText(
+      'Cancellation was not accepted because forward recovery is not active yet. Try again after confirmation.',
+      { selector: '.live-status' }
+    )
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Try cancel again' }));
+
+  expect(cancelRecovery).toHaveBeenCalledTimes(2);
   expect(screen.getByRole('button', { name: 'Cancellation requested' })).toBeDisabled();
   expect(
     screen.getByText('Cancellation requested. Renamewright will roll back at the next safe step…', {

@@ -162,7 +162,7 @@ function recoveryCommandError(cause: unknown): Error {
     inspectionChanged: 'The recovery state changed. Inspect the transaction again.',
     actionUnavailable: 'That recovery action is no longer available.',
     recoveryFailed: 'Recovery stopped safely. Inspect the transaction again.',
-    ledgerRefreshFailed: 'Recovery finished, but the Rename Ledger could not be refreshed.',
+    ledgerRefreshFailed: 'The Rename Ledger could not be refreshed. Inspect the transaction again.',
   };
   return new Error(
     typeof code === 'string' && code in messages

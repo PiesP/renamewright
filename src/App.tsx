@@ -29,7 +29,7 @@ export function App(props: AppProps) {
   const [inspectingLedgerId, setInspectingLedgerId] = createSignal<number>();
   const [recoveryBusyAction, setRecoveryBusyAction] = createSignal<RecoveryCommandAction>();
   const [recoveryCancellationState, setRecoveryCancellationState] = createSignal<
-    'requesting' | 'accepted'
+    'requesting' | 'accepted' | 'rejected'
   >();
   let requestSequence = 0;
   let planInspector: HTMLDialogElement | undefined;
@@ -195,7 +195,8 @@ export function App(props: AppProps) {
     if (
       recoveryBusyAction() !== 'resume' ||
       recoveryInspection()?.direction !== 'forward' ||
-      recoveryCancellationState()
+      recoveryCancellationState() === 'requesting' ||
+      recoveryCancellationState() === 'accepted'
     ) {
       return;
     }
@@ -206,8 +207,7 @@ export function App(props: AppProps) {
         setRecoveryCancellationState('accepted');
         queueMicrotask(() => recoveryInspectionPanel?.scrollIntoView?.({ block: 'center' }));
       } else {
-        setRecoveryCancellationState(undefined);
-        setNotice('No active forward recovery accepted the cancellation request.');
+        setRecoveryCancellationState('rejected');
       }
     } catch (cause) {
       setRecoveryCancellationState(undefined);
@@ -249,6 +249,9 @@ export function App(props: AppProps) {
     }
     if (recoveryCancellationState() === 'requesting') {
       return 'Requesting recovery cancellation…';
+    }
+    if (recoveryCancellationState() === 'rejected') {
+      return 'Cancellation was not accepted because forward recovery is not active yet. Try again after confirmation.';
     }
     if (recoveryBusyAction()) {
       return 'Waiting for native confirmation or recovery completion…';
@@ -506,14 +509,19 @@ export function App(props: AppProps) {
                       <button
                         class="button button-secondary button-compact"
                         type="button"
-                        disabled={recoveryCancellationState() !== undefined}
+                        disabled={
+                          recoveryCancellationState() === 'requesting' ||
+                          recoveryCancellationState() === 'accepted'
+                        }
                         onClick={() => void requestRecoveryCancellation()}
                       >
                         {recoveryCancellationState() === 'accepted'
                           ? 'Cancellation requested'
                           : recoveryCancellationState() === 'requesting'
                             ? 'Requesting cancellation…'
-                            : 'Cancel and roll back'}
+                            : recoveryCancellationState() === 'rejected'
+                              ? 'Try cancel again'
+                              : 'Cancel and roll back'}
                       </button>
                     </Show>
                     <Show when={recoveryInspection()?.rollbackAvailable}>
