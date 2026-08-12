@@ -83,6 +83,15 @@ fn regex_replacement_expands_numbered_and_named_captures() -> Result<(), Box<dyn
     )?;
 
     assert_eq!(proposed, "report.txt-2026-08");
+
+    let (longest_match, _) = proposal(
+        "notes.txt",
+        vec![RenameRule::regex_replace(
+            r"^(notes)",
+            "$1a-${1}a-$$-$missing-$",
+        )],
+    )?;
+    assert_eq!(longest_match, "-notesa-$--$.txt");
     Ok(())
 }
 
@@ -127,6 +136,27 @@ fn expanding_replacements_stop_before_oversized_trace() -> Result<(), Box<dyn Er
     assert_eq!(row.trace().len(), 1);
     assert!(
         row.diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::NameTooLong)
+    );
+
+    let repeated_capture = RulePipeline::compile(vec![RenameRule::regex_replace(
+        "^(.*)$",
+        "$1".repeat(MAX_RULE_OUTPUT_BYTES / 2),
+    )])?;
+    let capture_plan = build_plan_with_rule_pipeline(
+        PlanId::new(4),
+        1,
+        &[source("captured-name.txt")],
+        &repeated_capture,
+        TargetPolicy::windows(),
+    );
+    let capture_row = &capture_plan.rows()[0];
+    assert_eq!(capture_row.proposed_display(), "captured-name.txt");
+    assert!(capture_row.trace().is_empty());
+    assert!(
+        capture_row
+            .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code() == DiagnosticCode::NameTooLong)
     );

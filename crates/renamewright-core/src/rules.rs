@@ -7,7 +7,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 #[cfg(windows)]
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-use regex::{Regex, RegexBuilder};
+use regex::{Captures, Regex, RegexBuilder};
 use unicode_normalization::UnicodeNormalization;
 
 pub const MAX_RULES: usize = 32;
@@ -542,14 +542,62 @@ fn replace_regex_bounded(
             continue;
         };
         append_bounded(&mut output, &input[consumed..matched.start()])?;
-        captures.expand(replacement, &mut output);
-        if output.len() > MAX_RULE_OUTPUT_BYTES {
-            return Err(RuleApplicationError::OutputTooLong);
-        }
+        expand_regex_replacement_bounded(&mut output, &captures, replacement)?;
         consumed = matched.end();
     }
     append_bounded(&mut output, &input[consumed..])?;
     Ok(output.into())
+}
+
+fn expand_regex_replacement_bounded(
+    output: &mut String,
+    captures: &Captures<'_>,
+    replacement: &str,
+) -> Result<(), RuleApplicationError> {
+    let mut remaining = replacement;
+    while let Some(dollar_offset) = remaining.find('$') {
+        append_bounded(output, &remaining[..dollar_offset])?;
+        remaining = &remaining[dollar_offset..];
+
+        if remaining.as_bytes().get(1) == Some(&b'$') {
+            append_bounded(output, "$")?;
+            remaining = &remaining[2..];
+            continue;
+        }
+
+        let Some((reference, consumed)) = capture_reference(remaining) else {
+            append_bounded(output, "$")?;
+            remaining = &remaining[1..];
+            continue;
+        };
+        remaining = &remaining[consumed..];
+        let captured = reference
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| captures.get(index))
+            .or_else(|| captures.name(reference));
+        if let Some(captured) = captured {
+            append_bounded(output, captured.as_str())?;
+        }
+    }
+    append_bounded(output, remaining)
+}
+
+fn capture_reference(replacement: &str) -> Option<(&str, usize)> {
+    let bytes = replacement.as_bytes();
+    if bytes.first() != Some(&b'$') || bytes.len() == 1 {
+        return None;
+    }
+    if bytes[1] == b'{' {
+        let closing = replacement[2..].find('}')? + 2;
+        return Some((&replacement[2..closing], closing + 1));
+    }
+
+    let end = bytes[1..]
+        .iter()
+        .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+        .map_or(bytes.len(), |offset| offset + 1);
+    (end > 1).then_some((&replacement[1..end], end))
 }
 
 fn compile_rule(index: usize, rule: &RenameRule) -> Result<CompiledRule, RuleValidationError> {
