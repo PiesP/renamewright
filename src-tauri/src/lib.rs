@@ -2221,12 +2221,12 @@ mod tests {
 
     use super::{
         AppState, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
-        ExtensionOperationDto, FilenamePartDto, LedgerEntryDto, RULE_PIPELINE_SCHEMA_VERSION,
-        RangeOperationDto, RangeOriginDto, RulePipelineRequestDto, RuleRequestDto,
-        RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto,
-        SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto, admit_dropped_sources,
-        compile_rule_request, csv_cell, export_write_error, plan_document_csv, plan_document_json,
-        plan_from_registry, write_new_document,
+        ExtensionOperationDto, FilenamePartDto, LedgerEntryDto, PlanDto,
+        RULE_PIPELINE_SCHEMA_VERSION, RangeOperationDto, RangeOriginDto, RulePipelineRequestDto,
+        RuleRequestDto, RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto,
+        SequenceScopeDto, SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto,
+        admit_dropped_sources, compile_rule_request, csv_cell, export_write_error,
+        plan_document_csv, plan_document_json, plan_from_registry, write_new_document,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -2726,6 +2726,47 @@ mod tests {
         assert_eq!(unknown_json["sourceId"], 99);
         assert_eq!(unknown_json.as_object().map(serde_json::Map::len), Some(2));
         assert!(!unknown_json.to_string().contains("private-name"));
+        Ok(())
+    }
+
+    #[test]
+    fn expanding_ipc_rules_return_a_bounded_plan_diagnostic() -> Result<(), Box<dyn Error>> {
+        let request = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
+            rules: [31, 37]
+                .map(|rule_id| RuleRequestDto::RegexReplace {
+                    rule_id,
+                    enabled: true,
+                    pattern: String::new(),
+                    replacement: "x".repeat(renamewright_core::MAX_RULE_OUTPUT_BYTES / 4),
+                })
+                .into(),
+        };
+        let compiled = compile_rule_request(&request)?;
+        let plan = build_plan_with_rule_pipeline_overrides_and_environment(
+            PlanId::new(23),
+            1,
+            &[SourceSnapshot::new(
+                SourceId::new(1),
+                ParentId::new(1),
+                OsString::from("a"),
+            )],
+            &compiled.pipeline,
+            &compiled.overrides,
+            TargetPolicy::windows(),
+            &ValidationEnvironment::default(),
+        );
+        let row = &plan.rows()[0];
+        assert_eq!(
+            row.proposed_name().len(),
+            renamewright_core::MAX_RULE_OUTPUT_BYTES / 2 + 1
+        );
+        assert_eq!(row.trace().len(), 1);
+
+        let dto = PlanDto::from(&plan);
+        assert_eq!(dto.rows[0].status, "blocked");
+        assert_eq!(dto.rows[0].diagnostics, vec!["nameTooLong"]);
         Ok(())
     }
 
