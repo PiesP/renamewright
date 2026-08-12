@@ -2,7 +2,8 @@ use std::error::Error;
 use std::ffi::OsString;
 
 use renamewright_core::{
-    CaseMode, DiagnosticCode, FilenamePart, MAX_RULES, ParentId, PlanId, RenameRule, RulePipeline,
+    CaseMode, CharacterClass, CharacterClassOperation, DiagnosticCode, FilenamePart, MAX_RULES,
+    ParentId, PlanId, RangeOperation, RangeOrigin, RenameRule, RulePipeline,
     RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope, SourceId,
     SourceSnapshot, TargetPolicy, UnicodeNormalizationForm, build_plan_with_rule_pipeline,
 };
@@ -510,6 +511,182 @@ fn extension_replacement_rejects_empty_or_dot_prefixed_values() {
         prefixed.map(|error| error.kind()),
         Some(RuleValidationErrorKind::InvalidExtensionReplacement)
     );
+}
+
+#[test]
+fn range_rules_count_unicode_scalars_from_either_edge() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        proposal(
+            "가🦀e\u{301}-report.txt",
+            vec![RenameRule::range(
+                FilenamePart::Stem,
+                RangeOperation::Keep,
+                RangeOrigin::Start,
+                1,
+                Some(3),
+            )],
+        )?
+        .0,
+        "🦀e\u{301}.txt"
+    );
+    assert_eq!(
+        proposal(
+            "abcdef.txt",
+            vec![RenameRule::range(
+                FilenamePart::Stem,
+                RangeOperation::Remove,
+                RangeOrigin::End,
+                1,
+                Some(2),
+            )],
+        )?
+        .0,
+        "abcf.txt"
+    );
+    assert_eq!(
+        proposal(
+            "abcdef.txt",
+            vec![RenameRule::range(
+                FilenamePart::Stem,
+                RangeOperation::Keep,
+                RangeOrigin::End,
+                1,
+                None,
+            )],
+        )?
+        .0,
+        "abcde.txt"
+    );
+    Ok(())
+}
+
+#[test]
+fn range_overrun_and_empty_selection_have_explicit_results() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        proposal(
+            "abc.txt",
+            vec![RenameRule::range(
+                FilenamePart::Stem,
+                RangeOperation::Remove,
+                RangeOrigin::Start,
+                99,
+                Some(2),
+            )],
+        )?
+        .0,
+        "abc.txt"
+    );
+    assert_eq!(
+        proposal(
+            "abc.txt",
+            vec![RenameRule::range(
+                FilenamePart::Stem,
+                RangeOperation::Keep,
+                RangeOrigin::Start,
+                99,
+                Some(2),
+            )],
+        )?
+        .0,
+        ".txt"
+    );
+
+    let invalid = RulePipeline::compile(vec![RenameRule::range(
+        FilenamePart::WholeName,
+        RangeOperation::Keep,
+        RangeOrigin::Start,
+        0,
+        Some(0),
+    )])
+    .err();
+    assert_eq!(
+        invalid.map(|error| error.kind()),
+        Some(RuleValidationErrorKind::InvalidRangeLength)
+    );
+    Ok(())
+}
+
+#[test]
+fn character_class_rules_use_unicode_properties_on_the_selected_part() -> Result<(), Box<dyn Error>>
+{
+    assert_eq!(
+        proposal(
+            "A١２3-🦀.txt",
+            vec![RenameRule::character_class(
+                FilenamePart::WholeName,
+                CharacterClassOperation::Keep,
+                CharacterClass::DecimalNumber,
+            )],
+        )?
+        .0,
+        "١２3"
+    );
+    assert_eq!(
+        proposal(
+            "보고서 - 🦀!.txt",
+            vec![
+                RenameRule::character_class(
+                    FilenamePart::Stem,
+                    CharacterClassOperation::Remove,
+                    CharacterClass::Whitespace,
+                ),
+                RenameRule::character_class(
+                    FilenamePart::Stem,
+                    CharacterClassOperation::Remove,
+                    CharacterClass::Punctuation,
+                ),
+                RenameRule::character_class(
+                    FilenamePart::Stem,
+                    CharacterClassOperation::Remove,
+                    CharacterClass::Symbol,
+                ),
+            ],
+        )?
+        .0,
+        "보고서.txt"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn range_and_class_rules_preserve_non_unicode_names_on_failure() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::ffi::OsStringExt;
+
+    for rule in [
+        RenameRule::range(
+            FilenamePart::WholeName,
+            RangeOperation::Keep,
+            RangeOrigin::Start,
+            0,
+            Some(1),
+        ),
+        RenameRule::character_class(
+            FilenamePart::WholeName,
+            CharacterClassOperation::Keep,
+            CharacterClass::Letter,
+        ),
+    ] {
+        let native_name = OsString::from_vec(vec![b'f', b'o', 0x80]);
+        let pipeline = RulePipeline::compile(vec![rule])?;
+        let plan = build_plan_with_rule_pipeline(
+            PlanId::new(9),
+            1,
+            &[SourceSnapshot::new(
+                SourceId::new(1),
+                ParentId::new(1),
+                native_name.clone(),
+            )],
+            &pipeline,
+            TargetPolicy::windows(),
+        );
+        assert_eq!(plan.rows()[0].proposed_name(), native_name.as_os_str());
+        assert!(plan.rows()[0].diagnostics().iter().any(|diagnostic| {
+            diagnostic.code() == renamewright_core::DiagnosticCode::UnsupportedEncoding
+        }));
+        assert!(!plan.rows()[0].override_applied());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

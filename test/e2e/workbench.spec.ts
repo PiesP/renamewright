@@ -15,7 +15,7 @@ test('previews a safe prefix and blocks invalid Windows names', async ({ page })
   await expect(page.getByText('2026-Quarterly review.pdf')).toBeVisible();
   await expect(page.getByText('3 changes')).toBeVisible();
   await page.getByRole('button', { name: 'Inspect JSON' }).click();
-  await expect(page.getByRole('dialog')).toContainText('"schemaVersion": 4');
+  await expect(page.getByRole('dialog')).toContainText('"schemaVersion": 5');
   await expect(page.getByRole('dialog')).not.toContainText('/home/');
   await page.getByRole('button', { name: 'Close' }).click();
 
@@ -108,6 +108,60 @@ test('previews filename structure rules and keeps invalid extensions blocked', a
     .fill('.private');
   await expect(extensionEditor).toContainText('Rule 2 needs an extension without a leading dot.');
   await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
+});
+
+test('previews character ranges and Unicode character classes', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Load sample' }).click();
+  await page.getByRole('combobox', { name: 'New rule' }).selectOption('range');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+  const rangeEditor = page.locator('.rule-editor').filter({ hasText: 'Select character range' });
+  await rangeEditor.getByRole('spinbutton', { name: 'Range length' }).fill('9');
+  await expect(page.getByText('Quarterly.pdf')).toBeVisible();
+
+  await page.getByRole('combobox', { name: 'New rule' }).selectOption('characterClass');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+  const classEditor = page.locator('.rule-editor').filter({ hasText: 'Filter character class' });
+  await classEditor.getByRole('combobox', { name: 'Class action' }).selectOption('keep');
+  await classEditor.getByRole('combobox', { name: 'Unicode class' }).selectOption('letter');
+  await expect(classEditor).toContainText('Uses Unicode properties, not ASCII-only ranges.');
+  await expect(page.getByText('Quarterly.pdf')).toBeVisible();
+});
+
+test('keeps an inline override across shared rule changes and resets it safely', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Load sample' }).click();
+  await page.getByRole('button', { name: 'Edit override for Quarterly review.pdf' }).click();
+  const override = page.getByRole('textbox', { name: 'Override name for Quarterly review.pdf' });
+  await override.fill('manual.md');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('manual.md')).toBeVisible();
+  await expect(page.getByText('Override')).toBeVisible();
+  await page.getByRole('button', { name: 'Inspect JSON' }).click();
+  await expect(page.getByRole('dialog')).toContainText('"overrides"');
+  await expect(page.getByRole('dialog')).toContainText('"overrideApplied": true');
+  await expect(page.getByRole('dialog')).not.toContainText('/home/');
+  await page.getByRole('button', { name: 'Close' }).click();
+
+  await page.getByRole('textbox', { name: 'Prefix' }).fill('shared-');
+  await expect(page.getByText('shared-project-notes.txt')).toBeVisible();
+  await expect(page.getByText('manual.md')).toBeVisible();
+  await expect(page.getByText('shared-Quarterly review.pdf')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Edit override for Quarterly review.pdf' }).click();
+  await page
+    .getByRole('textbox', { name: 'Override name for Quarterly review.pdf' })
+    .fill('bad?.txt');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('1 blocked')).toBeVisible();
+  await expect(page.getByText('Illegal Windows character')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
+
+  await page.getByRole('button', { name: 'Reset override for Quarterly review.pdf' }).click();
+  await expect(page.getByText('shared-Quarterly review.pdf')).toBeVisible();
+  await expect(page.getByText('bad?.txt')).toHaveCount(0);
 });
 
 test('keeps the workbench inside narrow viewports', async ({ page }) => {

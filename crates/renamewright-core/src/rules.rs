@@ -60,6 +60,33 @@ pub enum UnicodeNormalizationForm {
     Nfkd,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeOperation {
+    Keep,
+    Remove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeOrigin {
+    Start,
+    End,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharacterClass {
+    DecimalNumber,
+    Letter,
+    Whitespace,
+    Punctuation,
+    Symbol,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharacterClassOperation {
+    Keep,
+    Remove,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RenameRule {
     Prefix {
@@ -99,6 +126,18 @@ pub enum RenameRule {
     UnicodeNormalization {
         target: FilenamePart,
         form: UnicodeNormalizationForm,
+    },
+    Range {
+        target: FilenamePart,
+        operation: RangeOperation,
+        origin: RangeOrigin,
+        offset: u32,
+        length: Option<u32>,
+    },
+    CharacterClass {
+        target: FilenamePart,
+        operation: CharacterClassOperation,
+        class: CharacterClass,
     },
 }
 
@@ -185,6 +224,36 @@ impl RenameRule {
     pub const fn normalize_unicode(target: FilenamePart, form: UnicodeNormalizationForm) -> Self {
         Self::UnicodeNormalization { target, form }
     }
+
+    #[must_use]
+    pub const fn range(
+        target: FilenamePart,
+        operation: RangeOperation,
+        origin: RangeOrigin,
+        offset: u32,
+        length: Option<u32>,
+    ) -> Self {
+        Self::Range {
+            target,
+            operation,
+            origin,
+            offset,
+            length,
+        }
+    }
+
+    #[must_use]
+    pub const fn character_class(
+        target: FilenamePart,
+        operation: CharacterClassOperation,
+        class: CharacterClass,
+    ) -> Self {
+        Self::CharacterClass {
+            target,
+            operation,
+            class,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +265,7 @@ pub enum RuleValidationErrorKind {
     InvalidSequenceStep,
     InvalidSequencePadding,
     InvalidExtensionReplacement,
+    InvalidRangeLength,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,6 +331,18 @@ enum CompiledRule {
     UnicodeNormalization {
         target: FilenamePart,
         form: UnicodeNormalizationForm,
+    },
+    Range {
+        target: FilenamePart,
+        operation: RangeOperation,
+        origin: RangeOrigin,
+        offset: u32,
+        length: Option<u32>,
+    },
+    CharacterClass {
+        target: FilenamePart,
+        operation: CharacterClassOperation,
+        matcher: Regex,
     },
 }
 
@@ -385,6 +467,22 @@ impl RulePipeline {
             CompiledRule::UnicodeNormalization { target, form } => {
                 apply_unicode_part(name, *target, |text| normalize_unicode(text, *form))
             }
+            CompiledRule::Range {
+                target,
+                operation,
+                origin,
+                offset,
+                length,
+            } => apply_unicode_part(name, *target, |text| {
+                apply_range(text, *operation, *origin, *offset, *length)
+            }),
+            CompiledRule::CharacterClass {
+                target,
+                operation,
+                matcher,
+            } => apply_unicode_part(name, *target, |text| {
+                apply_character_class(text, *operation, matcher)
+            }),
         }
     }
 }
@@ -507,6 +605,38 @@ fn compile_rule(index: usize, rule: &RenameRule) -> Result<CompiledRule, RuleVal
                 form: *form,
             })
         }
+        RenameRule::Range {
+            target,
+            operation,
+            origin,
+            offset,
+            length,
+        } => {
+            if matches!(length, Some(0)) {
+                return Err(RuleValidationError::new(
+                    Some(index),
+                    RuleValidationErrorKind::InvalidRangeLength,
+                ));
+            }
+            Ok(CompiledRule::Range {
+                target: *target,
+                operation: *operation,
+                origin: *origin,
+                offset: *offset,
+                length: *length,
+            })
+        }
+        RenameRule::CharacterClass {
+            target,
+            operation,
+            class,
+        } => Ok(CompiledRule::CharacterClass {
+            target: *target,
+            operation: *operation,
+            matcher: Regex::new(character_class_pattern(*class)).map_err(|_| {
+                RuleValidationError::new(Some(index), RuleValidationErrorKind::InvalidRegex)
+            })?,
+        }),
     }
 }
 
@@ -622,6 +752,65 @@ fn normalize_unicode(text: &str, form: UnicodeNormalizationForm) -> String {
         UnicodeNormalizationForm::Nfkc => text.nfkc().collect(),
         UnicodeNormalizationForm::Nfkd => text.nfkd().collect(),
     }
+}
+
+fn apply_range(
+    text: &str,
+    operation: RangeOperation,
+    origin: RangeOrigin,
+    offset: u32,
+    length: Option<u32>,
+) -> String {
+    let characters = text.chars().collect::<Vec<_>>();
+    let count = characters.len();
+    let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+    let length = length.map(|value| usize::try_from(value).unwrap_or(usize::MAX));
+    let (start, end) = match origin {
+        RangeOrigin::Start => {
+            let start = offset.min(count);
+            let end = length.map_or(count, |length| start.saturating_add(length).min(count));
+            (start, end)
+        }
+        RangeOrigin::End => {
+            let end = count.saturating_sub(offset);
+            let start = length.map_or(0, |length| end.saturating_sub(length));
+            (start, end)
+        }
+    };
+    match operation {
+        RangeOperation::Keep => characters[start..end].iter().collect(),
+        RangeOperation::Remove => characters[..start]
+            .iter()
+            .chain(&characters[end..])
+            .collect(),
+    }
+}
+
+fn character_class_pattern(class: CharacterClass) -> &'static str {
+    match class {
+        CharacterClass::DecimalNumber => r"\A\p{Decimal_Number}\z",
+        CharacterClass::Letter => r"\A\p{Letter}\z",
+        CharacterClass::Whitespace => r"\A\p{White_Space}\z",
+        CharacterClass::Punctuation => r"\A\p{Punctuation}\z",
+        CharacterClass::Symbol => r"\A\p{Symbol}\z",
+    }
+}
+
+fn apply_character_class(
+    text: &str,
+    operation: CharacterClassOperation,
+    matcher: &Regex,
+) -> String {
+    text.chars()
+        .filter(|character| {
+            let mut encoded = [0_u8; 4];
+            let matches = matcher.is_match(character.encode_utf8(&mut encoded));
+            match operation {
+                CharacterClassOperation::Keep => matches,
+                CharacterClassOperation::Remove => !matches,
+            }
+        })
+        .collect()
 }
 
 fn validate_text(index: usize, invalid: bool) -> Result<(), RuleValidationError> {

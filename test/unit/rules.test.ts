@@ -10,6 +10,7 @@ import {
 test('applies enabled text rules in order and records stable rule IDs', () => {
   const request: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       { kind: 'prefix', ruleId: 7, enabled: true, value: 'draft-' },
       {
@@ -37,6 +38,7 @@ test('applies enabled text rules in order and records stable rule IDs', () => {
 test('expands numbered and named Rust-style regex captures', () => {
   const request: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'regexReplace',
@@ -54,6 +56,7 @@ test('expands numbered and named Rust-style regex captures', () => {
 test('parses unbraced replacement references with Rust longest-match semantics', () => {
   const request: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'regexReplace',
@@ -71,6 +74,7 @@ test('parses unbraced replacement references with Rust longest-match semantics',
 test('rejects invalid and Rust-unsupported regex features with a path-free rule ID', () => {
   const request: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'regexReplace',
@@ -94,6 +98,7 @@ test('rejects invalid and Rust-unsupported regex features with a path-free rule 
 test('allocates sequence values from the complete source set instead of render order', () => {
   const request: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'sequence',
@@ -126,6 +131,7 @@ test('allocates sequence values from the complete source set instead of render o
 test('sorts sequence names and resets counters for each parent', () => {
   const request: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'sequence',
@@ -160,6 +166,7 @@ test('sorts sequence names and resets counters for each parent', () => {
 test('reports sequence validation and row-local overflow without source data', () => {
   const invalid: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'sequence',
@@ -185,6 +192,7 @@ test('reports sequence validation and row-local overflow without source data', (
 
   const overflow: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'sequence',
@@ -221,6 +229,7 @@ test('reports sequence validation and row-local overflow without source data', (
 test('recomputes the extension boundary through ordered structure rules', () => {
   const request: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       { kind: 'extension', ruleId: 71, enabled: true, operation: 'remove', value: 'txt' },
       {
@@ -251,6 +260,7 @@ test('recomputes the extension boundary through ordered structure rules', () => 
 
   const pathLikeUnits: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       { kind: 'prefix', ruleId: 80, enabled: true, value: 'invalid/' },
       {
@@ -268,6 +278,7 @@ test('recomputes the extension boundary through ordered structure rules', () => 
 test('handles hidden files, trailing dots, case, and Unicode whitespace by selected part', () => {
   const hidden: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'extension',
@@ -283,6 +294,7 @@ test('handles hidden files, trailing dots, case, and Unicode whitespace by selec
 
   const cleanup: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'whitespaceCleanup',
@@ -309,6 +321,7 @@ test('normalizes Unicode only when an explicit normalization rule is enabled', (
   const decomposed = 're\u0301sume\u0301.txt';
   const disabled: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'unicodeNormalization',
@@ -330,6 +343,7 @@ test('normalizes Unicode only when an explicit normalization rule is enabled', (
   for (const { form, input, output } of forms) {
     const request: RulePipelineRequest = {
       schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+      overrides: [],
       rules: [
         {
           kind: 'unicodeNormalization',
@@ -344,9 +358,140 @@ test('normalizes Unicode only when an explicit normalization rule is enabled', (
   }
 });
 
+test('selects ranges by Unicode scalar value from either edge', () => {
+  const request: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
+    rules: [
+      {
+        kind: 'range',
+        ruleId: 105,
+        enabled: true,
+        target: 'stem',
+        operation: 'keep',
+        origin: 'start',
+        offset: 1,
+        length: 3,
+      },
+    ],
+  };
+
+  expect(applyBrowserRules('A😀e\u0301Z.txt', request).proposedName).toBe('😀e\u0301.txt');
+
+  request.rules = [
+    {
+      kind: 'range',
+      ruleId: 106,
+      enabled: true,
+      target: 'stem',
+      operation: 'remove',
+      origin: 'end',
+      offset: 1,
+      length: 2,
+    },
+  ];
+  expect(applyBrowserRules('A😀e\u0301Z.txt', request).proposedName).toBe('A😀Z.txt');
+
+  request.rules = [
+    {
+      kind: 'range',
+      ruleId: 107,
+      enabled: true,
+      target: 'stem',
+      operation: 'keep',
+      origin: 'start',
+      offset: 99,
+      length: null,
+    },
+  ];
+  expect(applyBrowserRules('short.txt', request).proposedName).toBe('.txt');
+});
+
+test('filters filename parts with Unicode character properties', () => {
+  const request: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
+    rules: [
+      {
+        kind: 'characterClass',
+        ruleId: 109,
+        enabled: true,
+        target: 'stem',
+        operation: 'remove',
+        class: 'decimalNumber',
+      },
+    ],
+  };
+
+  expect(applyBrowserRules('Ａ١2한!-★.txt', request).proposedName).toBe('Ａ한!-★.txt');
+
+  request.rules = [
+    {
+      kind: 'characterClass',
+      ruleId: 110,
+      enabled: true,
+      target: 'stem',
+      operation: 'keep',
+      class: 'letter',
+    },
+  ];
+  expect(applyBrowserRules('Ａ١2한!-★.txt', request).proposedName).toBe('Ａ한.txt');
+});
+
+test('applies stable source overrides after shared rules and validates them pathlessly', () => {
+  const sources = [
+    { sourceId: 2, parentId: 1, originalName: 'second.txt' },
+    { sourceId: 1, parentId: 1, originalName: 'first.txt' },
+  ];
+  const request: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [{ sourceId: 1, value: 'manual.md' }],
+    rules: [{ kind: 'prefix', ruleId: 113, enabled: true, value: 'shared-' }],
+  };
+  const apply = compileBrowserRulePipeline(request, sources);
+
+  expect(apply(sources[0] as (typeof sources)[number])).toMatchObject({
+    proposedName: 'shared-second.txt',
+    overrideApplied: false,
+  });
+  expect(apply(sources[1] as (typeof sources)[number])).toMatchObject({
+    proposedName: 'manual.md',
+    overrideApplied: true,
+    trace: [{ ruleId: 113, before: 'first.txt', after: 'shared-first.txt' }],
+  });
+
+  const invalidRequests: Array<[RulePipelineRequest, string]> = [
+    [
+      { ...request, overrides: [{ sourceId: 9, value: '/private/unknown.txt' }] },
+      'unknownOverrideSource',
+    ],
+    [
+      {
+        ...request,
+        overrides: [
+          { sourceId: 1, value: 'first-private-value' },
+          { sourceId: 1, value: 'second-private-value' },
+        ],
+      },
+      'duplicateOverrideSourceId',
+    ],
+    [{ ...request, overrides: [{ sourceId: 1, value: 'x'.repeat(4_097) }] }, 'overrideTextTooLong'],
+  ];
+  for (const [invalid, code] of invalidRequests) {
+    try {
+      compileBrowserRulePipeline(invalid, sources);
+      throw new Error(`Expected ${code}.`);
+    } catch (cause) {
+      expect(cause).toMatchObject({ code });
+      expect((cause as Error).message).not.toContain('private');
+    }
+  }
+});
+
 test('rejects invalid extension replacement without reflecting its value', () => {
   const request: RulePipelineRequest = {
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
     rules: [
       {
         kind: 'extension',

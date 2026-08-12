@@ -14,6 +14,7 @@ export interface PlanRow {
   proposedName: string;
   status: RowStatus;
   diagnostics: string[];
+  overrideApplied: boolean;
 }
 
 export interface Plan {
@@ -160,7 +161,7 @@ function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
   const applyRules = compileBrowserRulePipeline(request, sources);
   const rows = sources.map((source): PlanRow => {
     const { sourceId, originalName } = source;
-    const { proposedName, trace, diagnostic } = applyRules(source);
+    const { proposedName, trace, overrideApplied, diagnostic } = applyRules(source);
     traces.set(sourceId, trace);
     const illegal = [...proposedName].some((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
@@ -184,6 +185,7 @@ function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
       proposedName,
       status: blocked ? 'blocked' : proposedName === originalName ? 'unchanged' : 'changed',
       diagnostics,
+      overrideApplied,
     };
   });
   const changedCount = rows.filter((row) => row.status === 'changed').length;
@@ -258,13 +260,14 @@ export function createPlanningClient(): PlanningClient {
     const { plan, request, traces } = latestBrowserPlan;
     return JSON.stringify(
       {
-        schemaVersion: 4,
-        protocolVersion: 4,
+        schemaVersion: 5,
+        protocolVersion: 5,
         ruleSchemaVersion: request.schemaVersion,
         product: 'Renamewright',
         planId: plan.planId,
         sourceGeneration: plan.generation,
         rules: request.rules,
+        overrides: request.overrides,
         summary: {
           sourceCount: plan.rows.length,
           changedCount: plan.changedCount,
@@ -277,6 +280,7 @@ export function createPlanningClient(): PlanningClient {
           proposedDisplay: row.proposedName,
           status: row.status,
           diagnostics: row.diagnostics,
+          overrideApplied: row.overrideApplied,
           trace: traces.get(row.sourceId) ?? [],
         })),
       },

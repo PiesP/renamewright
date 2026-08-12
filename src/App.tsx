@@ -22,6 +22,7 @@ import {
   type RulePipelineRequest,
   type RuleRequest,
   ruleLabel,
+  type SourceOverride,
 } from './planning/rules';
 import { VirtualPlanTable } from './planning/VirtualPlanTable';
 
@@ -45,6 +46,7 @@ interface RuleNumberInputProps {
   min: number;
   max: number;
   invalid: boolean;
+  disabled?: boolean;
   onInput: (value: number) => void;
 }
 
@@ -81,6 +83,7 @@ function RuleNumberInput(props: RuleNumberInputProps) {
           step="1"
           value={props.value}
           aria-invalid={props.invalid ? 'true' : 'false'}
+          disabled={props.disabled}
           onInput={(event) => {
             const value = event.currentTarget.valueAsNumber;
             props.onInput(Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0);
@@ -116,6 +119,7 @@ function FilenamePartSelect(props: {
 export function App(props: AppProps) {
   const planningClient = props.client ?? createPlanningClient();
   const [rules, setRules] = createSignal<RuleRequest[]>([createRule(1, 'prefix')]);
+  const [overrides, setOverrides] = createSignal<SourceOverride[]>([]);
   const [newRuleKind, setNewRuleKind] = createSignal<RuleKind>('suffix');
   const [ruleError, setRuleError] = createSignal<{
     code: string;
@@ -151,6 +155,7 @@ export function App(props: AppProps) {
   const currentRuleRequest = (): RulePipelineRequest => ({
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
     rules: rules(),
+    overrides: overrides(),
   });
 
   const dismissPlanInspector = () => {
@@ -664,6 +669,10 @@ export function App(props: AppProps) {
                   const current = rules().find((candidate) => candidate.ruleId === rule.ruleId);
                   return current?.kind === 'extension' && current.operation === 'replace';
                 };
+                const rangeOpenEnded = () => {
+                  const current = rules().find((candidate) => candidate.ruleId === rule.ruleId);
+                  return current?.kind === 'range' && current.length === null;
+                };
                 return (
                   <section
                     class="rule-editor"
@@ -1119,6 +1128,182 @@ export function App(props: AppProps) {
                           </>
                         )}
                       </Match>
+                      <Match when={rule.kind === 'range' && rule}>
+                        {(current) => (
+                          <>
+                            <FilenamePartSelect
+                              id={inputId('target')}
+                              value={current().target}
+                              onChange={(target) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'range' ? { ...candidate, target } : candidate
+                                )
+                              }
+                            />
+                            <div class="rule-field">
+                              <label for={inputId('operation')}>Range action</label>
+                              <select
+                                id={inputId('operation')}
+                                value={current().operation}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'range'
+                                      ? {
+                                          ...candidate,
+                                          operation: event.currentTarget.value as 'keep' | 'remove',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="keep">Keep selected range</option>
+                                <option value="remove">Remove selected range</option>
+                              </select>
+                            </div>
+                            <div class="rule-field">
+                              <label for={inputId('origin')}>Count from</label>
+                              <select
+                                id={inputId('origin')}
+                                value={current().origin}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'range'
+                                      ? {
+                                          ...candidate,
+                                          origin: event.currentTarget.value as 'start' | 'end',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="start">Start</option>
+                                <option value="end">End</option>
+                              </select>
+                            </div>
+                            <div class="sequence-number-fields">
+                              <RuleNumberInput
+                                id={inputId('offset')}
+                                label="Skip characters"
+                                value={current().offset}
+                                min={0}
+                                max={4_294_967_295}
+                                invalid={invalid()}
+                                onInput={(offset) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'range'
+                                      ? { ...candidate, offset }
+                                      : candidate
+                                  )
+                                }
+                              />
+                              <RuleNumberInput
+                                id={inputId('length')}
+                                label="Range length"
+                                value={current().length ?? 1}
+                                min={1}
+                                max={4_294_967_295}
+                                invalid={invalid()}
+                                disabled={rangeOpenEnded()}
+                                onInput={(length) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'range'
+                                      ? { ...candidate, length }
+                                      : candidate
+                                  )
+                                }
+                              />
+                            </div>
+                            <label class="rule-toggle">
+                              <input
+                                type="checkbox"
+                                checked={rangeOpenEnded()}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'range'
+                                      ? {
+                                          ...candidate,
+                                          length: event.currentTarget.checked ? null : 1,
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              />
+                              Continue to opposite edge
+                            </label>
+                            <p class="field-help">
+                              Positions count Unicode code points; combining marks count separately.
+                            </p>
+                          </>
+                        )}
+                      </Match>
+                      <Match when={rule.kind === 'characterClass' && rule}>
+                        {(current) => (
+                          <>
+                            <FilenamePartSelect
+                              id={inputId('target')}
+                              value={current().target}
+                              onChange={(target) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'characterClass'
+                                    ? { ...candidate, target }
+                                    : candidate
+                                )
+                              }
+                            />
+                            <div class="rule-field">
+                              <label for={inputId('operation')}>Class action</label>
+                              <select
+                                id={inputId('operation')}
+                                value={current().operation}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'characterClass'
+                                      ? {
+                                          ...candidate,
+                                          operation: event.currentTarget.value as 'keep' | 'remove',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="keep">Keep matching characters</option>
+                                <option value="remove">Remove matching characters</option>
+                              </select>
+                            </div>
+                            <div class="rule-field">
+                              <label for={inputId('class')}>Unicode class</label>
+                              <select
+                                id={inputId('class')}
+                                value={current().class}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'characterClass'
+                                      ? {
+                                          ...candidate,
+                                          class: event.currentTarget.value as
+                                            | 'decimalNumber'
+                                            | 'letter'
+                                            | 'whitespace'
+                                            | 'punctuation'
+                                            | 'symbol',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="decimalNumber">Decimal numbers</option>
+                                <option value="letter">Letters</option>
+                                <option value="whitespace">Whitespace</option>
+                                <option value="punctuation">Punctuation</option>
+                                <option value="symbol">Symbols</option>
+                              </select>
+                            </div>
+                            <p class="field-help">
+                              Uses Unicode properties, not ASCII-only ranges.
+                            </p>
+                          </>
+                        )}
+                      </Match>
                     </Switch>
                     <Show when={invalid()}>
                       <p class="field-help field-help-error">{error()}</p>
@@ -1145,6 +1330,8 @@ export function App(props: AppProps) {
                 <option value="case">Letter case</option>
                 <option value="whitespaceCleanup">Whitespace cleanup</option>
                 <option value="unicodeNormalization">Unicode normalization</option>
+                <option value="range">Character range</option>
+                <option value="characterClass">Character class</option>
               </select>
               <button
                 class="button button-secondary"
@@ -1434,7 +1621,17 @@ export function App(props: AppProps) {
               </div>
             }
           >
-            <VirtualPlanTable rows={plan()?.rows ?? []} />
+            <VirtualPlanTable
+              rows={plan()?.rows ?? []}
+              overrides={overrides()}
+              onOverride={(sourceId, value) => {
+                setOverrides((current) => {
+                  const retained = current.filter((item) => item.sourceId !== sourceId);
+                  return value === undefined ? retained : [...retained, { sourceId, value }];
+                });
+                schedulePreview();
+              }}
+            />
           </Show>
         </section>
       </div>

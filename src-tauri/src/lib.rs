@@ -7,10 +7,12 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
-    CaseMode, DiagnosticCode, ExecutionDirection, FilenamePart, MAX_RULE_TEXT_BYTES, MAX_RULES,
-    MAX_SEQUENCE_PADDING, NameStatus, PROTOCOL_VERSION, PlanId, RenamePlan, RenameRule,
-    RulePipeline, RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope,
-    TargetPolicy, UnicodeNormalizationForm, build_plan_with_rule_pipeline_and_environment,
+    CaseMode, CharacterClass, CharacterClassOperation, DiagnosticCode, ExecutionDirection,
+    FilenamePart, MAX_OVERRIDE_TEXT_BYTES, MAX_OVERRIDES, MAX_RULE_TEXT_BYTES, MAX_RULES,
+    MAX_SEQUENCE_PADDING, NameOverride, NameStatus, PROTOCOL_VERSION, PlanId, RangeOperation,
+    RangeOrigin, RenamePlan, RenameRule, RulePipeline, RuleValidationErrorKind, SequenceOrder,
+    SequencePlacement, SequenceScope, TargetPolicy, UnicodeNormalizationForm,
+    build_plan_with_rule_pipeline_overrides_and_environment,
 };
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
@@ -115,8 +117,9 @@ impl StoredPlan {
     }
 }
 
-const RULE_PIPELINE_SCHEMA_VERSION: u16 = 3;
+const RULE_PIPELINE_SCHEMA_VERSION: u16 = 4;
 const MAX_SEQUENCE_INPUT: u64 = 9_007_199_254_740_991;
+const MAX_RANGE_INPUT: u64 = u32::MAX as u64;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -170,11 +173,50 @@ enum UnicodeNormalizationFormDto {
     Nfkd,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum RangeOperationDto {
+    Keep,
+    Remove,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum RangeOriginDto {
+    Start,
+    End,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum CharacterClassDto {
+    DecimalNumber,
+    Letter,
+    Whitespace,
+    Punctuation,
+    Symbol,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum CharacterClassOperationDto {
+    Keep,
+    Remove,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SourceOverrideDto {
+    source_id: u64,
+    value: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct RulePipelineRequestDto {
     schema_version: u16,
     rules: Vec<RuleRequestDto>,
+    overrides: Vec<SourceOverrideDto>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -241,6 +283,22 @@ enum RuleRequestDto {
         target: FilenamePartDto,
         form: UnicodeNormalizationFormDto,
     },
+    Range {
+        rule_id: u64,
+        enabled: bool,
+        target: FilenamePartDto,
+        operation: RangeOperationDto,
+        origin: RangeOriginDto,
+        offset: u64,
+        length: Option<u64>,
+    },
+    CharacterClass {
+        rule_id: u64,
+        enabled: bool,
+        target: FilenamePartDto,
+        operation: CharacterClassOperationDto,
+        class: CharacterClassDto,
+    },
 }
 
 impl RuleRequestDto {
@@ -254,7 +312,9 @@ impl RuleRequestDto {
             | Self::Extension { rule_id, .. }
             | Self::Case { rule_id, .. }
             | Self::WhitespaceCleanup { rule_id, .. }
-            | Self::UnicodeNormalization { rule_id, .. } => *rule_id,
+            | Self::UnicodeNormalization { rule_id, .. }
+            | Self::Range { rule_id, .. }
+            | Self::CharacterClass { rule_id, .. } => *rule_id,
         }
     }
 
@@ -268,7 +328,9 @@ impl RuleRequestDto {
             | Self::Extension { enabled, .. }
             | Self::Case { enabled, .. }
             | Self::WhitespaceCleanup { enabled, .. }
-            | Self::UnicodeNormalization { enabled, .. } => *enabled,
+            | Self::UnicodeNormalization { enabled, .. }
+            | Self::Range { enabled, .. }
+            | Self::CharacterClass { enabled, .. } => *enabled,
         }
     }
 
@@ -290,7 +352,10 @@ impl RuleRequestDto {
             Self::Sequence { separator, .. } => separator.len() > MAX_RULE_TEXT_BYTES,
             Self::Extension { value, .. } => value.len() > MAX_RULE_TEXT_BYTES,
             Self::WhitespaceCleanup { replacement, .. } => replacement.len() > MAX_RULE_TEXT_BYTES,
-            Self::Case { .. } | Self::UnicodeNormalization { .. } => false,
+            Self::Case { .. }
+            | Self::UnicodeNormalization { .. }
+            | Self::Range { .. }
+            | Self::CharacterClass { .. } => false,
         }
     }
 
@@ -307,6 +372,16 @@ impl RuleRequestDto {
             {
                 Some(RuleRequestErrorKind::InvalidSequencePadding)
             }
+            Self::Range {
+                length: Some(0), ..
+            } => Some(RuleRequestErrorKind::InvalidRangeLength),
+            Self::Range { offset, .. } if *offset > MAX_RANGE_INPUT => {
+                Some(RuleRequestErrorKind::InvalidRangeOffset)
+            }
+            Self::Range {
+                length: Some(length),
+                ..
+            } if *length > MAX_RANGE_INPUT => Some(RuleRequestErrorKind::InvalidRangeLength),
             _ => None,
         }
     }
@@ -392,6 +467,45 @@ impl RuleRequestDto {
                     UnicodeNormalizationFormDto::Nfkd => UnicodeNormalizationForm::Nfkd,
                 },
             ),
+            Self::Range {
+                target,
+                operation,
+                origin,
+                offset,
+                length,
+                ..
+            } => RenameRule::range(
+                filename_part(*target),
+                match operation {
+                    RangeOperationDto::Keep => RangeOperation::Keep,
+                    RangeOperationDto::Remove => RangeOperation::Remove,
+                },
+                match origin {
+                    RangeOriginDto::Start => RangeOrigin::Start,
+                    RangeOriginDto::End => RangeOrigin::End,
+                },
+                u32::try_from(*offset).unwrap_or(u32::MAX),
+                length.map(|length| u32::try_from(length).unwrap_or(u32::MAX)),
+            ),
+            Self::CharacterClass {
+                target,
+                operation,
+                class,
+                ..
+            } => RenameRule::character_class(
+                filename_part(*target),
+                match operation {
+                    CharacterClassOperationDto::Keep => CharacterClassOperation::Keep,
+                    CharacterClassOperationDto::Remove => CharacterClassOperation::Remove,
+                },
+                match class {
+                    CharacterClassDto::DecimalNumber => CharacterClass::DecimalNumber,
+                    CharacterClassDto::Letter => CharacterClass::Letter,
+                    CharacterClassDto::Whitespace => CharacterClass::Whitespace,
+                    CharacterClassDto::Punctuation => CharacterClass::Punctuation,
+                    CharacterClassDto::Symbol => CharacterClass::Symbol,
+                },
+            ),
         }
     }
 }
@@ -417,6 +531,13 @@ enum RuleRequestErrorKind {
     InvalidSequenceStep,
     InvalidSequencePadding,
     InvalidExtensionReplacement,
+    InvalidRangeOffset,
+    InvalidRangeLength,
+    TooManyOverrides,
+    InvalidOverrideSourceId,
+    DuplicateOverrideSourceId,
+    OverrideTextTooLong,
+    UnknownOverrideSource,
 }
 
 impl RuleRequestErrorKind {
@@ -433,6 +554,13 @@ impl RuleRequestErrorKind {
             Self::InvalidSequenceStep => "invalidSequenceStep",
             Self::InvalidSequencePadding => "invalidSequencePadding",
             Self::InvalidExtensionReplacement => "invalidExtensionReplacement",
+            Self::InvalidRangeOffset => "invalidRangeOffset",
+            Self::InvalidRangeLength => "invalidRangeLength",
+            Self::TooManyOverrides => "tooManyOverrides",
+            Self::InvalidOverrideSourceId => "invalidOverrideSourceId",
+            Self::DuplicateOverrideSourceId => "duplicateOverrideSourceId",
+            Self::OverrideTextTooLong => "overrideTextTooLong",
+            Self::UnknownOverrideSource => "unknownOverrideSource",
         }
     }
 }
@@ -440,18 +568,24 @@ impl RuleRequestErrorKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RuleRequestError {
     rule_id: Option<u64>,
+    source_id: Option<u64>,
     kind: RuleRequestErrorKind,
 }
 
 impl std::fmt::Display for RuleRequestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.rule_id {
-            Some(rule_id) => write!(
+        match (self.rule_id, self.source_id) {
+            (Some(rule_id), _) => write!(
                 formatter,
                 "the rule pipeline was rejected ({}; rule {rule_id})",
                 self.kind.code()
             ),
-            None => write!(
+            (_, Some(source_id)) => write!(
+                formatter,
+                "the rule pipeline was rejected ({}; source {source_id})",
+                self.kind.code()
+            ),
+            (None, None) => write!(
                 formatter,
                 "the rule pipeline was rejected ({})",
                 self.kind.code()
@@ -462,12 +596,40 @@ impl std::fmt::Display for RuleRequestError {
 
 impl std::error::Error for RuleRequestError {}
 
+impl RuleRequestError {
+    const fn global(kind: RuleRequestErrorKind) -> Self {
+        Self {
+            rule_id: None,
+            source_id: None,
+            kind,
+        }
+    }
+
+    const fn rule(rule_id: u64, kind: RuleRequestErrorKind) -> Self {
+        Self {
+            rule_id: Some(rule_id),
+            source_id: None,
+            kind,
+        }
+    }
+
+    const fn source(source_id: u64, kind: RuleRequestErrorKind) -> Self {
+        Self {
+            rule_id: None,
+            source_id: Some(source_id),
+            kind,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PlanningCommandErrorDto {
     code: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     rule_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_id: Option<u64>,
 }
 
 impl PlanningCommandErrorDto {
@@ -475,6 +637,15 @@ impl PlanningCommandErrorDto {
         Self {
             code,
             rule_id: None,
+            source_id: None,
+        }
+    }
+
+    const fn source(code: &'static str, source_id: u64) -> Self {
+        Self {
+            code,
+            rule_id: None,
+            source_id: Some(source_id),
         }
     }
 }
@@ -484,6 +655,7 @@ impl From<RuleRequestError> for PlanningCommandErrorDto {
         Self {
             code: error.kind.code(),
             rule_id: error.rule_id,
+            source_id: error.source_id,
         }
     }
 }
@@ -491,6 +663,7 @@ impl From<RuleRequestError> for PlanningCommandErrorDto {
 struct CompiledRuleRequest {
     pipeline: RulePipeline,
     active_rule_ids: Vec<u64>,
+    overrides: Vec<NameOverride>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -737,6 +910,7 @@ struct PlanRowDto {
     proposed_name: String,
     status: &'static str,
     diagnostics: Vec<&'static str>,
+    override_applied: bool,
 }
 
 #[derive(Serialize)]
@@ -749,6 +923,7 @@ struct PlanDocument<'a> {
     plan_id: u64,
     source_generation: u64,
     rules: &'a [RuleRequestDto],
+    overrides: &'a [SourceOverrideDto],
     summary: PlanSummaryDocument,
     rows: Vec<PlanRowDocument<'a>>,
 }
@@ -770,6 +945,7 @@ struct PlanRowDocument<'a> {
     proposed_display: &'a str,
     status: &'static str,
     diagnostics: Vec<&'static str>,
+    override_applied: bool,
     trace: Vec<TraceStepDocument<'a>>,
 }
 
@@ -1038,6 +1214,21 @@ fn plan_from_registry_with_compiled(
     compiled: CompiledRuleRequest,
     state: &AppState,
 ) -> Result<PlanDto, PlanningCommandErrorDto> {
+    let snapshots = registry.snapshots();
+    let source_ids = snapshots
+        .iter()
+        .map(|source| source.id().value())
+        .collect::<BTreeSet<_>>();
+    if let Some(name_override) = compiled
+        .overrides
+        .iter()
+        .find(|name_override| !source_ids.contains(&name_override.source_id().value()))
+    {
+        return Err(PlanningCommandErrorDto::source(
+            RuleRequestErrorKind::UnknownOverrideSource.code(),
+            name_override.source_id().value(),
+        ));
+    }
     let mut next_plan_id = state
         .next_plan_id
         .lock()
@@ -1045,11 +1236,12 @@ fn plan_from_registry_with_compiled(
     let plan_id = PlanId::new(*next_plan_id);
     *next_plan_id = next_plan_id.saturating_add(1);
     let environment = registry.validation_environment();
-    let plan = build_plan_with_rule_pipeline_and_environment(
+    let plan = build_plan_with_rule_pipeline_overrides_and_environment(
         plan_id,
         registry.generation(),
-        &registry.snapshots(),
+        &snapshots,
         &compiled.pipeline,
+        &compiled.overrides,
         TargetPolicy::windows(),
         &environment,
     );
@@ -1074,6 +1266,7 @@ fn prefix_rule_request(prefix: impl Into<String>) -> RulePipelineRequestDto {
             enabled: true,
             value: prefix.into(),
         }],
+        overrides: Vec::new(),
     }
 }
 
@@ -1081,49 +1274,66 @@ fn compile_rule_request(
     request: &RulePipelineRequestDto,
 ) -> Result<CompiledRuleRequest, RuleRequestError> {
     if request.schema_version != RULE_PIPELINE_SCHEMA_VERSION {
-        return Err(RuleRequestError {
-            rule_id: None,
-            kind: RuleRequestErrorKind::UnsupportedSchema,
-        });
+        return Err(RuleRequestError::global(
+            RuleRequestErrorKind::UnsupportedSchema,
+        ));
     }
     if request.rules.len() > MAX_RULES {
-        return Err(RuleRequestError {
-            rule_id: None,
-            kind: RuleRequestErrorKind::TooManyRules,
-        });
+        return Err(RuleRequestError::global(RuleRequestErrorKind::TooManyRules));
+    }
+    if request.overrides.len() > MAX_OVERRIDES {
+        return Err(RuleRequestError::global(
+            RuleRequestErrorKind::TooManyOverrides,
+        ));
     }
 
     let mut rule_ids = BTreeSet::new();
     for rule in &request.rules {
         if rule.rule_id() == 0 {
-            return Err(RuleRequestError {
-                rule_id: Some(0),
-                kind: RuleRequestErrorKind::InvalidRuleId,
-            });
+            return Err(RuleRequestError::rule(
+                0,
+                RuleRequestErrorKind::InvalidRuleId,
+            ));
         }
         if !rule_ids.insert(rule.rule_id()) {
-            return Err(RuleRequestError {
-                rule_id: Some(rule.rule_id()),
-                kind: RuleRequestErrorKind::DuplicateRuleId,
-            });
+            return Err(RuleRequestError::rule(
+                rule.rule_id(),
+                RuleRequestErrorKind::DuplicateRuleId,
+            ));
         }
         if rule.has_oversized_text() {
-            return Err(RuleRequestError {
-                rule_id: Some(rule.rule_id()),
-                kind: RuleRequestErrorKind::RuleTextTooLong,
-            });
+            return Err(RuleRequestError::rule(
+                rule.rule_id(),
+                RuleRequestErrorKind::RuleTextTooLong,
+            ));
         }
         if let Some(kind) = rule.numeric_error() {
-            return Err(RuleRequestError {
-                rule_id: Some(rule.rule_id()),
-                kind,
-            });
+            return Err(RuleRequestError::rule(rule.rule_id(), kind));
         }
         if let Some(kind) = rule.structural_error() {
-            return Err(RuleRequestError {
-                rule_id: Some(rule.rule_id()),
-                kind,
-            });
+            return Err(RuleRequestError::rule(rule.rule_id(), kind));
+        }
+    }
+
+    let mut override_ids = BTreeSet::new();
+    for name_override in &request.overrides {
+        if name_override.source_id == 0 {
+            return Err(RuleRequestError::source(
+                0,
+                RuleRequestErrorKind::InvalidOverrideSourceId,
+            ));
+        }
+        if !override_ids.insert(name_override.source_id) {
+            return Err(RuleRequestError::source(
+                name_override.source_id,
+                RuleRequestErrorKind::DuplicateOverrideSourceId,
+            ));
+        }
+        if name_override.value.len() > MAX_OVERRIDE_TEXT_BYTES {
+            return Err(RuleRequestError::source(
+                name_override.source_id,
+                RuleRequestErrorKind::OverrideTextTooLong,
+            ));
         }
     }
 
@@ -1158,12 +1368,30 @@ fn compile_rule_request(
                 RuleValidationErrorKind::InvalidExtensionReplacement => {
                     RuleRequestErrorKind::InvalidExtensionReplacement
                 }
+                RuleValidationErrorKind::InvalidRangeLength => {
+                    RuleRequestErrorKind::InvalidRangeLength
+                }
             };
-            RuleRequestError { rule_id, kind }
+            RuleRequestError {
+                rule_id,
+                source_id: None,
+                kind,
+            }
         })?;
+    let overrides = request
+        .overrides
+        .iter()
+        .map(|name_override| {
+            NameOverride::new(
+                renamewright_core::SourceId::new(name_override.source_id),
+                &name_override.value,
+            )
+        })
+        .collect();
     Ok(CompiledRuleRequest {
         pipeline,
         active_rule_ids,
+        overrides,
     })
 }
 
@@ -1223,6 +1451,7 @@ impl From<&RenamePlan> for PlanDto {
                         .iter()
                         .map(|diagnostic| diagnostic_name(diagnostic.code()))
                         .collect(),
+                    override_applied: row.override_applied(),
                 })
                 .collect(),
             changed_count: plan.changed_count(),
@@ -1663,13 +1892,14 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     fn from(stored: &'a StoredPlan) -> Self {
         let plan = &stored.plan;
         Self {
-            schema_version: 4,
+            schema_version: 5,
             protocol_version: PROTOCOL_VERSION,
             rule_schema_version: stored.rule_request.schema_version,
             product: "Renamewright",
             plan_id: plan.id().value(),
             source_generation: plan.generation(),
             rules: &stored.rule_request.rules,
+            overrides: &stored.rule_request.overrides,
             summary: PlanSummaryDocument {
                 source_count: plan.rows().len(),
                 changed_count: plan.changed_count(),
@@ -1689,6 +1919,7 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
                         .iter()
                         .map(|diagnostic| diagnostic_name(diagnostic.code()))
                         .collect(),
+                    override_applied: row.override_applied(),
                     trace: row
                         .trace()
                         .iter()
@@ -1865,7 +2096,8 @@ mod tests {
     use std::fs;
 
     use renamewright_core::{
-        ParentId, PlanId, SourceId, SourceSnapshot, TargetPolicy, build_plan_with_rule_pipeline,
+        ParentId, PlanId, SourceId, SourceSnapshot, TargetPolicy, ValidationEnvironment,
+        build_plan_with_rule_pipeline_overrides_and_environment,
     };
     #[cfg(target_os = "linux")]
     use renamewright_core::{RenameRule, build_plan_with_environment};
@@ -1876,11 +2108,13 @@ mod tests {
     };
 
     use super::{
-        AppState, CaseModeDto, ExtensionOperationDto, FilenamePartDto, LedgerEntryDto,
-        RULE_PIPELINE_SCHEMA_VERSION, RulePipelineRequestDto, RuleRequestDto, RuleRequestErrorKind,
-        SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, StoredPlan,
-        UnicodeNormalizationFormDto, admit_dropped_sources, compile_rule_request,
-        export_write_error, plan_document_json, write_new_document,
+        AppState, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
+        ExtensionOperationDto, FilenamePartDto, LedgerEntryDto, RULE_PIPELINE_SCHEMA_VERSION,
+        RangeOperationDto, RangeOriginDto, RulePipelineRequestDto, RuleRequestDto,
+        RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto,
+        SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto, admit_dropped_sources,
+        compile_rule_request, export_write_error, plan_document_json, plan_from_registry,
+        write_new_document,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -1920,6 +2154,10 @@ mod tests {
         );
         let request = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: vec![SourceOverrideDto {
+                source_id: 7,
+                value: "manual.md".to_owned(),
+            }],
             rules: vec![
                 RuleRequestDto::Prefix {
                     rule_id: 7,
@@ -1961,15 +2199,33 @@ mod tests {
                     placement: SequencePlacementDto::Suffix,
                     separator: "-".to_owned(),
                 },
+                RuleRequestDto::Range {
+                    rule_id: 29,
+                    enabled: true,
+                    target: FilenamePartDto::Stem,
+                    operation: RangeOperationDto::Keep,
+                    origin: RangeOriginDto::Start,
+                    offset: 0,
+                    length: None,
+                },
+                RuleRequestDto::CharacterClass {
+                    rule_id: 31,
+                    enabled: true,
+                    target: FilenamePartDto::Stem,
+                    operation: CharacterClassOperationDto::Remove,
+                    class: CharacterClassDto::Punctuation,
+                },
             ],
         };
         let compiled = compile_rule_request(&request)?;
-        let plan = build_plan_with_rule_pipeline(
+        let plan = build_plan_with_rule_pipeline_overrides_and_environment(
             PlanId::new(11),
             4,
             &[source],
             &compiled.pipeline,
+            &compiled.overrides,
             TargetPolicy::windows(),
+            &ValidationEnvironment::default(),
         );
         *state.latest_plan.lock().map_err(|_| "plan lock failed")? = Some(StoredPlan {
             plan,
@@ -1980,9 +2236,9 @@ mod tests {
         let document = plan_document_json(11, &state)?;
         let value: serde_json::Value = serde_json::from_str(&document)?;
 
-        assert_eq!(value["schemaVersion"], 4);
-        assert_eq!(value["protocolVersion"], 4);
-        assert_eq!(value["ruleSchemaVersion"], 3);
+        assert_eq!(value["schemaVersion"], 5);
+        assert_eq!(value["protocolVersion"], 5);
+        assert_eq!(value["ruleSchemaVersion"], 4);
         assert_eq!(value["planId"], 11);
         assert_eq!(value["rules"][0]["ruleId"], 7);
         assert_eq!(value["rules"][1]["kind"], "extension");
@@ -1995,7 +2251,13 @@ mod tests {
         assert_eq!(value["rules"][5]["scope"], "allSources");
         assert_eq!(value["rules"][5]["order"], "sourceOrder");
         assert_eq!(value["rules"][5]["padding"], 3);
-        assert_eq!(value["rows"][0]["proposedDisplay"], "final_réport.md-003");
+        assert_eq!(value["rules"][6]["kind"], "range");
+        assert_eq!(value["rules"][6]["length"], serde_json::Value::Null);
+        assert_eq!(value["rules"][7]["class"], "punctuation");
+        assert_eq!(value["overrides"][0]["sourceId"], 7);
+        assert_eq!(value["overrides"][0]["value"], "manual.md");
+        assert_eq!(value["rows"][0]["proposedDisplay"], "manual.md");
+        assert_eq!(value["rows"][0]["overrideApplied"], true);
         assert_eq!(value["rows"][0]["trace"][0]["ruleId"], 7);
         assert_eq!(value["rows"][0]["trace"][1]["ruleId"], 9);
         assert_eq!(value["rows"][0]["trace"][2]["ruleId"], 13);
@@ -2008,6 +2270,7 @@ mod tests {
     fn rule_request_validation_is_versioned_and_pathless() -> Result<(), Box<dyn Error>> {
         let invalid_regex = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
             rules: vec![RuleRequestDto::RegexReplace {
                 rule_id: 41,
                 enabled: true,
@@ -2017,6 +2280,7 @@ mod tests {
         };
         let duplicate = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
             rules: vec![
                 RuleRequestDto::Prefix {
                     rule_id: 5,
@@ -2032,6 +2296,7 @@ mod tests {
         };
         let oversized_disabled = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
             rules: vec![RuleRequestDto::Prefix {
                 rule_id: 73,
                 enabled: false,
@@ -2040,6 +2305,7 @@ mod tests {
         };
         let invalid_sequence = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
             rules: vec![RuleRequestDto::Sequence {
                 rule_id: 89,
                 enabled: false,
@@ -2054,6 +2320,7 @@ mod tests {
         };
         let invalid_padding = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
             rules: vec![RuleRequestDto::Sequence {
                 rule_id: 97,
                 enabled: true,
@@ -2068,6 +2335,7 @@ mod tests {
         };
         let invalid_start = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
             rules: vec![RuleRequestDto::Sequence {
                 rule_id: 101,
                 enabled: true,
@@ -2082,12 +2350,92 @@ mod tests {
         };
         let invalid_extension = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
             rules: vec![RuleRequestDto::Extension {
                 rule_id: 103,
                 enabled: false,
                 operation: ExtensionOperationDto::Replace,
                 value: ".sensitive-extension".to_owned(),
             }],
+        };
+        let invalid_range = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
+            rules: vec![RuleRequestDto::Range {
+                rule_id: 107,
+                enabled: false,
+                target: FilenamePartDto::WholeName,
+                operation: RangeOperationDto::Keep,
+                origin: RangeOriginDto::Start,
+                offset: 0,
+                length: Some(0),
+            }],
+        };
+        let oversized_range_offset = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
+            rules: vec![RuleRequestDto::Range {
+                rule_id: 109,
+                enabled: true,
+                target: FilenamePartDto::Stem,
+                operation: RangeOperationDto::Remove,
+                origin: RangeOriginDto::End,
+                offset: super::MAX_RANGE_INPUT + 1,
+                length: None,
+            }],
+        };
+        let oversized_range_length = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
+            rules: vec![RuleRequestDto::Range {
+                rule_id: 113,
+                enabled: true,
+                target: FilenamePartDto::Extension,
+                operation: RangeOperationDto::Keep,
+                origin: RangeOriginDto::Start,
+                offset: 0,
+                length: Some(super::MAX_RANGE_INPUT + 1),
+            }],
+        };
+        let duplicate_override = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: Vec::new(),
+            overrides: vec![
+                SourceOverrideDto {
+                    source_id: 11,
+                    value: "first-private-name.txt".to_owned(),
+                },
+                SourceOverrideDto {
+                    source_id: 11,
+                    value: "second-private-name.txt".to_owned(),
+                },
+            ],
+        };
+        let oversized_override = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: Vec::new(),
+            overrides: vec![SourceOverrideDto {
+                source_id: 13,
+                value: "private".repeat(renamewright_core::MAX_OVERRIDE_TEXT_BYTES + 1),
+            }],
+        };
+        let invalid_override_id = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: Vec::new(),
+            overrides: vec![SourceOverrideDto {
+                source_id: 0,
+                value: "private-zero.txt".to_owned(),
+            }],
+        };
+        let too_many_overrides = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: Vec::new(),
+            overrides: (1..=renamewright_core::MAX_OVERRIDES + 1)
+                .map(|source_id| SourceOverrideDto {
+                    source_id: source_id as u64,
+                    value: String::new(),
+                })
+                .collect(),
         };
 
         let regex_error = compile_rule_request(&invalid_regex).err();
@@ -2097,6 +2445,13 @@ mod tests {
         let padding_error = compile_rule_request(&invalid_padding).err();
         let start_error = compile_rule_request(&invalid_start).err();
         let extension_error = compile_rule_request(&invalid_extension).err();
+        let range_error = compile_rule_request(&invalid_range).err();
+        let range_offset_error = compile_rule_request(&oversized_range_offset).err();
+        let range_length_error = compile_rule_request(&oversized_range_length).err();
+        let duplicate_override_error = compile_rule_request(&duplicate_override).err();
+        let oversized_override_error = compile_rule_request(&oversized_override).err();
+        let invalid_override_id_error = compile_rule_request(&invalid_override_id).err();
+        let too_many_overrides_error = compile_rule_request(&too_many_overrides).err();
 
         assert_eq!(
             regex_error.map(|error| (error.rule_id, error.kind)),
@@ -2126,6 +2481,34 @@ mod tests {
             extension_error.map(|error| (error.rule_id, error.kind)),
             Some((Some(103), RuleRequestErrorKind::InvalidExtensionReplacement))
         );
+        assert_eq!(
+            range_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(107), RuleRequestErrorKind::InvalidRangeLength))
+        );
+        assert_eq!(
+            range_offset_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(109), RuleRequestErrorKind::InvalidRangeOffset))
+        );
+        assert_eq!(
+            range_length_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(113), RuleRequestErrorKind::InvalidRangeLength))
+        );
+        assert_eq!(
+            duplicate_override_error.map(|error| (error.source_id, error.kind)),
+            Some((Some(11), RuleRequestErrorKind::DuplicateOverrideSourceId))
+        );
+        assert_eq!(
+            oversized_override_error.map(|error| (error.source_id, error.kind)),
+            Some((Some(13), RuleRequestErrorKind::OverrideTextTooLong))
+        );
+        assert_eq!(
+            invalid_override_id_error.map(|error| (error.source_id, error.kind)),
+            Some((Some(0), RuleRequestErrorKind::InvalidOverrideSourceId))
+        );
+        assert_eq!(
+            too_many_overrides_error.map(|error| error.kind),
+            Some(RuleRequestErrorKind::TooManyOverrides)
+        );
         assert!(
             !extension_error
                 .map_or(String::new(), |error| error.to_string())
@@ -2136,6 +2519,11 @@ mod tests {
                 .map_or(String::new(), |error| error.to_string())
                 .contains('/')
         );
+        assert!(
+            !duplicate_override_error
+                .map_or(String::new(), |error| error.to_string())
+                .contains("private-name")
+        );
         let error_json = serde_json::to_value(
             regex_error
                 .map(super::PlanningCommandErrorDto::from)
@@ -2144,6 +2532,27 @@ mod tests {
         assert_eq!(error_json["code"], "invalidRegex");
         assert_eq!(error_json["ruleId"], 41);
         assert_eq!(error_json.as_object().map(serde_json::Map::len), Some(2));
+
+        let state = AppState::default();
+        let unknown_override = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: Vec::new(),
+            overrides: vec![SourceOverrideDto {
+                source_id: 99,
+                value: "unknown-private-name.txt".to_owned(),
+            }],
+        };
+        let unknown_json = {
+            let mut registry = state.registry.lock().map_err(|_| "registry lock failed")?;
+            let error = plan_from_registry(&mut registry, unknown_override, &state)
+                .err()
+                .ok_or("expected unknown override error")?;
+            serde_json::to_value(error)?
+        };
+        assert_eq!(unknown_json["code"], "unknownOverrideSource");
+        assert_eq!(unknown_json["sourceId"], 99);
+        assert_eq!(unknown_json.as_object().map(serde_json::Map::len), Some(2));
+        assert!(!unknown_json.to_string().contains("private-name"));
         Ok(())
     }
 

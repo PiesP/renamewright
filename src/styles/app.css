@@ -413,6 +413,11 @@ select:focus-visible {
   color: var(--color-muted);
 }
 
+.input-shell input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .input-shell > span {
   font-weight: 800;
   text-align: center;
@@ -809,6 +814,62 @@ select:focus-visible {
 .proposed-name {
   color: var(--color-accent);
   font-weight: 680;
+}
+
+.proposed-name-content,
+.override-editor {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.override-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.override-badge {
+  padding: 0.125rem var(--space-2);
+  border: var(--rule-thin) solid var(--color-accent);
+  border-radius: 999px;
+  color: var(--color-accent);
+  font-size: 0.625rem;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.table-action {
+  min-height: 1.75rem;
+  padding-inline: var(--space-2);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-raised);
+  color: var(--color-ink-soft);
+  cursor: pointer;
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
+.table-action:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.table-action-reset {
+  color: var(--color-error);
+}
+
+.override-editor input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2rem;
+  padding-inline: var(--space-2);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-raised);
 }
 
 .status {
