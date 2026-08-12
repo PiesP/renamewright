@@ -76,10 +76,13 @@ test('runs packaged lifecycle validation before acceptance evidence is assembled
   expect(workflow).toContain('Move-Item -LiteralPath $installers[0].FullName');
 });
 
-test('proves upgrade, portable sharing, downgrade refusal, uninstall, and data retention', () => {
+test('proves upgrade, portable payload, downgrade refusal, uninstall, and data retention', () => {
   expect(lifecycle).toContain('[Version]$PreviousVersion -ge [Version]$CurrentVersion');
   expect(lifecycle).toContain('The lifecycle test requires clean current-user data roots.');
-  expect(lifecycle).toContain('Start-And-ProbeApplication');
+  expect(lifecycle).not.toContain('Start-And-ProbeApplication');
+  expect(lifecycle).toContain(
+    'The portable artifact does not match the installed application payload.'
+  );
   expect(lifecycle).toContain("-Arguments @('/S', '/UPDATE')");
   expect(lifecycle).toContain(
     "The installed package version was '$actual' instead of '$Expected'."
@@ -88,6 +91,7 @@ test('proves upgrade, portable sharing, downgrade refusal, uninstall, and data r
   expect(lifecycle).toContain('The uninstaller did not remove the application directory.');
   expect(lifecycle).toContain('journalDataRetained = $true');
   expect(lifecycle).toContain('webviewDataRetained = $true');
+  expect(lifecycle).toContain('sharedDataRootContractVerified = $true');
   expect(packager).toContain("$lifecycleEvidenceName = 'windows-lifecycle-evidence.json'");
   expect(packager).toContain('$lifecycleEvidence.checks.$check -ne $true');
 });

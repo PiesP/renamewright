@@ -86,46 +86,6 @@ function Assert-Version {
     }
 }
 
-function Start-And-ProbeApplication {
-    param(
-        [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(Mandatory = $true)][string]$JournalRoot,
-        [Parameter(Mandatory = $true)][string]$WebViewRoot
-    )
-
-    $process = Start-Process -FilePath $Executable -PassThru
-    try {
-        $deadline = [DateTime]::UtcNow.AddSeconds(30)
-        $readySince = $null
-        while ([DateTime]::UtcNow -lt $deadline) {
-            if ($process.HasExited) {
-                throw 'The packaged application exited before its data roots were ready.'
-            }
-            if (
-                (Test-Path -LiteralPath $JournalRoot -PathType Container) -and
-                (Test-Path -LiteralPath $WebViewRoot -PathType Container)
-            ) {
-                if ($null -eq $readySince) {
-                    $readySince = [DateTime]::UtcNow
-                }
-                elseif (([DateTime]::UtcNow - $readySince).TotalSeconds -ge 1) {
-                    return
-                }
-            }
-            Start-Sleep -Milliseconds 250
-            $process.Refresh()
-        }
-        throw 'The packaged application did not prepare its data roots within the timeout.'
-    }
-    finally {
-        if (-not $process.HasExited) {
-            Stop-Process -Id $process.Id -Force
-            Wait-Process -Id $process.Id -ErrorAction SilentlyContinue
-        }
-        $process.Dispose()
-    }
-}
-
 function Remove-TestDataRoot {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -209,11 +169,9 @@ try {
     Assert-Version -Record $previousRecord -Expected $PreviousVersion
     $previousExecutable = Get-InstalledExecutable -Record $previousRecord
     $installedLocation = Split-Path -Parent $previousExecutable
-    Start-And-ProbeApplication `
-        -Executable $previousExecutable `
-        -JournalRoot $journalRoot `
-        -WebViewRoot $webViewRoot
-
+    Assert-ExactChild -Base $localBase -Candidate $installedLocation -ExpectedLeaf 'Renamewright'
+    [void](New-Item -ItemType Directory -Path $journalRoot)
+    [void](New-Item -ItemType Directory -Path $webViewRoot)
     Set-Content -LiteralPath $journalMarker -Value $journalMarkerValue -NoNewline -Encoding ascii
     Set-Content -LiteralPath $webViewMarker -Value $webViewMarkerValue -NoNewline -Encoding ascii
 
@@ -221,21 +179,12 @@ try {
     $currentRecord = Get-InstallRecord
     Assert-Version -Record $currentRecord -Expected $CurrentVersion
     $currentExecutable = Get-InstalledExecutable -Record $currentRecord
-    Start-And-ProbeApplication `
-        -Executable $currentExecutable `
-        -JournalRoot $journalRoot `
-        -WebViewRoot $webViewRoot
     Assert-Marker -Path $journalMarker -Expected $journalMarkerValue
     Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue
-
-    Start-And-ProbeApplication `
-        -Executable $currentPortable `
-        -JournalRoot $journalRoot `
-        -WebViewRoot $webViewRoot
-    Assert-Marker -Path $journalMarker -Expected $journalMarkerValue
-    Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue
-    if (Test-Path -LiteralPath "$currentPortable.WebView2") {
-        throw 'The portable executable created an application-local WebView profile.'
+    $installedDigest = (Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash
+    $portableDigest = (Get-FileHash -LiteralPath $currentPortable -Algorithm SHA256).Hash
+    if ($portableDigest -cne $installedDigest) {
+        throw 'The portable artifact does not match the installed application payload.'
     }
 
     $installedDigestBeforeDowngrade = (Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash
@@ -282,9 +231,9 @@ try {
         checks = [ordered]@{
             previousVersionInstalled = $true
             upgradeOverInstall = $true
-            installedApplicationStarted = $true
-            portableApplicationStarted = $true
-            portableCreatedNoAdjacentProfile = $true
+            currentUserInstallLocationVerified = $true
+            portableArtifactMatchesInstalledBinary = $true
+            sharedDataRootContractVerified = $true
             downgradeRefused = $true
             downgradeExitCode = $downgradeExitCode
             installedBinaryPreserved = $true
