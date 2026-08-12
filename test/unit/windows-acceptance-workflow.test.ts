@@ -22,7 +22,7 @@ test('keeps Windows acceptance manual, read-only, pinned, and source-bound', () 
 
 test('builds a deliberately unsigned NSIS package behind the native test gate', () => {
   const testIndex = workflow.indexOf('cargo test --workspace --all-targets --locked');
-  const buildIndex = workflow.indexOf('pnpm tauri build --ci --bundles nsis --no-sign');
+  const buildIndex = workflow.lastIndexOf('pnpm tauri build --ci --bundles nsis --no-sign');
   const uploadIndex = workflow.indexOf('actions/upload-artifact@');
 
   expect(testIndex).toBeGreaterThan(0);
@@ -61,24 +61,28 @@ test('makes current-user data retention and downgrade refusal explicit package p
 });
 
 test('runs packaged lifecycle validation before acceptance evidence is assembled', () => {
-  const currentBuildIndex = workflow.indexOf('Build the unsigned Windows acceptance package');
   const previousBuildIndex = workflow.indexOf('Build the previous-version compatibility fixture');
+  const currentBuildIndex = workflow.indexOf('Build the unsigned Windows acceptance package');
   const lifecycleIndex = workflow.indexOf(
     'Verify install, upgrade, portable, downgrade, and uninstall behavior'
   );
   const prepareIndex = workflow.indexOf('Prepare the source-bound acceptance artifact');
 
-  expect(currentBuildIndex).toBeGreaterThan(0);
-  expect(previousBuildIndex).toBeGreaterThan(currentBuildIndex);
-  expect(lifecycleIndex).toBeGreaterThan(previousBuildIndex);
+  expect(previousBuildIndex).toBeGreaterThan(0);
+  expect(currentBuildIndex).toBeGreaterThan(previousBuildIndex);
+  expect(lifecycleIndex).toBeGreaterThan(currentBuildIndex);
   expect(prepareIndex).toBeGreaterThan(lifecycleIndex);
   expect(workflow).toContain('-LifecycleEvidencePath $env:LIFECYCLE_EVIDENCE_PATH');
+  expect(workflow).toContain('Move-Item -LiteralPath $installers[0].FullName');
 });
 
 test('proves upgrade, portable sharing, downgrade refusal, uninstall, and data retention', () => {
   expect(lifecycle).toContain('[Version]$PreviousVersion -ge [Version]$CurrentVersion');
   expect(lifecycle).toContain('The lifecycle test requires clean current-user data roots.');
   expect(lifecycle).toContain('Start-And-ProbeApplication');
+  expect(lifecycle).toContain(
+    "The installed package version was '$actual' instead of '$Expected'."
+  );
   expect(lifecycle).toContain('The refused downgrade changed the installed executable.');
   expect(lifecycle).toContain('The uninstaller did not remove the application directory.');
   expect(lifecycle).toContain('journalDataRetained = $true');
