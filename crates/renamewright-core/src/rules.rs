@@ -6,7 +6,26 @@ use regex::{Regex, RegexBuilder};
 
 pub const MAX_RULES: usize = 32;
 pub const MAX_RULE_TEXT_BYTES: usize = 4_096;
+pub const MAX_SEQUENCE_PADDING: u8 = 20;
 const MAX_COMPILED_REGEX_BYTES: usize = 1_048_576;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequenceScope {
+    AllSources,
+    PerParent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequenceOrder {
+    Source,
+    NameAscending,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequencePlacement {
+    Prefix,
+    Suffix,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RenameRule {
@@ -23,6 +42,15 @@ pub enum RenameRule {
     RegexReplace {
         pattern: String,
         replacement: String,
+    },
+    Sequence {
+        scope: SequenceScope,
+        order: SequenceOrder,
+        start: u64,
+        step: u64,
+        padding: u8,
+        placement: SequencePlacement,
+        separator: String,
     },
 }
 
@@ -56,6 +84,27 @@ impl RenameRule {
             replacement: replacement.into(),
         }
     }
+
+    #[must_use]
+    pub fn sequence(
+        scope: SequenceScope,
+        order: SequenceOrder,
+        start: u64,
+        step: u64,
+        padding: u8,
+        placement: SequencePlacement,
+        separator: impl Into<String>,
+    ) -> Self {
+        Self::Sequence {
+            scope,
+            order,
+            start,
+            step,
+            padding,
+            placement,
+            separator: separator.into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +113,8 @@ pub enum RuleValidationErrorKind {
     RuleTextTooLong,
     EmptyLiteralSearch,
     InvalidRegex,
+    InvalidSequenceStep,
+    InvalidSequencePadding,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,8 +151,31 @@ impl Error for RuleValidationError {}
 enum CompiledRule {
     Prefix(String),
     Suffix(String),
-    LiteralReplace { search: String, replacement: String },
-    RegexReplace { regex: Regex, replacement: String },
+    LiteralReplace {
+        search: String,
+        replacement: String,
+    },
+    RegexReplace {
+        regex: Regex,
+        replacement: String,
+    },
+    Sequence {
+        scope: SequenceScope,
+        order: SequenceOrder,
+        start: u64,
+        step: u64,
+        padding: u8,
+        placement: SequencePlacement,
+        separator: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SequenceAllocation {
+    pub(crate) scope: SequenceScope,
+    pub(crate) order: SequenceOrder,
+    pub(crate) start: u64,
+    pub(crate) step: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -131,10 +205,29 @@ impl RulePipeline {
         &self.rules
     }
 
+    pub(crate) fn sequence_allocation(&self, index: usize) -> Option<SequenceAllocation> {
+        match self.compiled.get(index) {
+            Some(CompiledRule::Sequence {
+                scope,
+                order,
+                start,
+                step,
+                ..
+            }) => Some(SequenceAllocation {
+                scope: *scope,
+                order: *order,
+                start: *start,
+                step: *step,
+            }),
+            _ => None,
+        }
+    }
+
     pub(crate) fn apply_rule(
         &self,
         index: usize,
         name: &OsStr,
+        sequence_value: Option<u64>,
     ) -> Result<OsString, RuleApplicationError> {
         let Some(rule) = self.compiled.get(index) else {
             return Ok(name.to_os_string());
@@ -161,6 +254,29 @@ impl RulePipeline {
                 .to_str()
                 .map(|text| OsString::from(regex.replace_all(text, replacement).as_ref()))
                 .ok_or(RuleApplicationError::UnsupportedEncoding),
+            CompiledRule::Sequence {
+                padding,
+                placement,
+                separator,
+                ..
+            } => {
+                let value = sequence_value.ok_or(RuleApplicationError::SequenceOverflow)?;
+                let number = format!("{value:0width$}", width = usize::from(*padding));
+                let mut proposed = OsString::new();
+                match placement {
+                    SequencePlacement::Prefix => {
+                        proposed.push(number);
+                        proposed.push(separator);
+                        proposed.push(name);
+                    }
+                    SequencePlacement::Suffix => {
+                        proposed.push(name);
+                        proposed.push(separator);
+                        proposed.push(number);
+                    }
+                }
+                Ok(proposed)
+            }
         }
     }
 }
@@ -168,6 +284,7 @@ impl RulePipeline {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RuleApplicationError {
     UnsupportedEncoding,
+    SequenceOverflow,
 }
 
 fn compile_rule(index: usize, rule: &RenameRule) -> Result<CompiledRule, RuleValidationError> {
@@ -213,6 +330,38 @@ fn compile_rule(index: usize, rule: &RenameRule) -> Result<CompiledRule, RuleVal
             Ok(CompiledRule::RegexReplace {
                 regex,
                 replacement: replacement.clone(),
+            })
+        }
+        RenameRule::Sequence {
+            scope,
+            order,
+            start,
+            step,
+            padding,
+            placement,
+            separator,
+        } => {
+            validate_text(index, invalid_text(&[separator]))?;
+            if *step == 0 {
+                return Err(RuleValidationError::new(
+                    Some(index),
+                    RuleValidationErrorKind::InvalidSequenceStep,
+                ));
+            }
+            if !(1..=MAX_SEQUENCE_PADDING).contains(padding) {
+                return Err(RuleValidationError::new(
+                    Some(index),
+                    RuleValidationErrorKind::InvalidSequencePadding,
+                ));
+            }
+            Ok(CompiledRule::Sequence {
+                scope: *scope,
+                order: *order,
+                start: *start,
+                step: *step,
+                padding: *padding,
+                placement: *placement,
+                separator: separator.clone(),
             })
         }
     }

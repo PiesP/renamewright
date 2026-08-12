@@ -330,6 +330,26 @@ select:focus-visible {
   margin-block-start: var(--space-3);
 }
 
+.rule-field select {
+  width: 100%;
+  min-height: var(--control-height);
+  padding-inline: var(--space-3);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-raised);
+}
+
+.sequence-number-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-block: var(--space-3);
+}
+
+.sequence-number-fields .rule-field + .rule-field {
+  margin-block-start: 0;
+}
+
 .empty-rules {
   margin: 0;
   padding-block: var(--space-6);
@@ -396,6 +416,18 @@ select:focus-visible {
 .input-shell > span {
   font-weight: 800;
   text-align: center;
+}
+
+.sequence-number-fields .input-shell {
+  grid-template-columns: minmax(0, 1fr) 1rem;
+}
+
+.sequence-number-fields .input-shell > span:empty {
+  display: none;
+}
+
+.sequence-number-fields input {
+  padding-inline: var(--space-2);
 }
 
 .field-help {

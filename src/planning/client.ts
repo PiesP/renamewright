@@ -152,10 +152,15 @@ interface BrowserPlanResult {
 
 function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
   const traces = new Map<number, RuleTraceStep[]>();
-  const applyRules = compileBrowserRulePipeline(request);
-  const rows = sampleNames.map((originalName, index): PlanRow => {
-    const sourceId = index + 1;
-    const { proposedName, trace } = applyRules(originalName);
+  const sources = sampleNames.map((originalName, index) => ({
+    sourceId: index + 1,
+    parentId: 1,
+    originalName,
+  }));
+  const applyRules = compileBrowserRulePipeline(request, sources);
+  const rows = sources.map((source): PlanRow => {
+    const { sourceId, originalName } = source;
+    const { proposedName, trace, diagnostic } = applyRules(source);
     traces.set(sourceId, trace);
     const illegal = [...proposedName].some((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
@@ -163,8 +168,10 @@ function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
     });
     const trailing = /[. ]$/u.test(proposedName);
     const reserved = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/iu.test(proposedName);
-    const blocked = illegal || trailing || reserved || proposedName.length > 255;
+    const blocked =
+      diagnostic !== undefined || illegal || trailing || reserved || proposedName.length > 255;
     const diagnostics = [
+      ...(diagnostic ? [diagnostic] : []),
       ...(illegal ? ['illegalCharacter'] : []),
       ...(trailing ? ['trailingDotOrSpace'] : []),
       ...(reserved ? ['reservedName'] : []),
@@ -251,8 +258,8 @@ export function createPlanningClient(): PlanningClient {
     const { plan, request, traces } = latestBrowserPlan;
     return JSON.stringify(
       {
-        schemaVersion: 2,
-        protocolVersion: 2,
+        schemaVersion: 3,
+        protocolVersion: 3,
         ruleSchemaVersion: request.schemaVersion,
         product: 'Renamewright',
         planId: plan.planId,

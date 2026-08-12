@@ -7,9 +7,10 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
-    DiagnosticCode, ExecutionDirection, MAX_RULE_TEXT_BYTES, MAX_RULES, NameStatus,
-    PROTOCOL_VERSION, PlanId, RenamePlan, RenameRule, RulePipeline, RuleValidationErrorKind,
-    TargetPolicy, build_plan_with_rule_pipeline_and_environment,
+    DiagnosticCode, ExecutionDirection, MAX_RULE_TEXT_BYTES, MAX_RULES, MAX_SEQUENCE_PADDING,
+    NameStatus, PROTOCOL_VERSION, PlanId, RenamePlan, RenameRule, RulePipeline,
+    RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope, TargetPolicy,
+    build_plan_with_rule_pipeline_and_environment,
 };
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
@@ -114,7 +115,29 @@ impl StoredPlan {
     }
 }
 
-const RULE_PIPELINE_SCHEMA_VERSION: u16 = 1;
+const RULE_PIPELINE_SCHEMA_VERSION: u16 = 2;
+const MAX_SEQUENCE_INPUT: u64 = 9_007_199_254_740_991;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum SequenceScopeDto {
+    AllSources,
+    PerParent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum SequenceOrderDto {
+    SourceOrder,
+    NameAscending,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum SequencePlacementDto {
+    Prefix,
+    Suffix,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -152,6 +175,17 @@ enum RuleRequestDto {
         pattern: String,
         replacement: String,
     },
+    Sequence {
+        rule_id: u64,
+        enabled: bool,
+        scope: SequenceScopeDto,
+        order: SequenceOrderDto,
+        start: u64,
+        step: u64,
+        padding: u64,
+        placement: SequencePlacementDto,
+        separator: String,
+    },
 }
 
 impl RuleRequestDto {
@@ -160,7 +194,8 @@ impl RuleRequestDto {
             Self::Prefix { rule_id, .. }
             | Self::Suffix { rule_id, .. }
             | Self::LiteralReplace { rule_id, .. }
-            | Self::RegexReplace { rule_id, .. } => *rule_id,
+            | Self::RegexReplace { rule_id, .. }
+            | Self::Sequence { rule_id, .. } => *rule_id,
         }
     }
 
@@ -169,7 +204,8 @@ impl RuleRequestDto {
             Self::Prefix { enabled, .. }
             | Self::Suffix { enabled, .. }
             | Self::LiteralReplace { enabled, .. }
-            | Self::RegexReplace { enabled, .. } => *enabled,
+            | Self::RegexReplace { enabled, .. }
+            | Self::Sequence { enabled, .. } => *enabled,
         }
     }
 
@@ -188,6 +224,24 @@ impl RuleRequestDto {
                 replacement,
                 ..
             } => pattern.len() > MAX_RULE_TEXT_BYTES || replacement.len() > MAX_RULE_TEXT_BYTES,
+            Self::Sequence { separator, .. } => separator.len() > MAX_RULE_TEXT_BYTES,
+        }
+    }
+
+    const fn numeric_error(&self) -> Option<RuleRequestErrorKind> {
+        match self {
+            Self::Sequence { start, .. } if *start > MAX_SEQUENCE_INPUT => {
+                Some(RuleRequestErrorKind::InvalidSequenceStart)
+            }
+            Self::Sequence { step, .. } if *step == 0 || *step > MAX_SEQUENCE_INPUT => {
+                Some(RuleRequestErrorKind::InvalidSequenceStep)
+            }
+            Self::Sequence { padding, .. }
+                if *padding == 0 || *padding > MAX_SEQUENCE_PADDING as u64 =>
+            {
+                Some(RuleRequestErrorKind::InvalidSequencePadding)
+            }
+            _ => None,
         }
     }
 
@@ -205,6 +259,33 @@ impl RuleRequestDto {
                 replacement,
                 ..
             } => RenameRule::regex_replace(pattern, replacement),
+            Self::Sequence {
+                scope,
+                order,
+                start,
+                step,
+                padding,
+                placement,
+                separator,
+                ..
+            } => RenameRule::sequence(
+                match scope {
+                    SequenceScopeDto::AllSources => SequenceScope::AllSources,
+                    SequenceScopeDto::PerParent => SequenceScope::PerParent,
+                },
+                match order {
+                    SequenceOrderDto::SourceOrder => SequenceOrder::Source,
+                    SequenceOrderDto::NameAscending => SequenceOrder::NameAscending,
+                },
+                *start,
+                *step,
+                u8::try_from(*padding).unwrap_or(0),
+                match placement {
+                    SequencePlacementDto::Prefix => SequencePlacement::Prefix,
+                    SequencePlacementDto::Suffix => SequencePlacement::Suffix,
+                },
+                separator,
+            ),
         }
     }
 }
@@ -218,6 +299,9 @@ enum RuleRequestErrorKind {
     RuleTextTooLong,
     EmptyLiteralSearch,
     InvalidRegex,
+    InvalidSequenceStart,
+    InvalidSequenceStep,
+    InvalidSequencePadding,
 }
 
 impl RuleRequestErrorKind {
@@ -230,6 +314,9 @@ impl RuleRequestErrorKind {
             Self::RuleTextTooLong => "ruleTextTooLong",
             Self::EmptyLiteralSearch => "emptyLiteralSearch",
             Self::InvalidRegex => "invalidRegex",
+            Self::InvalidSequenceStart => "invalidSequenceStart",
+            Self::InvalidSequenceStep => "invalidSequenceStep",
+            Self::InvalidSequencePadding => "invalidSequencePadding",
         }
     }
 }
@@ -910,6 +997,12 @@ fn compile_rule_request(
                 kind: RuleRequestErrorKind::RuleTextTooLong,
             });
         }
+        if let Some(kind) = rule.numeric_error() {
+            return Err(RuleRequestError {
+                rule_id: Some(rule.rule_id()),
+                kind,
+            });
+        }
     }
 
     let active = request
@@ -934,6 +1027,12 @@ fn compile_rule_request(
                     RuleRequestErrorKind::EmptyLiteralSearch
                 }
                 RuleValidationErrorKind::InvalidRegex => RuleRequestErrorKind::InvalidRegex,
+                RuleValidationErrorKind::InvalidSequenceStep => {
+                    RuleRequestErrorKind::InvalidSequenceStep
+                }
+                RuleValidationErrorKind::InvalidSequencePadding => {
+                    RuleRequestErrorKind::InvalidSequencePadding
+                }
             };
             RuleRequestError { rule_id, kind }
         })?;
@@ -1439,7 +1538,7 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     fn from(stored: &'a StoredPlan) -> Self {
         let plan = &stored.plan;
         Self {
-            schema_version: 2,
+            schema_version: 3,
             protocol_version: PROTOCOL_VERSION,
             rule_schema_version: stored.rule_request.schema_version,
             product: "Renamewright",
@@ -1521,6 +1620,7 @@ const fn diagnostic_name(code: DiagnosticCode) -> &'static str {
         DiagnosticCode::StaleSource => "staleSource",
         DiagnosticCode::ParentUnavailable => "parentUnavailable",
         DiagnosticCode::InvalidRule => "invalidRule",
+        DiagnosticCode::SequenceOverflow => "sequenceOverflow",
     }
 }
 
@@ -1652,8 +1752,9 @@ mod tests {
 
     use super::{
         AppState, LedgerEntryDto, RULE_PIPELINE_SCHEMA_VERSION, RulePipelineRequestDto,
-        RuleRequestDto, RuleRequestErrorKind, StoredPlan, admit_dropped_sources,
-        compile_rule_request, export_write_error, plan_document_json, write_new_document,
+        RuleRequestDto, RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto,
+        SequenceScopeDto, StoredPlan, admit_dropped_sources, compile_rule_request,
+        export_write_error, plan_document_json, write_new_document,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -1704,6 +1805,17 @@ mod tests {
                     enabled: true,
                     value: ".bak".to_owned(),
                 },
+                RuleRequestDto::Sequence {
+                    rule_id: 13,
+                    enabled: true,
+                    scope: SequenceScopeDto::AllSources,
+                    order: SequenceOrderDto::SourceOrder,
+                    start: 3,
+                    step: 2,
+                    padding: 3,
+                    placement: SequencePlacementDto::Suffix,
+                    separator: "-".to_owned(),
+                },
             ],
         };
         let compiled = compile_rule_request(&request)?;
@@ -1723,16 +1835,23 @@ mod tests {
         let document = plan_document_json(11, &state)?;
         let value: serde_json::Value = serde_json::from_str(&document)?;
 
-        assert_eq!(value["schemaVersion"], 2);
-        assert_eq!(value["protocolVersion"], 2);
-        assert_eq!(value["ruleSchemaVersion"], 1);
+        assert_eq!(value["schemaVersion"], 3);
+        assert_eq!(value["protocolVersion"], 3);
+        assert_eq!(value["ruleSchemaVersion"], 2);
         assert_eq!(value["planId"], 11);
         assert_eq!(value["rules"][0]["ruleId"], 7);
         assert_eq!(value["rules"][1]["kind"], "suffix");
         assert_eq!(value["rows"][0]["sourceId"], 7);
-        assert_eq!(value["rows"][0]["proposedDisplay"], "final-report.txt.bak");
+        assert_eq!(value["rules"][2]["scope"], "allSources");
+        assert_eq!(value["rules"][2]["order"], "sourceOrder");
+        assert_eq!(value["rules"][2]["padding"], 3);
+        assert_eq!(
+            value["rows"][0]["proposedDisplay"],
+            "final-report.txt.bak-003"
+        );
         assert_eq!(value["rows"][0]["trace"][0]["ruleId"], 7);
         assert_eq!(value["rows"][0]["trace"][1]["ruleId"], 9);
+        assert_eq!(value["rows"][0]["trace"][2]["ruleId"], 13);
         assert!(!document.contains('/'));
         Ok(())
     }
@@ -1771,10 +1890,55 @@ mod tests {
                 value: "x".repeat(renamewright_core::MAX_RULE_TEXT_BYTES + 1),
             }],
         };
+        let invalid_sequence = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: vec![RuleRequestDto::Sequence {
+                rule_id: 89,
+                enabled: false,
+                scope: SequenceScopeDto::PerParent,
+                order: SequenceOrderDto::NameAscending,
+                start: 1,
+                step: 0,
+                padding: 21,
+                placement: SequencePlacementDto::Prefix,
+                separator: "-".to_owned(),
+            }],
+        };
+        let invalid_padding = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: vec![RuleRequestDto::Sequence {
+                rule_id: 97,
+                enabled: true,
+                scope: SequenceScopeDto::AllSources,
+                order: SequenceOrderDto::SourceOrder,
+                start: 1,
+                step: 1,
+                padding: 21,
+                placement: SequencePlacementDto::Suffix,
+                separator: "".to_owned(),
+            }],
+        };
+        let invalid_start = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: vec![RuleRequestDto::Sequence {
+                rule_id: 101,
+                enabled: true,
+                scope: SequenceScopeDto::AllSources,
+                order: SequenceOrderDto::SourceOrder,
+                start: super::MAX_SEQUENCE_INPUT + 1,
+                step: 1,
+                padding: 1,
+                placement: SequencePlacementDto::Prefix,
+                separator: "-".to_owned(),
+            }],
+        };
 
         let regex_error = compile_rule_request(&invalid_regex).err();
         let duplicate_error = compile_rule_request(&duplicate).err();
         let oversized_error = compile_rule_request(&oversized_disabled).err();
+        let sequence_error = compile_rule_request(&invalid_sequence).err();
+        let padding_error = compile_rule_request(&invalid_padding).err();
+        let start_error = compile_rule_request(&invalid_start).err();
 
         assert_eq!(
             regex_error.map(|error| (error.rule_id, error.kind)),
@@ -1787,6 +1951,18 @@ mod tests {
         assert_eq!(
             oversized_error.map(|error| (error.rule_id, error.kind)),
             Some((Some(73), RuleRequestErrorKind::RuleTextTooLong))
+        );
+        assert_eq!(
+            sequence_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(89), RuleRequestErrorKind::InvalidSequenceStep))
+        );
+        assert_eq!(
+            padding_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(97), RuleRequestErrorKind::InvalidSequencePadding))
+        );
+        assert_eq!(
+            start_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(101), RuleRequestErrorKind::InvalidSequenceStart))
         );
         assert!(
             !regex_error
