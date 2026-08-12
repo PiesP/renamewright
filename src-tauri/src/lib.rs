@@ -936,6 +936,8 @@ struct PlanSummaryDocument {
     changed_count: usize,
     blocked_count: usize,
     can_apply: bool,
+    retained_trace_bytes: usize,
+    trace_truncated_row_count: usize,
 }
 
 #[derive(Serialize)]
@@ -947,6 +949,7 @@ struct PlanRowDocument<'a> {
     status: &'static str,
     diagnostics: Vec<&'static str>,
     override_applied: bool,
+    trace_truncated: bool,
     trace: Vec<TraceStepDocument<'a>>,
 }
 
@@ -2003,7 +2006,7 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     fn from(stored: &'a StoredPlan) -> Self {
         let plan = &stored.plan;
         Self {
-            schema_version: 5,
+            schema_version: 6,
             protocol_version: PROTOCOL_VERSION,
             rule_schema_version: stored.rule_request.schema_version,
             product: "Renamewright",
@@ -2016,6 +2019,8 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
                 changed_count: plan.changed_count(),
                 blocked_count: plan.blocked_count(),
                 can_apply: plan.can_apply(),
+                retained_trace_bytes: plan.retained_trace_bytes(),
+                trace_truncated_row_count: plan.trace_truncated_row_count(),
             },
             rows: plan
                 .rows()
@@ -2031,6 +2036,7 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
                         .map(|diagnostic| diagnostic_name(diagnostic.code()))
                         .collect(),
                     override_applied: row.override_applied(),
+                    trace_truncated: row.trace_truncated(),
                     trace: row
                         .trace()
                         .iter()
@@ -2348,7 +2354,7 @@ mod tests {
         let document = plan_document_json(11, &state)?;
         let value: serde_json::Value = serde_json::from_str(&document)?;
 
-        assert_eq!(value["schemaVersion"], 5);
+        assert_eq!(value["schemaVersion"], 6);
         assert_eq!(value["protocolVersion"], 5);
         assert_eq!(value["ruleSchemaVersion"], 4);
         assert_eq!(value["planId"], 11);
@@ -2370,6 +2376,9 @@ mod tests {
         assert_eq!(value["overrides"][0]["value"], "manual.md");
         assert_eq!(value["rows"][0]["proposedDisplay"], "manual.md");
         assert_eq!(value["rows"][0]["overrideApplied"], true);
+        assert_eq!(value["rows"][0]["traceTruncated"], false);
+        assert_eq!(value["summary"]["traceTruncatedRowCount"], 0);
+        assert!(value["summary"]["retainedTraceBytes"].as_u64().is_some());
         assert_eq!(value["rows"][0]["trace"][0]["ruleId"], 7);
         assert_eq!(value["rows"][0]["trace"][1]["ruleId"], 9);
         assert_eq!(value["rows"][0]["trace"][2]["ruleId"], 13);

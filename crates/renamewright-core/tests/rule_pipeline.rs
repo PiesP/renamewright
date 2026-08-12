@@ -3,10 +3,10 @@ use std::ffi::OsString;
 
 use renamewright_core::{
     CaseMode, CharacterClass, CharacterClassOperation, DiagnosticCode, FilenamePart,
-    MAX_RULE_OUTPUT_BYTES, MAX_RULES, ParentId, PlanId, RangeOperation, RangeOrigin, RenameRule,
-    RulePipeline, RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope,
-    SourceId, SourceSnapshot, TargetPolicy, UnicodeNormalizationForm,
-    build_plan_with_rule_pipeline,
+    MAX_PLAN_TRACE_BYTES, MAX_RULE_OUTPUT_BYTES, MAX_RULES, ParentId, PlanId, RangeOperation,
+    RangeOrigin, RenameRule, RulePipeline, RuleValidationErrorKind, SequenceOrder,
+    SequencePlacement, SequenceScope, SourceId, SourceSnapshot, TargetPolicy,
+    UnicodeNormalizationForm, build_plan_with_rule_pipeline,
 };
 
 fn source(name: &str) -> SourceSnapshot {
@@ -160,6 +160,45 @@ fn expanding_replacements_stop_before_oversized_trace() -> Result<(), Box<dyn Er
             .iter()
             .any(|diagnostic| diagnostic.code() == DiagnosticCode::NameTooLong)
     );
+    Ok(())
+}
+
+#[test]
+fn large_batch_trace_retention_is_bounded_without_changing_proposals() -> Result<(), Box<dyn Error>>
+{
+    let sources = (0..10_000)
+        .map(|index| {
+            SourceSnapshot::new(
+                SourceId::new(index + 1),
+                ParentId::new(index / 250 + 1),
+                OsString::from(format!("Quarterly review {index:05}.txt")),
+            )
+        })
+        .collect::<Vec<_>>();
+    let pipeline = RulePipeline::compile(
+        (0..MAX_RULES)
+            .map(|_| RenameRule::prefix("x".repeat(120)))
+            .collect(),
+    )?;
+
+    let plan = build_plan_with_rule_pipeline(
+        PlanId::new(10_000),
+        1,
+        &sources,
+        &pipeline,
+        TargetPolicy::windows(),
+    );
+
+    assert_eq!(plan.rows().len(), 10_000);
+    assert!(plan.rows().iter().all(|row| {
+        row.proposed_display()
+            .starts_with(&"x".repeat(120 * MAX_RULES))
+    }));
+    assert!(plan.retained_trace_bytes() <= MAX_PLAN_TRACE_BYTES);
+    assert!(plan.trace_truncated_row_count() > 0);
+    assert!(!plan.rows()[0].trace().is_empty());
+    assert!(plan.rows()[9_999].trace().is_empty());
+    assert!(plan.rows()[9_999].trace_truncated());
     Ok(())
 }
 

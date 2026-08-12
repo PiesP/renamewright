@@ -106,7 +106,7 @@ function fakeClient(): PlanningClient {
     selectSources: async (request) => makePlan(request),
     previewRules: async (request) => makePlan(request),
     inspectPlan: async (planId) =>
-      JSON.stringify({ schemaVersion: 5, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
+      JSON.stringify({ schemaVersion: 6, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
     exportPlan: async () => false,
     exportPlanCsv: async () => false,
     listLedger: async () => [],
@@ -864,6 +864,41 @@ test('uses the native picker instead of browser samples in the desktop shell', a
   expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
 });
 
+test('ignores a slow preview after a newer rule preview completes', async () => {
+  vi.useFakeTimers();
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const client = fakeClient();
+  const pending: Array<{
+    request: RulePipelineRequest;
+    resolve: (plan: Plan) => void;
+  }> = [];
+  client.previewRules = (request) =>
+    new Promise((resolve) => {
+      pending.push({ request, resolve });
+    });
+  render(() => <App client={client} />);
+
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  const prefix = screen.getByRole('textbox', { name: 'Prefix' });
+  await user.type(prefix, 'old-');
+  await vi.advanceTimersByTimeAsync(120);
+  expect(pending).toHaveLength(1);
+
+  await user.clear(prefix);
+  await user.type(prefix, 'new-');
+  await vi.advanceTimersByTimeAsync(120);
+  expect(pending).toHaveLength(2);
+
+  pending[1]?.resolve(makePlan(pending[1].request));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByText('new-invoice.pdf')).toBeInTheDocument();
+
+  pending[0]?.resolve(makePlan(pending[0].request));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByText('new-invoice.pdf')).toBeInTheDocument();
+  expect(screen.queryByText('old-invoice.pdf')).not.toBeInTheDocument();
+});
+
 test('refreshes the plan after Rust admits dropped sources', async () => {
   let notify: ((change: SourceChange) => void) | undefined;
   const client = fakeClient();
@@ -901,7 +936,7 @@ test('inspects and exports only the current opaque plan ID', async () => {
   await user.click(inspectButton);
 
   expect(inspectPlan).toHaveBeenCalledWith(9);
-  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 5');
+  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 6');
   await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
   expect(exportPlan).toHaveBeenCalledWith(9);
   expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');

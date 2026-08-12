@@ -2,7 +2,10 @@ import { expect, test } from 'vitest';
 import {
   applyBrowserRules,
   compileBrowserRulePipeline,
+  createBrowserTraceBudget,
+  MAX_PLAN_TRACE_BYTES,
   MAX_RULE_OUTPUT_BYTES,
+  MAX_RULES,
   PlanningError,
   RULE_PIPELINE_SCHEMA_VERSION,
   type RulePipelineRequest,
@@ -98,6 +101,7 @@ test('stops expanding replacements before an oversized name enters the browser t
     expect(applyBrowserRules('aaaaaaaa', request)).toEqual({
       proposedName: 'aaaaaaaa',
       trace: [],
+      traceTruncated: false,
       overrideApplied: false,
       diagnostic: 'nameTooLong',
     });
@@ -118,6 +122,35 @@ test('stops expanding replacements before an oversized name enters the browser t
   expect(new TextEncoder().encode(result.proposedName)).toHaveLength(MAX_RULE_OUTPUT_BYTES / 2 + 1);
   expect(result.trace).toHaveLength(1);
   expect(result.diagnostic).toBe('nameTooLong');
+});
+
+test('bounds traces across 10,000 browser rows without changing proposed names', () => {
+  const sources = Array.from({ length: 10_000 }, (_, index) => ({
+    sourceId: index + 1,
+    parentId: Math.floor(index / 250) + 1,
+    originalName: `Quarterly review ${index.toString().padStart(5, '0')}.txt`,
+  }));
+  const request: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
+    rules: Array.from({ length: MAX_RULES }, (_, index) => ({
+      kind: 'prefix' as const,
+      ruleId: index + 1,
+      enabled: true,
+      value: 'x'.repeat(120),
+    })),
+  };
+  const apply = compileBrowserRulePipeline(request, sources);
+  const traceBudget = createBrowserTraceBudget();
+  const results = sources.map((source) => apply(source, traceBudget));
+
+  expect(results).toHaveLength(10_000);
+  expect(
+    results.every((result) => result.proposedName.startsWith('x'.repeat(120 * MAX_RULES)))
+  ).toBe(true);
+  expect(traceBudget.retainedBytes).toBeLessThanOrEqual(MAX_PLAN_TRACE_BYTES);
+  expect(results.some((result) => result.traceTruncated)).toBe(true);
+  expect(results.at(-1)?.trace).toEqual([]);
 });
 
 test('rejects invalid and Rust-unsupported regex features with a path-free rule ID', () => {
