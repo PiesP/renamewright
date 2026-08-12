@@ -1,13 +1,14 @@
 import { cleanup, render, screen, within } from '@solidjs/testing-library';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
-import { App } from '../../src/App';
+import { App as RenamewrightApp } from '../../src/App';
 import type {
   Plan,
   PlanningClient,
   RecoveryCommandResult,
   SourceChange,
 } from '../../src/planning/client';
+import { PRESET_STORAGE_KEY, type PresetStorage } from '../../src/planning/presets';
 import {
   compileBrowserRulePipeline,
   createRule,
@@ -17,7 +18,32 @@ import {
 
 const sources = ['invoice.pdf', 'CON.txt', 'notes.txt'];
 
-afterEach(cleanup);
+class TestPresetStorage implements PresetStorage {
+  private readonly values = new Map<string, string>();
+
+  getItem(key: string): string | null {
+    return this.values.get(key) ?? null;
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value);
+  }
+
+  clear(): void {
+    this.values.clear();
+  }
+}
+
+const presetStorage = new TestPresetStorage();
+
+function App(props: { client: PlanningClient }) {
+  return <RenamewrightApp client={props.client} presetStorage={presetStorage} />;
+}
+
+afterEach(() => {
+  cleanup();
+  presetStorage.clear();
+});
 
 const emptyRequest = (): RulePipelineRequest => ({
   schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
@@ -640,7 +666,7 @@ test('keeps an inline source override stable until it is reset', async () => {
   const override = screen.getByRole('textbox', { name: 'Override name for invoice.pdf' });
   await user.clear(override);
   await user.type(override, 'manual.md');
-  await user.click(screen.getByRole('button', { name: 'Save' }));
+  await user.click(screen.getByRole('button', { name: /^Save$/u }));
   expect(await screen.findByText('manual.md')).toBeInTheDocument();
   expect(screen.getByText('Override')).toBeInTheDocument();
 
@@ -652,6 +678,86 @@ test('keeps an inline source override stable until it is reset', async () => {
   await user.click(screen.getByRole('button', { name: 'Reset override for invoice.pdf' }));
   expect(await screen.findByText('shared-invoice.pdf')).toBeInTheDocument();
   expect(screen.queryByText('manual.md')).not.toBeInTheDocument();
+});
+
+test('saves, applies, and deletes local presets without clearing source overrides', async () => {
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  const prefix = screen.getByRole('textbox', { name: 'Prefix' });
+  await user.type(prefix, 'saved-');
+  await user.click(screen.getByRole('button', { name: 'Edit override for invoice.pdf' }));
+  const override = screen.getByRole('textbox', { name: 'Override name for invoice.pdf' });
+  await user.clear(override);
+  await user.type(override, 'manual.md');
+  await user.click(screen.getByRole('button', { name: /^Save$/u }));
+
+  await user.type(screen.getByRole('textbox', { name: 'Preset name' }), 'Reports');
+  await user.click(screen.getByRole('button', { name: 'Save preset' }));
+  expect(screen.getByRole('status')).toHaveTextContent('Local rule preset saved.');
+
+  await user.clear(prefix);
+  await user.type(prefix, 'other-');
+  expect(await screen.findByText('other-notes.txt')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Apply' }));
+  expect(await screen.findByText('saved-notes.txt')).toBeInTheDocument();
+  expect(screen.getByText('manual.md')).toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent('Source overrides were preserved.');
+
+  await user.click(screen.getByRole('button', { name: 'Delete preset Reports' }));
+  expect(screen.getByText('No local presets saved.')).toBeInTheDocument();
+  expect(screen.getByText('saved-notes.txt')).toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent('current rules were not changed');
+  expect(JSON.parse(presetStorage.getItem(PRESET_STORAGE_KEY) ?? '{}')).toMatchObject({
+    schemaVersion: 2,
+    presets: [],
+  });
+});
+
+test('migrates schema-one presets before they can replace the active pipeline', async () => {
+  presetStorage.setItem(
+    PRESET_STORAGE_KEY,
+    JSON.stringify({
+      schemaVersion: 1,
+      presets: [
+        {
+          name: 'Legacy',
+          ruleSchemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+          rules: [{ kind: 'prefix', ruleId: 41, enabled: true, value: 'legacy-' }],
+        },
+      ],
+    })
+  );
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  expect(await screen.findByText('Legacy')).toBeInTheDocument();
+  expect(screen.getByRole('status')).toHaveTextContent('updated to the current format');
+  await user.click(screen.getByRole('button', { name: 'Apply' }));
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  expect(await screen.findByText('legacy-invoice.pdf')).toBeInTheDocument();
+  expect(JSON.parse(presetStorage.getItem(PRESET_STORAGE_KEY) ?? '{}')).toMatchObject({
+    schemaVersion: 2,
+    nextPresetId: 2,
+    presets: [{ presetId: 1, name: 'Legacy' }],
+  });
+});
+
+test('does not mutate active rules when local preset data is malformed', async () => {
+  presetStorage.setItem(
+    PRESET_STORAGE_KEY,
+    JSON.stringify({ schemaVersion: 2, nextPresetId: 1, presets: '/private/value' })
+  );
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  expect(await screen.findByRole('status')).toHaveTextContent(
+    'Stored presets are invalid and were not loaded.'
+  );
+  expect(screen.getByRole('status')).not.toHaveTextContent('/private/value');
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
 });
 
 test('associates an invalid regex error with its rule editor', async () => {

@@ -136,9 +136,9 @@ test('keeps an inline override across shared rule changes and resets it safely',
   await page.getByRole('button', { name: 'Edit override for Quarterly review.pdf' }).click();
   const override = page.getByRole('textbox', { name: 'Override name for Quarterly review.pdf' });
   await override.fill('manual.md');
-  await page.getByRole('button', { name: 'Save' }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByText('manual.md')).toBeVisible();
-  await expect(page.getByText('Override')).toBeVisible();
+  await expect(page.getByText('Override', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Inspect JSON' }).click();
   await expect(page.getByRole('dialog')).toContainText('"overrides"');
   await expect(page.getByRole('dialog')).toContainText('"overrideApplied": true');
@@ -154,7 +154,7 @@ test('keeps an inline override across shared rule changes and resets it safely',
   await page
     .getByRole('textbox', { name: 'Override name for Quarterly review.pdf' })
     .fill('bad?.txt');
-  await page.getByRole('button', { name: 'Save' }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByText('1 blocked')).toBeVisible();
   await expect(page.getByText('Illegal Windows character')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
@@ -162,6 +162,30 @@ test('keeps an inline override across shared rule changes and resets it safely',
   await page.getByRole('button', { name: 'Reset override for Quarterly review.pdf' }).click();
   await expect(page.getByText('shared-Quarterly review.pdf')).toBeVisible();
   await expect(page.getByText('bad?.txt')).toHaveCount(0);
+});
+
+test('persists and reapplies a local rule preset', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Load sample' }).click();
+  await page.getByRole('textbox', { name: 'Prefix' }).fill('saved-');
+  await page.getByRole('textbox', { name: 'Preset name' }).fill('My local preset');
+  await page.getByRole('textbox', { name: 'Preset name' }).press('Enter');
+  await expect(page.getByRole('status')).toContainText('Local rule preset saved.');
+
+  await page.getByRole('textbox', { name: 'Prefix' }).fill('other-');
+  await expect(page.getByText('other-project-notes.txt')).toBeVisible();
+  await page.reload();
+  await expect(page.getByText('My local preset')).toBeVisible();
+  await page.getByRole('button', { name: 'Load sample' }).click();
+  await page.getByRole('button', { name: 'Apply' }).click();
+  await expect(page.getByText('saved-project-notes.txt')).toBeVisible();
+
+  await page.setViewportSize({ width: 320, height: 900 });
+  const sizes = await page.evaluate(() => ({
+    client: document.documentElement.clientWidth,
+    scroll: document.documentElement.scrollWidth,
+  }));
+  expect(sizes.scroll).toBeLessThanOrEqual(sizes.client);
 });
 
 test('keeps the workbench inside narrow viewports', async ({ page }) => {
