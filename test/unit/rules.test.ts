@@ -64,12 +64,12 @@ test('parses unbraced replacement references with Rust longest-match semantics',
         ruleId: 37,
         enabled: true,
         pattern: '^(notes)',
-        replacement: `$1a-\${1}a`,
+        replacement: `$1a-\${1}a-$$-$missing-$-\${}`,
       },
     ],
   };
 
-  expect(applyBrowserRules('notes.txt', request).proposedName).toBe('-notesa.txt');
+  expect(applyBrowserRules('notes.txt', request).proposedName).toBe('-notesa-$--$-.txt');
 });
 
 test('stops expanding replacements before an oversized name enters the browser trace', () => {

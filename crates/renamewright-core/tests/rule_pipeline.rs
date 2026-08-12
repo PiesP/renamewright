@@ -88,10 +88,10 @@ fn regex_replacement_expands_numbered_and_named_captures() -> Result<(), Box<dyn
         "notes.txt",
         vec![RenameRule::regex_replace(
             r"^(notes)",
-            "$1a-${1}a-$$-$missing-$",
+            "$1a-${1}a-$$-$missing-$-${}",
         )],
     )?;
-    assert_eq!(longest_match, "-notesa-$--$.txt");
+    assert_eq!(longest_match, "-notesa-$--$-.txt");
     Ok(())
 }
 

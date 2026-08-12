@@ -791,7 +791,7 @@ function expandReplacement(
   const chunks: string[] = [];
   const byteLength = { value: 0 };
   let consumed = 0;
-  for (const match of template.matchAll(/\$(?:\$|\{([^}]+)\}|([0-9A-Za-z_]+))/gu)) {
+  for (const match of template.matchAll(/\$(?:\$|\{([^}]*)\}|([0-9A-Za-z_]+))/gu)) {
     const token = match[0];
     const offset = match.index;
     appendBoundedChunk(chunks, byteLength, template.slice(consumed, offset));
