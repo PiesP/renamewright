@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import {
   compileBrowserRulePipeline,
+  createBrowserTraceBudget,
+  MAX_PLAN_TRACE_BYTES,
   planningError,
   type RulePipelineRequest,
   type RuleTraceStep,
@@ -149,7 +151,9 @@ let nextBrowserPlanId = 1;
 
 interface BrowserPlanResult {
   plan: Plan;
-  traces: Map<number, RuleTraceStep[]>;
+  traces: Map<number, { steps: RuleTraceStep[]; truncated: boolean }>;
+  retainedTraceBytes: number;
+  traceTruncatedRowCount: number;
 }
 
 class CommandError extends Error {
@@ -163,7 +167,8 @@ class CommandError extends Error {
 }
 
 function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
-  const traces = new Map<number, RuleTraceStep[]>();
+  const traces = new Map<number, { steps: RuleTraceStep[]; truncated: boolean }>();
+  const traceBudget = createBrowserTraceBudget();
   const sources = sampleNames.map((originalName, index) => ({
     sourceId: index + 1,
     parentId: 1,
@@ -172,8 +177,11 @@ function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
   const applyRules = compileBrowserRulePipeline(request, sources);
   const rows = sources.map((source): PlanRow => {
     const { sourceId, originalName } = source;
-    const { proposedName, trace, overrideApplied, diagnostic } = applyRules(source);
-    traces.set(sourceId, trace);
+    const { proposedName, trace, traceTruncated, overrideApplied, diagnostic } = applyRules(
+      source,
+      traceBudget
+    );
+    traces.set(sourceId, { steps: trace, truncated: traceTruncated });
     const illegal = [...proposedName].some((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
       return codePoint < 32 || illegalWindowsCharacters.includes(character);
@@ -212,6 +220,8 @@ function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
       canApply: changedCount > 0 && blockedCount === 0,
     },
     traces,
+    retainedTraceBytes: MAX_PLAN_TRACE_BYTES - traceBudget.remainingBytes,
+    traceTruncatedRowCount: [...traces.values()].filter((trace) => trace.truncated).length,
   };
 }
 
@@ -262,11 +272,18 @@ function undoCommandError(cause: unknown): Error {
 export function createPlanningClient(): PlanningClient {
   const nativeSelectionAvailable = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   let latestBrowserPlan:
-    | { request: RulePipelineRequest; plan: Plan; traces: Map<number, RuleTraceStep[]> }
+    | {
+        request: RulePipelineRequest;
+        plan: Plan;
+        traces: Map<number, { steps: RuleTraceStep[]; truncated: boolean }>;
+        retainedTraceBytes: number;
+        traceTruncatedRowCount: number;
+      }
     | undefined;
   const createBrowserPlan = (request: RulePipelineRequest) => {
-    const { plan, traces } = browserPlan(request);
-    latestBrowserPlan = { request: structuredClone(request), plan, traces };
+    const result = browserPlan(request);
+    latestBrowserPlan = { request: structuredClone(request), ...result };
+    const { plan } = result;
     return plan;
   };
 
@@ -274,10 +291,10 @@ export function createPlanningClient(): PlanningClient {
     if (!latestBrowserPlan || latestBrowserPlan.plan.planId !== planId) {
       throw new CommandError('plan.notCurrent');
     }
-    const { plan, request, traces } = latestBrowserPlan;
+    const { plan, request, traces, retainedTraceBytes, traceTruncatedRowCount } = latestBrowserPlan;
     return JSON.stringify(
       {
-        schemaVersion: 5,
+        schemaVersion: 6,
         protocolVersion: 5,
         ruleSchemaVersion: request.schemaVersion,
         product: 'Renamewright',
@@ -290,6 +307,8 @@ export function createPlanningClient(): PlanningClient {
           changedCount: plan.changedCount,
           blockedCount: plan.blockedCount,
           canApply: plan.canApply,
+          retainedTraceBytes,
+          traceTruncatedRowCount,
         },
         rows: plan.rows.map((row) => ({
           sourceId: row.sourceId,
@@ -298,7 +317,8 @@ export function createPlanningClient(): PlanningClient {
           status: row.status,
           diagnostics: row.diagnostics,
           overrideApplied: row.overrideApplied,
-          trace: traces.get(row.sourceId) ?? [],
+          traceTruncated: traces.get(row.sourceId)?.truncated ?? false,
+          trace: traces.get(row.sourceId)?.steps ?? [],
         })),
       },
       null,

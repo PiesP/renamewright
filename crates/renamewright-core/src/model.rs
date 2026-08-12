@@ -310,6 +310,11 @@ impl TraceStep {
     pub fn after(&self) -> &str {
         &self.after
     }
+
+    #[must_use]
+    pub const fn retained_bytes(&self) -> usize {
+        self.before.len().saturating_add(self.after.len())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,6 +329,7 @@ pub struct PlanRow {
     trace: Vec<TraceStep>,
     diagnostics: Vec<Diagnostic>,
     override_applied: bool,
+    trace_truncated: bool,
 }
 
 impl PlanRow {
@@ -349,11 +355,17 @@ impl PlanRow {
             trace,
             diagnostics,
             override_applied: false,
+            trace_truncated: false,
         }
     }
 
     pub(crate) const fn with_override_applied(mut self) -> Self {
         self.override_applied = true;
+        self
+    }
+
+    pub(crate) const fn with_trace_truncated(mut self, trace_truncated: bool) -> Self {
+        self.trace_truncated = trace_truncated;
         self
     }
 
@@ -416,6 +428,16 @@ impl PlanRow {
     #[must_use]
     pub const fn override_applied(&self) -> bool {
         self.override_applied
+    }
+
+    #[must_use]
+    pub const fn trace_truncated(&self) -> bool {
+        self.trace_truncated
+    }
+
+    #[must_use]
+    pub fn retained_trace_bytes(&self) -> usize {
+        self.trace().iter().map(TraceStep::retained_bytes).sum()
     }
 }
 
@@ -482,6 +504,16 @@ impl RenamePlan {
     #[must_use]
     pub fn can_apply(&self) -> bool {
         self.changed_count() > 0 && self.blocked_count() == 0
+    }
+
+    #[must_use]
+    pub fn retained_trace_bytes(&self) -> usize {
+        self.rows.iter().map(PlanRow::retained_trace_bytes).sum()
+    }
+
+    #[must_use]
+    pub fn trace_truncated_row_count(&self) -> usize {
+        self.rows.iter().filter(|row| row.trace_truncated()).count()
     }
 }
 

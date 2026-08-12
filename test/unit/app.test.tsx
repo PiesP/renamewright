@@ -106,7 +106,7 @@ function fakeClient(): PlanningClient {
     selectSources: async (request) => makePlan(request),
     previewRules: async (request) => makePlan(request),
     inspectPlan: async (planId) =>
-      JSON.stringify({ schemaVersion: 5, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
+      JSON.stringify({ schemaVersion: 6, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
     exportPlan: async () => false,
     exportPlanCsv: async () => false,
     listLedger: async () => [],
@@ -901,7 +901,7 @@ test('inspects and exports only the current opaque plan ID', async () => {
   await user.click(inspectButton);
 
   expect(inspectPlan).toHaveBeenCalledWith(9);
-  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 5');
+  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 6');
   await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
   expect(exportPlan).toHaveBeenCalledWith(9);
   expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');

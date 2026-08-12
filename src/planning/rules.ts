@@ -5,6 +5,7 @@ export const MAX_RULE_OUTPUT_BYTES = 4_096;
 export const MAX_SEQUENCE_PADDING = 20;
 export const MAX_OVERRIDES = 100_000;
 export const MAX_OVERRIDE_TEXT_BYTES = 4_096;
+export const MAX_PLAN_TRACE_BYTES = 8 * 1_024 * 1_024;
 export const MAX_RANGE_INTEGER = 4_294_967_295;
 const MAX_U64 = 18_446_744_073_709_551_615n;
 const RULE_OUTPUT_TOO_LONG = Symbol('ruleOutputTooLong');
@@ -135,8 +136,17 @@ export interface BrowserRuleSource {
 export interface BrowserRuleResult {
   proposedName: string;
   trace: RuleTraceStep[];
+  traceTruncated: boolean;
   overrideApplied: boolean;
   diagnostic?: 'nameTooLong' | 'sequenceOverflow';
+}
+
+export interface BrowserTraceBudget {
+  remainingBytes: number;
+}
+
+export function createBrowserTraceBudget(): BrowserTraceBudget {
+  return { remainingBytes: MAX_PLAN_TRACE_BYTES };
 }
 
 export class PlanningError extends Error {
@@ -277,7 +287,7 @@ export function applyBrowserRules(
 export function compileBrowserRulePipeline(
   request: RulePipelineRequest,
   sources: readonly BrowserRuleSource[]
-): (source: BrowserRuleSource) => BrowserRuleResult {
+): (source: BrowserRuleSource, traceBudget?: BrowserTraceBudget) => BrowserRuleResult {
   validateRequest(request);
   const sourceIds = new Set(sources.map((source) => source.sourceId));
   const overrides = new Map<number, string>();
@@ -399,11 +409,19 @@ export function compileBrowserRulePipeline(
       }
     }
   }
-  return (source) => {
+  return (source, providedTraceBudget) => {
+    const traceBudget = providedTraceBudget ?? createBrowserTraceBudget();
     let proposedName = source.originalName;
     const trace: RuleTraceStep[] = [];
+    let traceTruncated = false;
     if (utf8Length(proposedName) > MAX_RULE_OUTPUT_BYTES) {
-      return { proposedName, trace, overrideApplied: false, diagnostic: 'nameTooLong' };
+      return {
+        proposedName,
+        trace,
+        traceTruncated,
+        overrideApplied: false,
+        diagnostic: 'nameTooLong',
+      };
     }
     for (const [ruleIndex, rule] of compiledRules.entries()) {
       const before = proposedName;
@@ -412,23 +430,48 @@ export function compileBrowserRulePipeline(
         after = rule.apply(proposedName, source);
       } catch (cause) {
         if (cause === RULE_OUTPUT_TOO_LONG) {
-          return { proposedName, trace, overrideApplied: false, diagnostic: 'nameTooLong' };
+          return {
+            proposedName,
+            trace,
+            traceTruncated,
+            overrideApplied: false,
+            diagnostic: 'nameTooLong',
+          };
         }
         throw cause;
       }
       if (after === undefined) {
-        return { proposedName, trace, overrideApplied: false, diagnostic: 'sequenceOverflow' };
+        return {
+          proposedName,
+          trace,
+          traceTruncated,
+          overrideApplied: false,
+          diagnostic: 'sequenceOverflow',
+        };
       }
       if (utf8Length(after) > MAX_RULE_OUTPUT_BYTES) {
-        return { proposedName, trace, overrideApplied: false, diagnostic: 'nameTooLong' };
+        return {
+          proposedName,
+          trace,
+          traceTruncated,
+          overrideApplied: false,
+          diagnostic: 'nameTooLong',
+        };
       }
       proposedName = after;
-      trace.push({ ruleIndex, ruleId: rule.ruleId, before, after: proposedName });
+      const retainedBytes = utf8Length(before) + utf8Length(proposedName);
+      if (retainedBytes <= traceBudget.remainingBytes) {
+        traceBudget.remainingBytes -= retainedBytes;
+        trace.push({ ruleIndex, ruleId: rule.ruleId, before, after: proposedName });
+      } else {
+        traceBudget.remainingBytes = 0;
+        traceTruncated = true;
+      }
     }
     const nameOverride = overrides.get(source.sourceId);
     return nameOverride === undefined
-      ? { proposedName, trace, overrideApplied: false }
-      : { proposedName: nameOverride, trace, overrideApplied: true };
+      ? { proposedName, trace, traceTruncated, overrideApplied: false }
+      : { proposedName: nameOverride, trace, traceTruncated, overrideApplied: true };
   };
 }
 

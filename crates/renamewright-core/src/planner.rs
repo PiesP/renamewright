@@ -12,6 +12,33 @@ use crate::windows::{comparison_key, validate_name};
 
 pub const MAX_OVERRIDES: usize = 100_000;
 pub const MAX_OVERRIDE_TEXT_BYTES: usize = 4_096;
+pub const MAX_PLAN_TRACE_BYTES: usize = 8 * 1_024 * 1_024;
+
+#[derive(Debug)]
+struct TraceBudget {
+    remaining_bytes: usize,
+}
+
+impl TraceBudget {
+    const fn new() -> Self {
+        Self {
+            remaining_bytes: MAX_PLAN_TRACE_BYTES,
+        }
+    }
+
+    const fn exhausted(&self) -> bool {
+        self.remaining_bytes == 0
+    }
+
+    fn retain(&mut self, bytes: usize) -> bool {
+        if bytes > self.remaining_bytes {
+            self.remaining_bytes = 0;
+            return false;
+        }
+        self.remaining_bytes -= bytes;
+        true
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NameOverride {
@@ -137,18 +164,18 @@ pub fn build_plan_with_rule_pipeline_overrides_and_environment(
                 .map(|allocation| allocate_sequence(sources, allocation))
         })
         .collect::<Vec<_>>();
-    let mut rows = sources
-        .iter()
-        .map(|source| {
-            build_row(
-                source,
-                pipeline,
-                &sequence_values,
-                overrides.get(&source.id()).copied(),
-                policy,
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut trace_budget = TraceBudget::new();
+    let mut rows = Vec::with_capacity(sources.len());
+    for source in sources {
+        rows.push(build_row(
+            source,
+            pipeline,
+            &sequence_values,
+            overrides.get(&source.id()).copied(),
+            policy,
+            &mut trace_budget,
+        ));
+    }
 
     mark_stale_sources(&mut rows, environment);
     mark_unavailable_parents(&mut rows, environment);
@@ -163,12 +190,18 @@ fn build_row(
     sequence_values: &[Option<BTreeMap<SourceId, Option<u64>>>],
     name_override: Option<&str>,
     policy: TargetPolicy,
+    trace_budget: &mut TraceBudget,
 ) -> PlanRow {
     let mut proposed = source.native_name().to_os_string();
-    let mut trace = Vec::with_capacity(pipeline.rules().len());
+    let mut trace = Vec::with_capacity(if trace_budget.exhausted() {
+        0
+    } else {
+        pipeline.rules().len()
+    });
+    let mut trace_truncated = false;
 
     for rule_index in 0..pipeline.rules().len() {
-        let before = proposed.to_string_lossy().into_owned();
+        let before = (!trace_budget.exhausted()).then(|| proposed.to_string_lossy().into_owned());
         let sequence_value = sequence_values
             .get(rule_index)
             .and_then(Option::as_ref)
@@ -184,12 +217,21 @@ fn build_row(
                     RuleApplicationError::SequenceOverflow => DiagnosticCode::SequenceOverflow,
                     RuleApplicationError::OutputTooLong => DiagnosticCode::NameTooLong,
                 };
-                return PlanRow::new(source, proposed, trace, vec![Diagnostic::blocked(code)]);
+                return PlanRow::new(source, proposed, trace, vec![Diagnostic::blocked(code)])
+                    .with_trace_truncated(trace_truncated);
             }
         };
         proposed = after;
-        let after = proposed.to_string_lossy().into_owned();
-        trace.push(TraceStep::new(rule_index, before, after));
+        if let Some(before) = before {
+            let after = proposed.to_string_lossy().into_owned();
+            if trace_budget.retain(before.len().saturating_add(after.len())) {
+                trace.push(TraceStep::new(rule_index, before, after));
+            } else {
+                trace_truncated = true;
+            }
+        } else {
+            trace_truncated = true;
+        }
     }
 
     let override_applied = name_override.is_some();
@@ -202,7 +244,8 @@ fn build_row(
         diagnostics.push(Diagnostic::information(DiagnosticCode::Unchanged));
     }
 
-    let row = PlanRow::new(source, proposed, trace, diagnostics);
+    let row =
+        PlanRow::new(source, proposed, trace, diagnostics).with_trace_truncated(trace_truncated);
     if override_applied {
         row.with_override_applied()
     } else {
