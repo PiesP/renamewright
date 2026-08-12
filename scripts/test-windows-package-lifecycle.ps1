@@ -103,6 +103,35 @@ function Assert-ExecutableVersion {
     }
 }
 
+function Wait-InstalledPackageVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$Expected,
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastObservedVersion = '<unavailable>'
+    do {
+        try {
+            $record = Get-InstallRecord
+            $lastObservedVersion = [string]$record.DisplayVersion
+            if ($lastObservedVersion -ceq $Expected) {
+                $executable = Get-InstalledExecutable -Record $record
+                Assert-ExecutableVersion -Path $executable -Expected $Expected
+                return $record
+            }
+        }
+        catch {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw "The installed package did not converge to version '$Expected'; the last observed version was '$lastObservedVersion'."
+}
+
 function Remove-TestDataRoot {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -193,8 +222,7 @@ try {
     Set-Content -LiteralPath $webViewMarker -Value $webViewMarkerValue -NoNewline -Encoding ascii
 
     [void](Invoke-SilentPackage -Path $currentInstaller -Arguments @('/S', '/UPDATE'))
-    $currentRecord = Get-InstallRecord
-    Assert-Version -Record $currentRecord -Expected $CurrentVersion
+    $currentRecord = Wait-InstalledPackageVersion -Expected $CurrentVersion
     $currentExecutable = Get-InstalledExecutable -Record $currentRecord
     Assert-Marker -Path $journalMarker -Expected $journalMarkerValue
     Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue

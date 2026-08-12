@@ -83,6 +83,9 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
   expect(lifecycle).toContain('Assert-ExecutableVersion');
   expect(lifecycle).toContain("throw 'The portable artifact is empty.'");
   expect(lifecycle).toContain("-Arguments @('/S', '/UPDATE')");
+  expect(lifecycle).toContain('Wait-InstalledPackageVersion -Expected $CurrentVersion');
+  expect(lifecycle).toContain('Start-Sleep -Milliseconds 250');
+  expect(lifecycle).toContain("The installed package did not converge to version '$Expected'");
   expect(lifecycle).toContain(
     "The installed package version was '$actual' instead of '$Expected'."
   );
