@@ -561,3 +561,68 @@ test('offers safe cancellation while Undo is active', async ({ page }) => {
     'Cancellation requested. Undo will roll back at the next safe step…'
   );
 });
+
+test('keeps a 10,000-source native preview responsive and windowed', async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') {
+      consoleErrors.push(message.text());
+    }
+  });
+  await page.addInitScript(() => {
+    window.__TAURI_INTERNALS__ = {
+      invoke: async (command: string) => {
+        if (command === 'list_ledger') {
+          return [];
+        }
+        if (command === 'poll_source_changes') {
+          return null;
+        }
+        if (command === 'select_sources_with_rules') {
+          const rows = Array.from({ length: 10_000 }, (_, index) => {
+            const blocked = index % 1_000 === 0;
+            return {
+              sourceId: index + 1,
+              originalName: `source-${index.toString().padStart(5, '0')}.txt`,
+              proposedName: `renamed-source-${index.toString().padStart(5, '0')}.txt`,
+              status: blocked ? 'blocked' : 'changed',
+              diagnostics: blocked ? ['occupiedDestination'] : [],
+              overrideApplied: false,
+            };
+          });
+          return {
+            planId: 10_000,
+            generation: 1,
+            rows,
+            changedCount: 9_990,
+            blockedCount: 10,
+            canApply: false,
+          };
+        }
+        throw new Error(`Unexpected command: ${command}`);
+      },
+    };
+  });
+
+  await page.goto('/');
+  const previewStarted = Date.now();
+  await page.getByRole('button', { name: 'Add files' }).last().click();
+  await expect(page.getByText('Showing 10000 of 10000')).toBeVisible();
+  expect(Date.now() - previewStarted).toBeLessThan(5_000);
+  expect(await page.getByRole('row').count()).toBeLessThan(30);
+
+  const scrollStarted = Date.now();
+  await page.locator('.virtual-viewport').evaluate((element) => {
+    element.scrollTop = 92 * 9_990;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(page.getByText('source-09990.txt', { exact: true })).toBeVisible();
+  expect(Date.now() - scrollStarted).toBeLessThan(1_000);
+
+  const filterStarted = Date.now();
+  await page.getByRole('button', { name: 'Blocked 10' }).click();
+  await expect(page.getByText('Showing 10 of 10000')).toBeVisible();
+  expect(Date.now() - filterStarted).toBeLessThan(1_000);
+  expect(await page.getByRole('row').count()).toBe(11);
+  expect(consoleErrors).toEqual([]);
+});

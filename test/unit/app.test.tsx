@@ -864,6 +864,41 @@ test('uses the native picker instead of browser samples in the desktop shell', a
   expect((await screen.findAllByText('invoice.pdf')).length).toBeGreaterThan(0);
 });
 
+test('ignores a slow preview after a newer rule preview completes', async () => {
+  vi.useFakeTimers();
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  const client = fakeClient();
+  const pending: Array<{
+    request: RulePipelineRequest;
+    resolve: (plan: Plan) => void;
+  }> = [];
+  client.previewRules = (request) =>
+    new Promise((resolve) => {
+      pending.push({ request, resolve });
+    });
+  render(() => <App client={client} />);
+
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  const prefix = screen.getByRole('textbox', { name: 'Prefix' });
+  await user.type(prefix, 'old-');
+  await vi.advanceTimersByTimeAsync(120);
+  expect(pending).toHaveLength(1);
+
+  await user.clear(prefix);
+  await user.type(prefix, 'new-');
+  await vi.advanceTimersByTimeAsync(120);
+  expect(pending).toHaveLength(2);
+
+  pending[1]?.resolve(makePlan(pending[1].request));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByText('new-invoice.pdf')).toBeInTheDocument();
+
+  pending[0]?.resolve(makePlan(pending[0].request));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByText('new-invoice.pdf')).toBeInTheDocument();
+  expect(screen.queryByText('old-invoice.pdf')).not.toBeInTheDocument();
+});
+
 test('refreshes the plan after Rust admits dropped sources', async () => {
   let notify: ((change: SourceChange) => void) | undefined;
   const client = fakeClient();
