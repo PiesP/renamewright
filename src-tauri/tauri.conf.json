@@ -28,6 +28,12 @@
   },
   "bundle": {
     "active": false,
-    "targets": "all"
+    "targets": "all",
+    "windows": {
+      "allowDowngrades": false,
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

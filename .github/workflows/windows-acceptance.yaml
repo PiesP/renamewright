@@ -55,6 +55,49 @@ jobs:
       - name: Build the unsigned Windows acceptance package
         run: pnpm tauri build --ci --bundles nsis --no-sign
 
+      - name: Build the previous-version compatibility fixture
+        shell: pwsh
+        run: |
+          $fixtureConfig = Join-Path $env:RUNNER_TEMP 'previous-version.json'
+          $fixtureTarget = Join-Path $env:RUNNER_TEMP 'renamewright-previous-target'
+          @{ version = '0.0.0' } |
+            ConvertTo-Json |
+            Set-Content -LiteralPath $fixtureConfig -Encoding utf8
+          $env:CARGO_TARGET_DIR = $fixtureTarget
+          pnpm tauri build --ci --bundles nsis --no-sign --config $fixtureConfig
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The previous-version compatibility fixture could not be built.'
+          }
+          $installers = @(
+            Get-ChildItem -LiteralPath (Join-Path $fixtureTarget 'release/bundle/nsis') -Filter '*.exe' -File
+          )
+          if ($installers.Count -ne 1) {
+            throw 'Exactly one previous-version installer fixture is required.'
+          }
+          "PREVIOUS_INSTALLER_PATH=$($installers[0].FullName)" |
+            Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Verify install, upgrade, portable, downgrade, and uninstall behavior
+        shell: pwsh
+        run: |
+          $packageDocument = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
+          $tauriConfig = Get-Content -LiteralPath src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $installers = @(Get-ChildItem -LiteralPath target/release/bundle/nsis -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw 'Exactly one current installer is required for lifecycle validation.'
+          }
+          $evidence = Join-Path $env:RUNNER_TEMP 'windows-lifecycle-evidence.json'
+          ./scripts/test-windows-package-lifecycle.ps1 `
+            -CurrentInstallerPath $installers[0].FullName `
+            -CurrentPortablePath (Join-Path $PWD.Path 'target/release/renamewright-app.exe') `
+            -PreviousInstallerPath $env:PREVIOUS_INSTALLER_PATH `
+            -CurrentVersion ([string]$packageDocument.version) `
+            -PreviousVersion '0.0.0' `
+            -Identifier ([string]$tauriConfig.identifier) `
+            -OutputPath $evidence
+          "LIFECYCLE_EVIDENCE_PATH=$evidence" |
+            Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
       - name: Install the verified Syft binary
         shell: pwsh
         run: |
@@ -78,6 +121,7 @@ jobs:
           -OutputDirectory (Join-Path $PWD.Path 'acceptance')
           -SourceSha $env:GITHUB_SHA
           -SyftPath $env:SYFT_PATH
+          -LifecycleEvidencePath $env:LIFECYCLE_EVIDENCE_PATH
 
       - name: Upload the Windows acceptance artifact
         id: upload
