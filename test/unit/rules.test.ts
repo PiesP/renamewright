@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 import {
   applyBrowserRules,
   compileBrowserRulePipeline,
+  MAX_RULE_OUTPUT_BYTES,
   PlanningError,
   RULE_PIPELINE_SCHEMA_VERSION,
   type RulePipelineRequest,
@@ -63,12 +64,60 @@ test('parses unbraced replacement references with Rust longest-match semantics',
         ruleId: 37,
         enabled: true,
         pattern: '^(notes)',
-        replacement: `$1a-\${1}a`,
+        replacement: `$1a-\${1}a-$$-$missing-$-\${}`,
       },
     ],
   };
 
-  expect(applyBrowserRules('notes.txt', request).proposedName).toBe('-notesa.txt');
+  expect(applyBrowserRules('notes.txt', request).proposedName).toBe('-notesa-$--$-.txt');
+});
+
+test('stops expanding replacements before an oversized name enters the browser trace', () => {
+  for (const rule of [
+    {
+      kind: 'regexReplace' as const,
+      ruleId: 39,
+      enabled: true,
+      pattern: '',
+      replacement: 'x'.repeat(MAX_RULE_OUTPUT_BYTES),
+    },
+    {
+      kind: 'literalReplace' as const,
+      ruleId: 40,
+      enabled: true,
+      search: 'a',
+      replacement: 'x'.repeat(MAX_RULE_OUTPUT_BYTES / 4),
+    },
+  ]) {
+    const request: RulePipelineRequest = {
+      schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+      overrides: [],
+      rules: [rule],
+    };
+
+    expect(applyBrowserRules('aaaaaaaa', request)).toEqual({
+      proposedName: 'aaaaaaaa',
+      trace: [],
+      overrideApplied: false,
+      diagnostic: 'nameTooLong',
+    });
+  }
+
+  const chained: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    overrides: [],
+    rules: [39, 40].map((ruleId) => ({
+      kind: 'regexReplace' as const,
+      ruleId,
+      enabled: true,
+      pattern: '',
+      replacement: 'x'.repeat(MAX_RULE_OUTPUT_BYTES / 4),
+    })),
+  };
+  const result = applyBrowserRules('a', chained);
+  expect(new TextEncoder().encode(result.proposedName)).toHaveLength(MAX_RULE_OUTPUT_BYTES / 2 + 1);
+  expect(result.trace).toHaveLength(1);
+  expect(result.diagnostic).toBe('nameTooLong');
 });
 
 test('rejects invalid and Rust-unsupported regex features with a path-free rule ID', () => {

@@ -182,6 +182,7 @@ fn build_row(
                         DiagnosticCode::UnsupportedEncoding
                     }
                     RuleApplicationError::SequenceOverflow => DiagnosticCode::SequenceOverflow,
+                    RuleApplicationError::OutputTooLong => DiagnosticCode::NameTooLong,
                 };
                 return PlanRow::new(source, proposed, trace, vec![Diagnostic::blocked(code)]);
             }

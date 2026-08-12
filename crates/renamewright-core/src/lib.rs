@@ -23,9 +23,9 @@ pub use planner::{
 };
 pub use rules::{
     CaseMode, CharacterClass, CharacterClassOperation, ExtensionOperation, FilenamePart,
-    MAX_RULE_TEXT_BYTES, MAX_RULES, MAX_SEQUENCE_PADDING, RangeOperation, RangeOrigin, RenameRule,
-    RulePipeline, RuleValidationError, RuleValidationErrorKind, SequenceOrder, SequencePlacement,
-    SequenceScope, UnicodeNormalizationForm,
+    MAX_RULE_OUTPUT_BYTES, MAX_RULE_TEXT_BYTES, MAX_RULES, MAX_SEQUENCE_PADDING, RangeOperation,
+    RangeOrigin, RenameRule, RulePipeline, RuleValidationError, RuleValidationErrorKind,
+    SequenceOrder, SequencePlacement, SequenceScope, UnicodeNormalizationForm,
 };
 pub use windows::windows_name_comparison_key;
 

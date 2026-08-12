@@ -7,11 +7,12 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 #[cfg(windows)]
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-use regex::{Regex, RegexBuilder};
+use regex::{Captures, Regex, RegexBuilder};
 use unicode_normalization::UnicodeNormalization;
 
 pub const MAX_RULES: usize = 32;
 pub const MAX_RULE_TEXT_BYTES: usize = 4_096;
+pub const MAX_RULE_OUTPUT_BYTES: usize = 4_096;
 pub const MAX_SEQUENCE_PADDING: u8 = 20;
 const MAX_COMPILED_REGEX_BYTES: usize = 1_048_576;
 
@@ -405,10 +406,13 @@ impl RulePipeline {
         name: &OsStr,
         sequence_value: Option<u64>,
     ) -> Result<OsString, RuleApplicationError> {
+        if name.len() > MAX_RULE_OUTPUT_BYTES {
+            return Err(RuleApplicationError::OutputTooLong);
+        }
         let Some(rule) = self.compiled.get(index) else {
             return Ok(name.to_os_string());
         };
-        match rule {
+        let proposed = match rule {
             CompiledRule::Prefix(value) => {
                 let mut proposed = OsString::from(value);
                 proposed.push(name);
@@ -424,12 +428,12 @@ impl RulePipeline {
                 replacement,
             } => name
                 .to_str()
-                .map(|text| OsString::from(text.replace(search, replacement)))
-                .ok_or(RuleApplicationError::UnsupportedEncoding),
+                .ok_or(RuleApplicationError::UnsupportedEncoding)
+                .and_then(|text| replace_literal_bounded(text, search, replacement)),
             CompiledRule::RegexReplace { regex, replacement } => name
                 .to_str()
-                .map(|text| OsString::from(regex.replace_all(text, replacement).as_ref()))
-                .ok_or(RuleApplicationError::UnsupportedEncoding),
+                .ok_or(RuleApplicationError::UnsupportedEncoding)
+                .and_then(|text| replace_regex_bounded(text, regex, replacement)),
             CompiledRule::Sequence {
                 padding,
                 placement,
@@ -483,6 +487,11 @@ impl RulePipeline {
             } => apply_unicode_part(name, *target, |text| {
                 apply_character_class(text, *operation, matcher)
             }),
+        }?;
+        if proposed.len() > MAX_RULE_OUTPUT_BYTES {
+            Err(RuleApplicationError::OutputTooLong)
+        } else {
+            Ok(proposed)
         }
     }
 }
@@ -491,6 +500,104 @@ impl RulePipeline {
 pub(crate) enum RuleApplicationError {
     UnsupportedEncoding,
     SequenceOverflow,
+    OutputTooLong,
+}
+
+fn append_bounded(output: &mut String, value: &str) -> Result<(), RuleApplicationError> {
+    let Some(next_len) = output.len().checked_add(value.len()) else {
+        return Err(RuleApplicationError::OutputTooLong);
+    };
+    if next_len > MAX_RULE_OUTPUT_BYTES {
+        return Err(RuleApplicationError::OutputTooLong);
+    }
+    output.push_str(value);
+    Ok(())
+}
+
+fn replace_literal_bounded(
+    input: &str,
+    search: &str,
+    replacement: &str,
+) -> Result<OsString, RuleApplicationError> {
+    let mut output = String::with_capacity(input.len());
+    let mut consumed = 0;
+    for (offset, matched) in input.match_indices(search) {
+        append_bounded(&mut output, &input[consumed..offset])?;
+        append_bounded(&mut output, replacement)?;
+        consumed = offset + matched.len();
+    }
+    append_bounded(&mut output, &input[consumed..])?;
+    Ok(output.into())
+}
+
+fn replace_regex_bounded(
+    input: &str,
+    regex: &Regex,
+    replacement: &str,
+) -> Result<OsString, RuleApplicationError> {
+    let mut output = String::with_capacity(input.len());
+    let mut consumed = 0;
+    for captures in regex.captures_iter(input) {
+        let Some(matched) = captures.get(0) else {
+            continue;
+        };
+        append_bounded(&mut output, &input[consumed..matched.start()])?;
+        expand_regex_replacement_bounded(&mut output, &captures, replacement)?;
+        consumed = matched.end();
+    }
+    append_bounded(&mut output, &input[consumed..])?;
+    Ok(output.into())
+}
+
+fn expand_regex_replacement_bounded(
+    output: &mut String,
+    captures: &Captures<'_>,
+    replacement: &str,
+) -> Result<(), RuleApplicationError> {
+    let mut remaining = replacement;
+    while let Some(dollar_offset) = remaining.find('$') {
+        append_bounded(output, &remaining[..dollar_offset])?;
+        remaining = &remaining[dollar_offset..];
+
+        if remaining.as_bytes().get(1) == Some(&b'$') {
+            append_bounded(output, "$")?;
+            remaining = &remaining[2..];
+            continue;
+        }
+
+        let Some((reference, consumed)) = capture_reference(remaining) else {
+            append_bounded(output, "$")?;
+            remaining = &remaining[1..];
+            continue;
+        };
+        remaining = &remaining[consumed..];
+        let captured = reference
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| captures.get(index))
+            .or_else(|| captures.name(reference));
+        if let Some(captured) = captured {
+            append_bounded(output, captured.as_str())?;
+        }
+    }
+    append_bounded(output, remaining)
+}
+
+fn capture_reference(replacement: &str) -> Option<(&str, usize)> {
+    let bytes = replacement.as_bytes();
+    if bytes.first() != Some(&b'$') || bytes.len() == 1 {
+        return None;
+    }
+    if bytes[1] == b'{' {
+        let closing = replacement[2..].find('}')? + 2;
+        return Some((&replacement[2..closing], closing + 1));
+    }
+
+    let end = bytes[1..]
+        .iter()
+        .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+        .map_or(bytes.len(), |offset| offset + 1);
+    (end > 1).then_some((&replacement[1..end], end))
 }
 
 fn compile_rule(index: usize, rule: &RenameRule) -> Result<CompiledRule, RuleValidationError> {
