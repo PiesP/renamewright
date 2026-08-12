@@ -118,6 +118,7 @@ impl StoredPlan {
 }
 
 const RULE_PIPELINE_SCHEMA_VERSION: u16 = 4;
+const PLAN_CSV_SCHEMA_VERSION: u16 = 1;
 const MAX_SEQUENCE_INPUT: u64 = 9_007_199_254_740_991;
 const MAX_RANGE_INPUT: u64 = u32::MAX as u64;
 
@@ -1181,6 +1182,25 @@ async fn export_plan(plan_id: u64, state: State<'_, AppState>) -> Result<bool, S
     .map_err(|error| format!("the plan export did not complete: {error}"))?
 }
 
+#[tauri::command]
+async fn export_plan_csv(plan_id: u64, state: State<'_, AppState>) -> Result<bool, String> {
+    let document = plan_document_csv(plan_id, &state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = rfd::FileDialog::new()
+            .set_title("Export Renamewright plan CSV")
+            .add_filter("CSV inspection", &["csv"])
+            .set_file_name(format!("renamewright-plan-{plan_id}.csv"))
+            .save_file();
+        let Some(path) = path else {
+            return Ok(false);
+        };
+        write_new_document(&path, &document).map_err(export_write_error)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| "the CSV export did not complete".to_owned())?
+}
+
 fn admit_dropped_sources(state: &AppState, paths: &[std::path::PathBuf]) {
     let outcome = state
         .registry
@@ -1888,6 +1908,97 @@ fn plan_document_json(plan_id: u64, state: &AppState) -> Result<String, String> 
         .map_err(|error| format!("the plan could not be serialized: {error}"))
 }
 
+fn plan_document_csv(plan_id: u64, state: &AppState) -> Result<String, String> {
+    let latest_plan = state
+        .latest_plan
+        .lock()
+        .map_err(|_| "the latest plan is unavailable".to_owned())?;
+    let stored = latest_plan
+        .as_ref()
+        .filter(|stored| stored.plan.id().value() == plan_id)
+        .ok_or_else(|| "the requested plan is no longer current".to_owned())?;
+    plan_csv(stored)
+}
+
+fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
+    let plan = PlanDocument::from(stored);
+    let mut csv = String::new();
+    push_csv_row(
+        &mut csv,
+        &[
+            "csv_schema_version",
+            "plan_id",
+            "source_generation",
+            "source_id",
+            "original_display",
+            "proposed_display",
+            "status",
+            "diagnostics_json",
+            "override_applied",
+            "trace_json",
+        ],
+    );
+    for row in plan.rows {
+        let diagnostics = serde_json::to_string(&row.diagnostics)
+            .map_err(|_| "the plan CSV could not be serialized".to_owned())?;
+        let trace = serde_json::to_string(&row.trace)
+            .map_err(|_| "the plan CSV could not be serialized".to_owned())?;
+        push_csv_row(
+            &mut csv,
+            &[
+                &PLAN_CSV_SCHEMA_VERSION.to_string(),
+                &plan.plan_id.to_string(),
+                &plan.source_generation.to_string(),
+                &row.source_id.to_string(),
+                row.original_display,
+                row.proposed_display,
+                row.status,
+                &diagnostics,
+                if row.override_applied {
+                    "true"
+                } else {
+                    "false"
+                },
+                &trace,
+            ],
+        );
+    }
+    Ok(csv)
+}
+
+fn push_csv_row(csv: &mut String, cells: &[&str]) {
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            csv.push(',');
+        }
+        csv.push_str(&csv_cell(cell));
+    }
+    csv.push_str("\r\n");
+}
+
+fn csv_cell(value: &str) -> String {
+    let guarded = if needs_formula_guard(value) {
+        format!("'{value}")
+    } else {
+        value.to_owned()
+    };
+    format!("\"{}\"", guarded.replace('"', "\"\""))
+}
+
+fn needs_formula_guard(value: &str) -> bool {
+    let first = value.chars().next();
+    if matches!(first, Some('\t' | '\r' | '\n')) {
+        return true;
+    }
+    matches!(
+        value
+            .trim_start_matches([' ', '\t', '\r', '\n'])
+            .chars()
+            .next(),
+        Some('=' | '+' | '-' | '@')
+    )
+}
+
 impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     fn from(stored: &'a StoredPlan) -> Self {
         let plan = &stored.plan;
@@ -2078,7 +2189,8 @@ pub fn run() {
             cancel_recovery,
             cancel_undo,
             inspect_plan,
-            export_plan
+            export_plan,
+            export_plan_csv
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
@@ -2113,8 +2225,8 @@ mod tests {
         RangeOperationDto, RangeOriginDto, RulePipelineRequestDto, RuleRequestDto,
         RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto,
         SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto, admit_dropped_sources,
-        compile_rule_request, export_write_error, plan_document_json, plan_from_registry,
-        write_new_document,
+        compile_rule_request, csv_cell, export_write_error, plan_document_csv, plan_document_json,
+        plan_from_registry, write_new_document,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -2264,6 +2376,67 @@ mod tests {
         assert_eq!(value["rows"][0]["trace"][5]["ruleId"], 23);
         assert!(!document.contains('/'));
         Ok(())
+    }
+
+    #[test]
+    fn plan_csv_is_versioned_pathless_and_formula_safe() -> Result<(), Box<dyn Error>> {
+        let state = AppState::default();
+        let source = SourceSnapshot::new(
+            SourceId::new(17),
+            ParentId::new(4),
+            OsString::from("=SUM(1,1)\r\n\"quoted\".txt"),
+        );
+        let request = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
+            rules: vec![RuleRequestDto::Prefix {
+                rule_id: 23,
+                enabled: true,
+                value: "review-".to_owned(),
+            }],
+        };
+        let compiled = compile_rule_request(&request)?;
+        let plan = build_plan_with_rule_pipeline_overrides_and_environment(
+            PlanId::new(19),
+            6,
+            &[source],
+            &compiled.pipeline,
+            &compiled.overrides,
+            TargetPolicy::windows(),
+            &ValidationEnvironment::default(),
+        );
+        *state.latest_plan.lock().map_err(|_| "plan lock failed")? = Some(StoredPlan {
+            plan,
+            rule_request: request,
+            active_rule_ids: compiled.active_rule_ids,
+        });
+
+        let csv = plan_document_csv(19, &state)?;
+
+        assert!(csv.starts_with(
+            "\"csv_schema_version\",\"plan_id\",\"source_generation\",\"source_id\",\"original_display\",\"proposed_display\",\"status\",\"diagnostics_json\",\"override_applied\",\"trace_json\"\r\n"
+        ));
+        assert!(csv.contains("\"1\",\"19\",\"6\",\"17\""));
+        assert!(csv.contains("\"'=SUM(1,1)\r\n\"\"quoted\"\".txt\""));
+        assert!(csv.contains("review-=SUM(1,1)"));
+        assert!(csv.contains("[{\"\"ruleIndex\"\":0,\"\"ruleId\"\":23"));
+        assert!(csv.contains("illegalCharacter"));
+        assert!(csv.ends_with("\r\n"));
+        assert!(!csv.contains("/home/private-parent"));
+        assert_eq!(
+            plan_document_csv(20, &state),
+            Err("the requested plan is no longer current".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn csv_cells_quote_rfc_4180_content_and_neutralize_formula_prefixes() {
+        assert_eq!(csv_cell("plain, \"quoted\""), "\"plain, \"\"quoted\"\"\"");
+        assert_eq!(csv_cell("=1+1"), "\"'=1+1\"");
+        assert_eq!(csv_cell("  @command"), "\"'  @command\"");
+        assert_eq!(csv_cell("\tcommand"), "\"'\tcommand\"");
+        assert_eq!(csv_cell("safe-leading text"), "\"safe-leading text\"");
     }
 
     #[test]

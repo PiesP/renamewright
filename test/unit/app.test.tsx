@@ -98,6 +98,7 @@ function fakeClient(): PlanningClient {
     inspectPlan: async (planId) =>
       JSON.stringify({ schemaVersion: 5, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
     exportPlan: async () => false,
+    exportPlanCsv: async () => false,
     listLedger: async () => [],
     inspectRecovery: async () => {
       throw new Error('No recovery fixture was configured.');
@@ -839,8 +840,10 @@ test('inspects and exports only the current opaque plan ID', async () => {
   client.nativeSelectionAvailable = true;
   const inspectPlan = vi.fn(client.inspectPlan);
   const exportPlan = vi.fn(async () => true);
+  const exportPlanCsv = vi.fn(async () => true);
   client.inspectPlan = inspectPlan;
   client.exportPlan = exportPlan;
+  client.exportPlanCsv = exportPlanCsv;
   render(() => <App client={client} />);
 
   await user.click(
@@ -854,6 +857,9 @@ test('inspects and exports only the current opaque plan ID', async () => {
   await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
   expect(exportPlan).toHaveBeenCalledWith(9);
   expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');
+  await user.click(screen.getByRole('button', { name: 'Export CSV…' }));
+  expect(exportPlanCsv).toHaveBeenCalledWith(9);
+  expect(screen.getByRole('status')).toHaveTextContent('Plan CSV exported.');
   await user.click(screen.getByRole('button', { name: 'Close' }));
   expect(inspectButton).toHaveFocus();
 });

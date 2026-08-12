@@ -122,6 +122,7 @@ export interface PlanningClient {
   previewRules(request: RulePipelineRequest): Promise<Plan>;
   inspectPlan(planId: number): Promise<string>;
   exportPlan(planId: number): Promise<boolean>;
+  exportPlanCsv(planId: number): Promise<boolean>;
   listLedger(): Promise<LedgerEntry[]>;
   inspectRecovery(ledgerId: number): Promise<RecoveryInspection>;
   applyRecoveryAction(
@@ -315,6 +316,8 @@ export function createPlanningClient(): PlanningClient {
         : inspectBrowserPlan(planId),
     exportPlan: async (planId) =>
       nativeSelectionAvailable ? invoke<boolean>('export_plan', { planId }) : false,
+    exportPlanCsv: async (planId) =>
+      nativeSelectionAvailable ? invoke<boolean>('export_plan_csv', { planId }) : false,
     listLedger: async () => (nativeSelectionAvailable ? invoke<LedgerEntry[]>('list_ledger') : []),
     inspectRecovery: async (ledgerId) => {
       if (!nativeSelectionAvailable) {

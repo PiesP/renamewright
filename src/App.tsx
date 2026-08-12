@@ -364,6 +364,24 @@ export function App(props: AppProps) {
     }
   };
 
+  const exportCurrentPlanCsv = async () => {
+    const current = plan();
+    if (!current) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const exported = await planningClient.exportPlanCsv(current.planId);
+      setNotice(exported ? 'Plan CSV exported.' : 'Plan CSV export cancelled.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The plan CSV could not be exported.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const inspectLedgerEntry = async (entry: LedgerEntry) => {
     setInspectingLedgerId(entry.ledgerId);
     setRecoveryInspection(undefined);
@@ -1843,6 +1861,19 @@ export function App(props: AppProps) {
                 onClick={() => void exportCurrentPlan()}
               >
                 Export JSON…
+              </button>
+              <button
+                class="button button-secondary"
+                type="button"
+                disabled={!planningClient.nativeSelectionAvailable || busy()}
+                title={
+                  planningClient.nativeSelectionAvailable
+                    ? undefined
+                    : 'CSV export is available in the desktop app.'
+                }
+                onClick={() => void exportCurrentPlanCsv()}
+              >
+                Export CSV…
               </button>
             </div>
           </dialog>
