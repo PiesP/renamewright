@@ -3,6 +3,8 @@ import securityWorkflow from '../../.github/workflows/security.yaml?raw';
 import workflow from '../../.github/workflows/windows-acceptance.yaml?raw';
 import cargoPolicy from '../../deny.toml?raw';
 import packager from '../../scripts/prepare-windows-acceptance.ps1?raw';
+import lifecycle from '../../scripts/test-windows-package-lifecycle.ps1?raw';
+import tauriConfigText from '../../src-tauri/tauri.conf.json?raw';
 
 test('keeps Windows acceptance manual, read-only, pinned, and source-bound', () => {
   expect(workflow).toMatch(/^on:\n {2}workflow_dispatch:\s*$/mu);
@@ -41,6 +43,50 @@ test('rejects stale packaging output and records immutable checksums and limitat
   expect(packager).toContain('ReFS coverage requires a separate compatible Windows environment.');
 });
 
+test('makes current-user data retention and downgrade refusal explicit package policy', () => {
+  const config = JSON.parse(tauriConfigText) as {
+    bundle: { windows: { allowDowngrades: boolean; nsis: { installMode: string } } };
+  };
+
+  expect(config.bundle.windows.allowDowngrades).toBe(false);
+  expect(config.bundle.windows.nsis.installMode).toBe('currentUser');
+  expect(packager).toContain(
+    'Installed and portable executables use the same current-user data roots.'
+  );
+  expect(packager).toContain('Recovery journals: %APPDATA%\\$identifier\\journals');
+  expect(packager).toContain('Local presets and WebView state: %LOCALAPPDATA%\\$identifier');
+  expect(packager).toContain("portableState = 'sharedUserProfile'");
+  expect(packager).toContain("uninstall = 'retainUserData'");
+  expect(packager).toContain("downgrade = 'refuse'");
+});
+
+test('runs packaged lifecycle validation before acceptance evidence is assembled', () => {
+  const currentBuildIndex = workflow.indexOf('Build the unsigned Windows acceptance package');
+  const previousBuildIndex = workflow.indexOf('Build the previous-version compatibility fixture');
+  const lifecycleIndex = workflow.indexOf(
+    'Verify install, upgrade, portable, downgrade, and uninstall behavior'
+  );
+  const prepareIndex = workflow.indexOf('Prepare the source-bound acceptance artifact');
+
+  expect(currentBuildIndex).toBeGreaterThan(0);
+  expect(previousBuildIndex).toBeGreaterThan(currentBuildIndex);
+  expect(lifecycleIndex).toBeGreaterThan(previousBuildIndex);
+  expect(prepareIndex).toBeGreaterThan(lifecycleIndex);
+  expect(workflow).toContain('-LifecycleEvidencePath $env:LIFECYCLE_EVIDENCE_PATH');
+});
+
+test('proves upgrade, portable sharing, downgrade refusal, uninstall, and data retention', () => {
+  expect(lifecycle).toContain('[Version]$PreviousVersion -ge [Version]$CurrentVersion');
+  expect(lifecycle).toContain('The lifecycle test requires clean current-user data roots.');
+  expect(lifecycle).toContain('Start-And-ProbeApplication');
+  expect(lifecycle).toContain('The refused downgrade changed the installed executable.');
+  expect(lifecycle).toContain('The uninstaller did not remove the application directory.');
+  expect(lifecycle).toContain('journalDataRetained = $true');
+  expect(lifecycle).toContain('webviewDataRetained = $true');
+  expect(packager).toContain("$lifecycleEvidenceName = 'windows-lifecycle-evidence.json'");
+  expect(packager).toContain('$lifecycleEvidence.checks.$check -ne $true');
+});
+
 test('verifies release-evidence tools before enforcing policy or generating an SBOM', () => {
   expect(securityWorkflow).toContain('CARGO_DENY_VERSION: "0.20.2"');
   expect(securityWorkflow).toContain(
@@ -67,5 +113,6 @@ test('limits Cargo sources and emits a source-bound pathless CycloneDX inventory
   expect(packager).toContain("'--select-catalogers=-file'");
   expect(packager).toContain("name = 'renamewright:source-sha'");
   expect(packager).toContain('The generated SBOM contains the native repository path.');
-  expect(packager).toContain('files = @($portableName, $installerName, $sbomName, $checklistName)');
+  expect(packager).toContain('$lifecycleEvidenceName');
+  expect(packager).toContain('schemaVersion = 2');
 });

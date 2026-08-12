@@ -11,7 +11,10 @@ param(
     [string]$SourceSha,
 
     [Parameter(Mandatory = $true)]
-    [string]$SyftPath
+    [string]$SyftPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$LifecycleEvidencePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +22,7 @@ Set-StrictMode -Version Latest
 
 $root = (Resolve-Path -LiteralPath $RepositoryRoot).Path
 $syft = (Resolve-Path -LiteralPath $SyftPath).Path
+$lifecycleEvidenceSource = (Resolve-Path -LiteralPath $LifecycleEvidencePath).Path
 $expectedSha = $SourceSha.ToLowerInvariant()
 $actualSha = (git -C $root rev-parse HEAD).Trim().ToLowerInvariant()
 if ($actualSha -cne $expectedSha) {
@@ -94,6 +98,42 @@ Do not restore journal files into an older Renamewright version. Verify an
 acceptance artifact's SHA-256 manifest before using it for recovery.
 "@
 Set-Content -LiteralPath (Join-Path $output $dataLifecycleName) -Value $dataLifecycle -Encoding utf8
+
+$lifecycleEvidenceName = 'windows-lifecycle-evidence.json'
+$lifecycleEvidence = Get-Content -LiteralPath $lifecycleEvidenceSource -Raw | ConvertFrom-Json
+if (
+    $lifecycleEvidence.schemaVersion -ne 1 -or
+    [string]$lifecycleEvidence.product -cne 'Renamewright' -or
+    [string]$lifecycleEvidence.identifier -cne $identifier -or
+    [string]$lifecycleEvidence.currentVersion -cne $version -or
+    [Version]$lifecycleEvidence.previousVersion -ge [Version]$version -or
+    [string]$lifecycleEvidence.dataRoots.journals -cne "%APPDATA%\$identifier\journals" -or
+    [string]$lifecycleEvidence.dataRoots.webview -cne "%LOCALAPPDATA%\$identifier"
+) {
+    throw "The Windows lifecycle evidence does not match this acceptance package."
+}
+$requiredLifecycleChecks = @(
+    'previousVersionInstalled',
+    'upgradeOverInstall',
+    'installedApplicationStarted',
+    'portableApplicationStarted',
+    'portableCreatedNoAdjacentProfile',
+    'downgradeRefused',
+    'installedBinaryPreserved',
+    'uninstallCompleted',
+    'journalDataRetained',
+    'webviewDataRetained'
+)
+foreach ($check in $requiredLifecycleChecks) {
+    if ($lifecycleEvidence.checks.$check -ne $true) {
+        throw "The Windows lifecycle evidence is missing a required successful check."
+    }
+}
+$serializedLifecycleEvidence = Get-Content -LiteralPath $lifecycleEvidenceSource -Raw
+if ($serializedLifecycleEvidence.Contains($root, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "The Windows lifecycle evidence contains the native repository path."
+}
+Copy-Item -LiteralPath $lifecycleEvidenceSource -Destination (Join-Path $output $lifecycleEvidenceName)
 
 $sbomName = "Renamewright-$version.cdx.json"
 $sbomPath = Join-Path $output $sbomName
@@ -190,7 +230,14 @@ $manifest = [ordered]@{
         image = [string]$env:ImageOS
         imageVersion = [string]$env:ImageVersion
     }
-    files = @($portableName, $installerName, $sbomName, $checklistName, $dataLifecycleName)
+    files = @(
+        $portableName,
+        $installerName,
+        $sbomName,
+        $checklistName,
+        $dataLifecycleName,
+        $lifecycleEvidenceName
+    )
     limitations = @(
         'The acceptance package is not code-signed.',
         'The hosted build does not perform interactive packaged GUI smoke tests.',
