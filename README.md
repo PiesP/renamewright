@@ -13,12 +13,13 @@ new product owns its interaction model, safety guarantees, and implementation.
 
 ## Status
 
-The repository contains the complete read-only planning milestone. Native picker
-and drag/drop admission retain paths in Rust, the Workbench virtualises and
-filters large prefix plans, and Windows name, occupied-destination, and stale
-source diagnostics block unsafe proposals. Plans can be inspected as versioned,
-path-free JSON and exported through a native create-new dialog. Source filesystem
-mutation is not exposed to the application.
+The repository contains the 0.1.0 Windows release candidate. Native picker and
+drag/drop admission retain paths in Rust, the Workbench virtualises and filters
+large rule-based plans, and Windows name, occupied-destination, and stale-source
+diagnostics block unsafe proposals. Plans can be inspected as versioned,
+path-free JSON and exported through a native create-new dialog. Applying a new
+plan remains disabled; recovery and Undo are limited to journaled transactions,
+fresh filesystem revalidation, and native user confirmation.
 
 ## Development
 
@@ -46,3 +47,26 @@ additionally exercises the rendered flow and responsive layouts in Chromium.
 - Native path handling without lossy Unicode conversion.
 - No telemetry, remote content, shell access, or background network traffic in
   the first release.
+
+## Code signing policy
+
+Renamewright 0.1.0 is an explicitly identified unsigned bootstrap release.
+Future Windows releases are intended to use free code signing provided by
+[SignPath.io](https://signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/), after the project is accepted and
+the trusted-build integration is configured.
+
+- Committer, reviewer, and signing approver: [PiesP](https://github.com/PiesP).
+- Only artifacts built from this public repository by the configured GitHub
+  Actions release workflow may be submitted for signing.
+- This program does not transfer information to other networked systems unless
+  specifically requested by the user or the person installing or operating it.
+  GitHub and SignPath apply their own privacy policies when a person visits
+  their services or downloads a release.
+- A release page must state whether its artifacts are signed and publish
+  source-bound checksums. An unsigned artifact must never be represented as
+  signed.
+
+## License
+
+Renamewright is available under the [MIT License](LICENSE).
