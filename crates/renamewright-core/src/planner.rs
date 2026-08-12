@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
     Diagnostic, DiagnosticCode, ParentId, PlanId, PlanRow, RenamePlan, SourceId, SourceSnapshot,
@@ -9,6 +9,35 @@ use crate::rules::{
     SequenceScope,
 };
 use crate::windows::{comparison_key, validate_name};
+
+pub const MAX_OVERRIDES: usize = 100_000;
+pub const MAX_OVERRIDE_TEXT_BYTES: usize = 4_096;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameOverride {
+    source_id: SourceId,
+    proposed_name: String,
+}
+
+impl NameOverride {
+    #[must_use]
+    pub fn new(source_id: SourceId, proposed_name: impl Into<String>) -> Self {
+        Self {
+            source_id,
+            proposed_name: proposed_name.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn source_id(&self) -> SourceId {
+        self.source_id
+    }
+
+    #[must_use]
+    pub fn proposed_name(&self) -> &str {
+        &self.proposed_name
+    }
+}
 
 #[must_use]
 pub fn build_plan(
@@ -77,6 +106,30 @@ pub fn build_plan_with_rule_pipeline_and_environment(
     policy: TargetPolicy,
     environment: &ValidationEnvironment,
 ) -> RenamePlan {
+    build_plan_with_rule_pipeline_overrides_and_environment(
+        plan_id,
+        generation,
+        sources,
+        pipeline,
+        &[],
+        policy,
+        environment,
+    )
+}
+
+#[must_use]
+pub fn build_plan_with_rule_pipeline_overrides_and_environment(
+    plan_id: PlanId,
+    generation: u64,
+    sources: &[SourceSnapshot],
+    pipeline: &RulePipeline,
+    overrides: &[NameOverride],
+    policy: TargetPolicy,
+    environment: &ValidationEnvironment,
+) -> RenamePlan {
+    let Some(overrides) = validate_overrides(sources, overrides) else {
+        return invalid_rule_plan(plan_id, generation, sources);
+    };
     let sequence_values = (0..pipeline.rules().len())
         .map(|rule_index| {
             pipeline
@@ -86,7 +139,15 @@ pub fn build_plan_with_rule_pipeline_and_environment(
         .collect::<Vec<_>>();
     let mut rows = sources
         .iter()
-        .map(|source| build_row(source, pipeline, &sequence_values, policy))
+        .map(|source| {
+            build_row(
+                source,
+                pipeline,
+                &sequence_values,
+                overrides.get(&source.id()).copied(),
+                policy,
+            )
+        })
         .collect::<Vec<_>>();
 
     mark_stale_sources(&mut rows, environment);
@@ -100,6 +161,7 @@ fn build_row(
     source: &SourceSnapshot,
     pipeline: &RulePipeline,
     sequence_values: &[Option<BTreeMap<SourceId, Option<u64>>>],
+    name_override: Option<&str>,
     policy: TargetPolicy,
 ) -> PlanRow {
     let mut proposed = source.native_name().to_os_string();
@@ -129,12 +191,48 @@ fn build_row(
         trace.push(TraceStep::new(rule_index, before, after));
     }
 
+    let override_applied = name_override.is_some();
+    if let Some(name_override) = name_override {
+        proposed = name_override.into();
+    }
+
     let mut diagnostics = validate(proposed.as_os_str(), policy);
     if proposed == source.native_name() {
         diagnostics.push(Diagnostic::information(DiagnosticCode::Unchanged));
     }
 
-    PlanRow::new(source, proposed, trace, diagnostics)
+    let row = PlanRow::new(source, proposed, trace, diagnostics);
+    if override_applied {
+        row.with_override_applied()
+    } else {
+        row
+    }
+}
+
+fn validate_overrides<'a>(
+    sources: &[SourceSnapshot],
+    overrides: &'a [NameOverride],
+) -> Option<BTreeMap<SourceId, &'a str>> {
+    if overrides.len() > MAX_OVERRIDES {
+        return None;
+    }
+    let source_ids = sources
+        .iter()
+        .map(SourceSnapshot::id)
+        .collect::<BTreeSet<_>>();
+    let mut validated = BTreeMap::new();
+    for name_override in overrides {
+        if name_override.source_id().value() == 0
+            || !source_ids.contains(&name_override.source_id())
+            || name_override.proposed_name().len() > MAX_OVERRIDE_TEXT_BYTES
+            || validated
+                .insert(name_override.source_id(), name_override.proposed_name())
+                .is_some()
+        {
+            return None;
+        }
+    }
+    Some(validated)
 }
 
 fn allocate_sequence(

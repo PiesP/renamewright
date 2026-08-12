@@ -323,6 +323,7 @@ pub struct PlanRow {
     status: NameStatus,
     trace: Vec<TraceStep>,
     diagnostics: Vec<Diagnostic>,
+    override_applied: bool,
 }
 
 impl PlanRow {
@@ -347,7 +348,13 @@ impl PlanRow {
             status,
             trace,
             diagnostics,
+            override_applied: false,
         }
+    }
+
+    pub(crate) const fn with_override_applied(mut self) -> Self {
+        self.override_applied = true;
+        self
     }
 
     pub(crate) fn block(&mut self, code: DiagnosticCode) {
@@ -404,6 +411,11 @@ impl PlanRow {
     #[must_use]
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    #[must_use]
+    pub const fn override_applied(&self) -> bool {
+        self.override_applied
     }
 }
 

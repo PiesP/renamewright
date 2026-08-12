@@ -17,13 +17,15 @@ pub use model::{
     SourceSnapshot, TargetPolicy, TraceStep, ValidationEnvironment,
 };
 pub use planner::{
-    build_plan, build_plan_with_environment, build_plan_with_rule_pipeline,
-    build_plan_with_rule_pipeline_and_environment,
+    MAX_OVERRIDE_TEXT_BYTES, MAX_OVERRIDES, NameOverride, build_plan, build_plan_with_environment,
+    build_plan_with_rule_pipeline, build_plan_with_rule_pipeline_and_environment,
+    build_plan_with_rule_pipeline_overrides_and_environment,
 };
 pub use rules::{
-    CaseMode, ExtensionOperation, FilenamePart, MAX_RULE_TEXT_BYTES, MAX_RULES,
-    MAX_SEQUENCE_PADDING, RenameRule, RulePipeline, RuleValidationError, RuleValidationErrorKind,
-    SequenceOrder, SequencePlacement, SequenceScope, UnicodeNormalizationForm,
+    CaseMode, CharacterClass, CharacterClassOperation, ExtensionOperation, FilenamePart,
+    MAX_RULE_TEXT_BYTES, MAX_RULES, MAX_SEQUENCE_PADDING, RangeOperation, RangeOrigin, RenameRule,
+    RulePipeline, RuleValidationError, RuleValidationErrorKind, SequenceOrder, SequencePlacement,
+    SequenceScope, UnicodeNormalizationForm,
 };
 pub use windows::windows_name_comparison_key;
 
