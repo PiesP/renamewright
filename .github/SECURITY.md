@@ -20,9 +20,11 @@ through the private channel.
   runtime network content is required.
 - The WebView receives opaque source identifiers rather than arbitrary native
   write paths.
-- The first implementation milestone is read-only and exposes no rename command.
-- Future execution accepts only a current backend-created validated plan and
-  journals every step before mutating the filesystem.
+- Applying a newly previewed plan remains disabled, and no new-plan Apply command
+  is registered.
+- Recovery and Undo of existing journals require a current path-free inspection,
+  native confirmation, fresh identity validation, and journaled no-replace
+  execution.
 - Runtime code is bundled. Dynamic code execution, shell commands, plugins, and
   user scripts are out of scope.
 
@@ -30,6 +32,7 @@ through the private channel.
 
 GitHub Actions use read-only default permissions and immutable action pins.
 Dependabot monitors npm, Cargo, the Rust toolchain, and Actions after a 24-hour
-cooling period. CodeQL, dependency advisory checks, strict compilers, tests, and
-platform builds provide independent evidence. AI or scanner findings require
-human validation before remediation or severity claims.
+cooling period. CodeQL, dependency advisory and policy checks, strict compilers,
+tests, platform builds, checksums, and a source-bound SBOM provide independent
+evidence. AI or scanner findings require human validation before remediation or
+severity claims.
