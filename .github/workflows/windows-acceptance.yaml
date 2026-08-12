@@ -1,0 +1,86 @@
+name: Windows Acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "26"
+
+jobs:
+  package:
+    name: acceptance/windows-package
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm and Node.js
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
+        with:
+          package-json-file: package.json
+          runtime: node@${{ env.NODE_VERSION }}
+          cache: true
+          install: false
+
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile --no-runtime
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy
+
+      - name: Lint the Windows native boundary
+        run: >-
+          cargo clippy
+          --package renamewright-platform
+          --package renamewright-windows-native
+          --all-targets
+          --locked
+          -- -D warnings
+
+      - name: Test the complete Rust workspace
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Build the unsigned Windows acceptance package
+        run: pnpm tauri build --ci --bundles nsis --no-sign
+
+      - name: Prepare the source-bound acceptance artifact
+        shell: pwsh
+        run: >-
+          ./scripts/prepare-windows-acceptance.ps1
+          -RepositoryRoot $PWD.Path
+          -OutputDirectory (Join-Path $PWD.Path 'acceptance')
+          -SourceSha $env:GITHUB_SHA
+
+      - name: Upload the Windows acceptance artifact
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: renamewright-windows-acceptance-${{ github.sha }}
+          path: acceptance/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Record the immutable artifact identity
+        shell: pwsh
+        env:
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          @"
+          ## Windows acceptance artifact
+
+          - Source SHA: ``${env:GITHUB_SHA}``
+          - Artifact: ``renamewright-windows-acceptance-${env:GITHUB_SHA}``
+          - GitHub artifact digest: ``${env:ARTIFACT_DIGEST}``
+          - Signing: unsigned acceptance build
+          "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
