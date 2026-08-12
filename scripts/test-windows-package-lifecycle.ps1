@@ -4,7 +4,7 @@ param(
     [string]$CurrentInstallerPath,
 
     [Parameter(Mandatory = $true)]
-    [string]$CurrentPortablePath,
+    [string]$VerifiedPortableOutputPath,
 
     [Parameter(Mandatory = $true)]
     [string]$PreviousInstallerPath,
@@ -181,13 +181,16 @@ function Assert-ExactChild {
 }
 
 $currentInstaller = Resolve-PackageFile $CurrentInstallerPath
-$currentPortable = Resolve-PackageFile $CurrentPortablePath
 $previousInstaller = Resolve-PackageFile $PreviousInstallerPath
+$verifiedPortable = [IO.Path]::GetFullPath($VerifiedPortableOutputPath)
 if ([Version]$PreviousVersion -ge [Version]$CurrentVersion) {
     throw 'The compatibility fixture must be older than the current package.'
 }
 if (Test-Path -LiteralPath $OutputPath) {
     throw 'The lifecycle evidence output already exists.'
+}
+if (Test-Path -LiteralPath $verifiedPortable) {
+    throw 'The verified portable output already exists.'
 }
 
 $roamingBase = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
@@ -227,9 +230,10 @@ try {
     Assert-Marker -Path $journalMarker -Expected $journalMarkerValue
     Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue
     Assert-ExecutableVersion -Path $currentExecutable -Expected $CurrentVersion
-    Assert-ExecutableVersion -Path $currentPortable -Expected $CurrentVersion
+    Copy-Item -LiteralPath $currentExecutable -Destination $verifiedPortable
+    Assert-ExecutableVersion -Path $verifiedPortable -Expected $CurrentVersion
     $installedDigest = (Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
-    $portableDigest = (Get-FileHash -LiteralPath $currentPortable -Algorithm SHA256).Hash.ToLowerInvariant()
+    $portableDigest = (Get-FileHash -LiteralPath $verifiedPortable -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($portableDigest -cne $installedDigest) {
         throw 'The portable artifact does not match the installed application payload.'
     }
@@ -242,7 +246,7 @@ try {
     $afterDowngradeRecord = Get-InstallRecord
     Assert-Version -Record $afterDowngradeRecord -Expected $CurrentVersion
     $afterDowngradeExecutable = Get-InstalledExecutable -Record $afterDowngradeRecord
-    $installedDigestAfterDowngrade = (Get-FileHash -LiteralPath $afterDowngradeExecutable -Algorithm SHA256).Hash
+    $installedDigestAfterDowngrade = (Get-FileHash -LiteralPath $afterDowngradeExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($installedDigestAfterDowngrade -cne $installedDigestBeforeDowngrade) {
         throw 'The refused downgrade changed the installed executable.'
     }
@@ -324,6 +328,9 @@ finally {
     }
     Remove-TestDataRoot -Path $roamingRoot
     Remove-TestDataRoot -Path $webViewRoot
+    if (-not $lifecycleSucceeded -and (Test-Path -LiteralPath $verifiedPortable)) {
+        Remove-Item -LiteralPath $verifiedPortable -Force
+    }
 }
 
 if (-not $lifecycleSucceeded) {
