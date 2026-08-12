@@ -1,7 +1,10 @@
-export const RULE_PIPELINE_SCHEMA_VERSION = 3;
+export const RULE_PIPELINE_SCHEMA_VERSION = 4;
 export const MAX_RULES = 32;
 export const MAX_RULE_TEXT_BYTES = 4_096;
 export const MAX_SEQUENCE_PADDING = 20;
+export const MAX_OVERRIDES = 100_000;
+export const MAX_OVERRIDE_TEXT_BYTES = 4_096;
+export const MAX_RANGE_INTEGER = 4_294_967_295;
 const MAX_U64 = 18_446_744_073_709_551_615n;
 
 interface RuleBase {
@@ -72,6 +75,27 @@ export interface UnicodeNormalizationRule extends RuleBase {
   form: 'nfc' | 'nfd' | 'nfkc' | 'nfkd';
 }
 
+export interface RangeRule extends RuleBase {
+  kind: 'range';
+  target: FilenamePart;
+  operation: 'keep' | 'remove';
+  origin: 'start' | 'end';
+  offset: number;
+  length: number | null;
+}
+
+export interface CharacterClassRule extends RuleBase {
+  kind: 'characterClass';
+  target: FilenamePart;
+  operation: 'keep' | 'remove';
+  class: 'decimalNumber' | 'letter' | 'whitespace' | 'punctuation' | 'symbol';
+}
+
+export interface SourceOverride {
+  sourceId: number;
+  value: string;
+}
+
 export type RuleRequest =
   | PrefixRule
   | SuffixRule
@@ -81,12 +105,15 @@ export type RuleRequest =
   | ExtensionRule
   | CaseRule
   | WhitespaceCleanupRule
-  | UnicodeNormalizationRule;
+  | UnicodeNormalizationRule
+  | RangeRule
+  | CharacterClassRule;
 export type RuleKind = RuleRequest['kind'];
 
 export interface RulePipelineRequest {
   schemaVersion: number;
   rules: RuleRequest[];
+  overrides: SourceOverride[];
 }
 
 export interface RuleTraceStep {
@@ -105,18 +132,21 @@ export interface BrowserRuleSource {
 export interface BrowserRuleResult {
   proposedName: string;
   trace: RuleTraceStep[];
+  overrideApplied: boolean;
   diagnostic?: 'sequenceOverflow';
 }
 
 export class PlanningError extends Error {
   readonly code: string;
   readonly ruleId: number | undefined;
+  readonly sourceId: number | undefined;
 
-  constructor(code: string, message: string, ruleId?: number) {
+  constructor(code: string, message: string, ruleId?: number, sourceId?: number) {
     super(message);
     this.name = 'PlanningError';
     this.code = code;
     this.ruleId = ruleId;
+    this.sourceId = sourceId;
   }
 }
 
@@ -151,6 +181,26 @@ export function createRule(ruleId: number, kind: RuleKind): RuleRequest {
       return { kind, ruleId, enabled: true, target: 'wholeName', replacement: ' ' };
     case 'unicodeNormalization':
       return { kind, ruleId, enabled: true, target: 'wholeName', form: 'nfc' };
+    case 'range':
+      return {
+        kind,
+        ruleId,
+        enabled: true,
+        target: 'stem',
+        operation: 'keep',
+        origin: 'start',
+        offset: 0,
+        length: 1,
+      };
+    case 'characterClass':
+      return {
+        kind,
+        ruleId,
+        enabled: true,
+        target: 'stem',
+        operation: 'remove',
+        class: 'decimalNumber',
+      };
   }
 }
 
@@ -165,6 +215,8 @@ export function ruleLabel(kind: RuleKind): string {
     case: 'Change case',
     whitespaceCleanup: 'Clean whitespace',
     unicodeNormalization: 'Normalize Unicode',
+    range: 'Select character range',
+    characterClass: 'Filter character class',
   };
   return labels[kind];
 }
@@ -173,8 +225,11 @@ export function planningError(cause: unknown): PlanningError {
   const record = typeof cause === 'object' && cause !== null ? cause : undefined;
   const code = record && 'code' in record ? (record as { code?: unknown }).code : undefined;
   const ruleId = record && 'ruleId' in record ? (record as { ruleId?: unknown }).ruleId : undefined;
+  const sourceId =
+    record && 'sourceId' in record ? (record as { sourceId?: unknown }).sourceId : undefined;
   const normalizedCode = typeof code === 'string' ? code : 'planningFailed';
   const normalizedRuleId = typeof ruleId === 'number' ? ruleId : undefined;
+  const normalizedSourceId = typeof sourceId === 'number' ? sourceId : undefined;
   const subject = normalizedRuleId === undefined ? 'The rule pipeline' : `Rule ${normalizedRuleId}`;
   const messages: Record<string, string> = {
     unsupportedRuleSchema: 'This rule format is not supported by this version of Renamewright.',
@@ -188,6 +243,13 @@ export function planningError(cause: unknown): PlanningError {
     invalidSequenceStep: `${subject} needs a positive whole-number step.`,
     invalidSequencePadding: `${subject} needs padding from 1 through ${MAX_SEQUENCE_PADDING}.`,
     invalidExtensionReplacement: `${subject} needs an extension without a leading dot.`,
+    invalidRangeOffset: `${subject} needs a non-negative range offset.`,
+    invalidRangeLength: `${subject} needs a positive range length or an open-ended range.`,
+    tooManyOverrides: `A plan can contain at most ${MAX_OVERRIDES.toLocaleString()} filename overrides.`,
+    invalidOverrideSourceId: 'A filename override has an invalid source identifier.',
+    duplicateOverrideSourceId: 'A source has more than one filename override.',
+    overrideTextTooLong: `A filename override is longer than ${MAX_OVERRIDE_TEXT_BYTES.toLocaleString()} bytes.`,
+    unknownOverrideSource: 'A filename override no longer belongs to the current source set.',
     pickerUnavailable: 'The native file picker is unavailable.',
     sourceAdmissionFailed: 'One or more selected sources are no longer available.',
     stateUnavailable: 'The planning worker is unavailable.',
@@ -196,7 +258,8 @@ export function planningError(cause: unknown): PlanningError {
   return new PlanningError(
     normalizedCode,
     messages[normalizedCode] ?? 'The rename plan could not be updated.',
-    normalizedRuleId
+    normalizedRuleId,
+    normalizedSourceId
   );
 }
 
@@ -213,6 +276,19 @@ export function compileBrowserRulePipeline(
   sources: readonly BrowserRuleSource[]
 ): (source: BrowserRuleSource) => BrowserRuleResult {
   validateRequest(request);
+  const sourceIds = new Set(sources.map((source) => source.sourceId));
+  const overrides = new Map<number, string>();
+  for (const nameOverride of request.overrides) {
+    if (!sourceIds.has(nameOverride.sourceId)) {
+      throw new PlanningError(
+        'unknownOverrideSource',
+        'A filename override no longer belongs to the current source set.',
+        undefined,
+        nameOverride.sourceId
+      );
+    }
+    overrides.set(nameOverride.sourceId, nameOverride.value);
+  }
   const compiledRules: Array<{
     ruleId: number;
     apply: (input: string, source: BrowserRuleSource) => string | undefined;
@@ -294,6 +370,30 @@ export function compileBrowserRulePipeline(
             ),
         });
         break;
+      case 'range':
+        compiledRules.push({
+          ruleId: rule.ruleId,
+          apply: (input) =>
+            transformFilenamePart(input, rule.target, (text) =>
+              applyRange(text, rule.operation, rule.origin, rule.offset, rule.length)
+            ),
+        });
+        break;
+      case 'characterClass': {
+        const matcher = characterClassMatcher(rule.class);
+        compiledRules.push({
+          ruleId: rule.ruleId,
+          apply: (input) =>
+            transformFilenamePart(input, rule.target, (text) =>
+              [...text]
+                .filter((character) =>
+                  rule.operation === 'keep' ? matcher.test(character) : !matcher.test(character)
+                )
+                .join('')
+            ),
+        });
+        break;
+      }
     }
   }
   return (source) => {
@@ -303,12 +403,15 @@ export function compileBrowserRulePipeline(
       const before = proposedName;
       const after = rule.apply(proposedName, source);
       if (after === undefined) {
-        return { proposedName, trace, diagnostic: 'sequenceOverflow' };
+        return { proposedName, trace, overrideApplied: false, diagnostic: 'sequenceOverflow' };
       }
       proposedName = after;
       trace.push({ ruleIndex, ruleId: rule.ruleId, before, after: proposedName });
     }
-    return { proposedName, trace };
+    const nameOverride = overrides.get(source.sourceId);
+    return nameOverride === undefined
+      ? { proposedName, trace, overrideApplied: false }
+      : { proposedName: nameOverride, trace, overrideApplied: true };
   };
 }
 
@@ -324,6 +427,40 @@ function validateRequest(request: RulePipelineRequest): void {
       'tooManyRules',
       `A rule pipeline can contain at most ${MAX_RULES} rules.`
     );
+  }
+  if (request.overrides.length > MAX_OVERRIDES) {
+    throw new PlanningError(
+      'tooManyOverrides',
+      `A plan can contain at most ${MAX_OVERRIDES.toLocaleString()} filename overrides.`
+    );
+  }
+  const overrideIds = new Set<number>();
+  for (const nameOverride of request.overrides) {
+    if (!Number.isSafeInteger(nameOverride.sourceId) || nameOverride.sourceId <= 0) {
+      throw new PlanningError(
+        'invalidOverrideSourceId',
+        'A filename override has an invalid source identifier.',
+        undefined,
+        nameOverride.sourceId
+      );
+    }
+    if (overrideIds.has(nameOverride.sourceId)) {
+      throw new PlanningError(
+        'duplicateOverrideSourceId',
+        'A source has more than one filename override.',
+        undefined,
+        nameOverride.sourceId
+      );
+    }
+    overrideIds.add(nameOverride.sourceId);
+    if (new TextEncoder().encode(nameOverride.value).length > MAX_OVERRIDE_TEXT_BYTES) {
+      throw new PlanningError(
+        'overrideTextTooLong',
+        `A filename override is longer than ${MAX_OVERRIDE_TEXT_BYTES.toLocaleString()} bytes.`,
+        undefined,
+        nameOverride.sourceId
+      );
+    }
   }
   const ids = new Set<number>();
   for (const rule of request.rules) {
@@ -350,6 +487,25 @@ function validateRequest(request: RulePipelineRequest): void {
         `Rule ${rule.ruleId} contains text longer than ${MAX_RULE_TEXT_BYTES.toLocaleString()} bytes.`,
         rule.ruleId
       );
+    }
+    if (rule.kind === 'range') {
+      if (!Number.isInteger(rule.offset) || rule.offset < 0 || rule.offset > MAX_RANGE_INTEGER) {
+        throw new PlanningError(
+          'invalidRangeOffset',
+          `Rule ${rule.ruleId} needs a non-negative range offset.`,
+          rule.ruleId
+        );
+      }
+      if (
+        rule.length !== null &&
+        (!Number.isInteger(rule.length) || rule.length < 1 || rule.length > MAX_RANGE_INTEGER)
+      ) {
+        throw new PlanningError(
+          'invalidRangeLength',
+          `Rule ${rule.ruleId} needs a positive range length or an open-ended range.`,
+          rule.ruleId
+        );
+      }
     }
     if (rule.kind === 'sequence') {
       if (!Number.isSafeInteger(rule.start) || rule.start < 0) {
@@ -409,6 +565,8 @@ function ruleText(rule: RuleRequest): string[] {
       return [rule.replacement];
     case 'case':
     case 'unicodeNormalization':
+    case 'range':
+    case 'characterClass':
       return [];
   }
 }
@@ -453,6 +611,39 @@ function cleanupWhitespace(text: string, replacement: string): string {
   return text
     .replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '')
     .replace(/\p{White_Space}+/gu, replacement);
+}
+
+function applyRange(
+  text: string,
+  operation: RangeRule['operation'],
+  origin: RangeRule['origin'],
+  offset: number,
+  length: number | null
+): string {
+  const characters = [...text];
+  let start: number;
+  let end: number;
+  if (origin === 'start') {
+    start = Math.min(offset, characters.length);
+    end = length === null ? characters.length : Math.min(start + length, characters.length);
+  } else {
+    end = Math.max(characters.length - offset, 0);
+    start = length === null ? 0 : Math.max(end - length, 0);
+  }
+  return operation === 'keep'
+    ? characters.slice(start, end).join('')
+    : [...characters.slice(0, start), ...characters.slice(end)].join('');
+}
+
+function characterClassMatcher(characterClass: CharacterClassRule['class']): RegExp {
+  const patterns: Record<CharacterClassRule['class'], RegExp> = {
+    decimalNumber: /^\p{Decimal_Number}$/u,
+    letter: /^\p{Letter}$/u,
+    whitespace: /^\p{White_Space}$/u,
+    punctuation: /^\p{Punctuation}$/u,
+    symbol: /^\p{Symbol}$/u,
+  };
+  return patterns[characterClass];
 }
 
 function allocateSequence(

@@ -119,6 +119,7 @@ impl StoredPlan {
 
 const RULE_PIPELINE_SCHEMA_VERSION: u16 = 4;
 const MAX_SEQUENCE_INPUT: u64 = 9_007_199_254_740_991;
+const MAX_RANGE_INPUT: u64 = u32::MAX as u64;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -288,8 +289,8 @@ enum RuleRequestDto {
         target: FilenamePartDto,
         operation: RangeOperationDto,
         origin: RangeOriginDto,
-        offset: u32,
-        length: Option<u32>,
+        offset: u64,
+        length: Option<u64>,
     },
     CharacterClass {
         rule_id: u64,
@@ -374,6 +375,13 @@ impl RuleRequestDto {
             Self::Range {
                 length: Some(0), ..
             } => Some(RuleRequestErrorKind::InvalidRangeLength),
+            Self::Range { offset, .. } if *offset > MAX_RANGE_INPUT => {
+                Some(RuleRequestErrorKind::InvalidRangeOffset)
+            }
+            Self::Range {
+                length: Some(length),
+                ..
+            } if *length > MAX_RANGE_INPUT => Some(RuleRequestErrorKind::InvalidRangeLength),
             _ => None,
         }
     }
@@ -476,8 +484,8 @@ impl RuleRequestDto {
                     RangeOriginDto::Start => RangeOrigin::Start,
                     RangeOriginDto::End => RangeOrigin::End,
                 },
-                *offset,
-                *length,
+                u32::try_from(*offset).unwrap_or(u32::MAX),
+                length.map(|length| u32::try_from(length).unwrap_or(u32::MAX)),
             ),
             Self::CharacterClass {
                 target,
@@ -523,6 +531,7 @@ enum RuleRequestErrorKind {
     InvalidSequenceStep,
     InvalidSequencePadding,
     InvalidExtensionReplacement,
+    InvalidRangeOffset,
     InvalidRangeLength,
     TooManyOverrides,
     InvalidOverrideSourceId,
@@ -545,6 +554,7 @@ impl RuleRequestErrorKind {
             Self::InvalidSequenceStep => "invalidSequenceStep",
             Self::InvalidSequencePadding => "invalidSequencePadding",
             Self::InvalidExtensionReplacement => "invalidExtensionReplacement",
+            Self::InvalidRangeOffset => "invalidRangeOffset",
             Self::InvalidRangeLength => "invalidRangeLength",
             Self::TooManyOverrides => "tooManyOverrides",
             Self::InvalidOverrideSourceId => "invalidOverrideSourceId",
@@ -2361,6 +2371,32 @@ mod tests {
                 length: Some(0),
             }],
         };
+        let oversized_range_offset = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
+            rules: vec![RuleRequestDto::Range {
+                rule_id: 109,
+                enabled: true,
+                target: FilenamePartDto::Stem,
+                operation: RangeOperationDto::Remove,
+                origin: RangeOriginDto::End,
+                offset: super::MAX_RANGE_INPUT + 1,
+                length: None,
+            }],
+        };
+        let oversized_range_length = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            overrides: Vec::new(),
+            rules: vec![RuleRequestDto::Range {
+                rule_id: 113,
+                enabled: true,
+                target: FilenamePartDto::Extension,
+                operation: RangeOperationDto::Keep,
+                origin: RangeOriginDto::Start,
+                offset: 0,
+                length: Some(super::MAX_RANGE_INPUT + 1),
+            }],
+        };
         let duplicate_override = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
             rules: Vec::new(),
@@ -2410,6 +2446,8 @@ mod tests {
         let start_error = compile_rule_request(&invalid_start).err();
         let extension_error = compile_rule_request(&invalid_extension).err();
         let range_error = compile_rule_request(&invalid_range).err();
+        let range_offset_error = compile_rule_request(&oversized_range_offset).err();
+        let range_length_error = compile_rule_request(&oversized_range_length).err();
         let duplicate_override_error = compile_rule_request(&duplicate_override).err();
         let oversized_override_error = compile_rule_request(&oversized_override).err();
         let invalid_override_id_error = compile_rule_request(&invalid_override_id).err();
@@ -2446,6 +2484,14 @@ mod tests {
         assert_eq!(
             range_error.map(|error| (error.rule_id, error.kind)),
             Some((Some(107), RuleRequestErrorKind::InvalidRangeLength))
+        );
+        assert_eq!(
+            range_offset_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(109), RuleRequestErrorKind::InvalidRangeOffset))
+        );
+        assert_eq!(
+            range_length_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(113), RuleRequestErrorKind::InvalidRangeLength))
         );
         assert_eq!(
             duplicate_override_error.map(|error| (error.source_id, error.kind)),

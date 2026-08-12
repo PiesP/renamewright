@@ -1,10 +1,13 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import type { PlanRow, RowStatus } from './client';
+import type { SourceOverride } from './rules';
 
 type PlanFilter = 'all' | RowStatus;
 
 interface VirtualPlanTableProps {
   rows: PlanRow[];
+  overrides: SourceOverride[];
+  onOverride: (sourceId: number, value: string | undefined) => void;
 }
 
 const DEFAULT_ROW_HEIGHT = 92;
@@ -59,6 +62,8 @@ export function VirtualPlanTable(props: VirtualPlanTableProps) {
   const [scrollTop, setScrollTop] = createSignal(0);
   const [viewportHeight, setViewportHeight] = createSignal(DEFAULT_VIEWPORT_HEIGHT);
   const [rowHeight, setRowHeight] = createSignal(DEFAULT_ROW_HEIGHT);
+  const [editingSourceId, setEditingSourceId] = createSignal<number>();
+  const [overrideDraft, setOverrideDraft] = createSignal('');
   let viewport: HTMLDivElement | undefined;
 
   const counts = createMemo(() => ({
@@ -115,6 +120,24 @@ export function VirtualPlanTable(props: VirtualPlanTableProps) {
     if (viewport) {
       viewport.scrollTop = 0;
     }
+  };
+
+  const existingOverride = (sourceId: number) =>
+    props.overrides.find((nameOverride) => nameOverride.sourceId === sourceId)?.value;
+
+  const beginOverride = (row: PlanRow) => {
+    setEditingSourceId(row.sourceId);
+    setOverrideDraft(existingOverride(row.sourceId) ?? row.proposedName);
+  };
+
+  const cancelOverride = () => {
+    setEditingSourceId(undefined);
+    setOverrideDraft('');
+  };
+
+  const saveOverride = (sourceId: number) => {
+    props.onOverride(sourceId, overrideDraft());
+    cancelOverride();
   };
 
   return (
@@ -174,7 +197,64 @@ export function VirtualPlanTable(props: VirtualPlanTableProps) {
                       <span class="file-name">{row.originalName}</span>
                     </td>
                     <td class="virtual-cell" data-label="Proposed">
-                      <span class="file-name proposed-name">{row.proposedName}</span>
+                      <Show
+                        when={editingSourceId() === row.sourceId}
+                        fallback={
+                          <div class="proposed-name-content">
+                            <span class="file-name proposed-name">{row.proposedName}</span>
+                            <div class="override-actions">
+                              <Show when={row.overrideApplied}>
+                                <span class="override-badge">Override</span>
+                              </Show>
+                              <button
+                                class="table-action"
+                                type="button"
+                                aria-label={`Edit override for ${row.originalName}`}
+                                onClick={() => beginOverride(row)}
+                              >
+                                Edit
+                              </button>
+                              <Show when={row.overrideApplied}>
+                                <button
+                                  class="table-action table-action-reset"
+                                  type="button"
+                                  aria-label={`Reset override for ${row.originalName}`}
+                                  onClick={() => props.onOverride(row.sourceId, undefined)}
+                                >
+                                  Reset
+                                </button>
+                              </Show>
+                            </div>
+                          </div>
+                        }
+                      >
+                        <form
+                          class="override-editor"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            saveOverride(row.sourceId);
+                          }}
+                        >
+                          <label class="visually-hidden" for={`override-${row.sourceId}`}>
+                            Override name for {row.originalName}
+                          </label>
+                          <input
+                            id={`override-${row.sourceId}`}
+                            type="text"
+                            autofocus
+                            value={overrideDraft()}
+                            onInput={(event) => setOverrideDraft(event.currentTarget.value)}
+                          />
+                          <div class="override-actions">
+                            <button class="table-action" type="submit">
+                              Save
+                            </button>
+                            <button class="table-action" type="button" onClick={cancelOverride}>
+                              Cancel
+                            </button>
+                          </div>
+                        </form>
+                      </Show>
                     </td>
                     <td class="virtual-cell virtual-status-cell" data-label="Status">
                       <span class={`status status-${row.status}`}>

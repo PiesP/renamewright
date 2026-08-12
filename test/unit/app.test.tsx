@@ -21,6 +21,7 @@ afterEach(cleanup);
 
 const emptyRequest = (): RulePipelineRequest => ({
   schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+  overrides: [],
   rules: [createRule(1, 'prefix')],
 });
 
@@ -33,7 +34,7 @@ function makePlan(request: RulePipelineRequest): Plan {
   const apply = compileBrowserRulePipeline(request, ruleSources);
   const rows = ruleSources.map((source) => {
     const { sourceId, originalName } = source;
-    const { proposedName, diagnostic } = apply(source);
+    const { proposedName, diagnostic, overrideApplied } = apply(source);
     const blocked =
       diagnostic !== undefined ||
       proposedName.includes('?') ||
@@ -42,6 +43,7 @@ function makePlan(request: RulePipelineRequest): Plan {
       sourceId,
       originalName,
       proposedName,
+      overrideApplied,
       status: blocked
         ? ('blocked' as const)
         : proposedName === originalName
@@ -68,7 +70,7 @@ function fakeClient(): PlanningClient {
     selectSources: async (request) => makePlan(request),
     previewRules: async (request) => makePlan(request),
     inspectPlan: async (planId) =>
-      JSON.stringify({ schemaVersion: 4, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
+      JSON.stringify({ schemaVersion: 5, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
     exportPlan: async () => false,
     listLedger: async () => [],
     inspectRecovery: async () => {
@@ -591,6 +593,67 @@ test('edits filename structure rules as one ordered pipeline', async () => {
   );
 });
 
+test('edits range and Unicode character-class rules in the rendered pipeline', async () => {
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  await user.selectOptions(screen.getByRole('combobox', { name: 'New rule' }), 'range');
+  await user.click(screen.getByRole('button', { name: 'Add rule' }));
+  const rangeEditor = screen
+    .getByRole('heading', { name: 'Select character range' })
+    .closest('section');
+  if (!rangeEditor) {
+    throw new Error('Range editor was not rendered.');
+  }
+  const rangeLength = within(rangeEditor).getByRole('spinbutton', { name: 'Range length' });
+  await user.clear(rangeLength);
+  await user.type(rangeLength, '3');
+  expect(await screen.findByText('inv.pdf')).toBeInTheDocument();
+
+  await user.selectOptions(screen.getByRole('combobox', { name: 'New rule' }), 'characterClass');
+  await user.click(screen.getByRole('button', { name: 'Add rule' }));
+  const classEditor = screen
+    .getByRole('heading', { name: 'Filter character class' })
+    .closest('section');
+  if (!classEditor) {
+    throw new Error('Character-class editor was not rendered.');
+  }
+  await user.selectOptions(
+    within(classEditor).getByRole('combobox', { name: 'Class action' }),
+    'keep'
+  );
+  await user.selectOptions(
+    within(classEditor).getByRole('combobox', { name: 'Unicode class' }),
+    'letter'
+  );
+  expect(await screen.findByText('inv.pdf')).toBeInTheDocument();
+  expect(classEditor).toHaveTextContent('Uses Unicode properties, not ASCII-only ranges.');
+});
+
+test('keeps an inline source override stable until it is reset', async () => {
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  await user.click(screen.getByRole('button', { name: 'Edit override for invoice.pdf' }));
+  const override = screen.getByRole('textbox', { name: 'Override name for invoice.pdf' });
+  await user.clear(override);
+  await user.type(override, 'manual.md');
+  await user.click(screen.getByRole('button', { name: 'Save' }));
+  expect(await screen.findByText('manual.md')).toBeInTheDocument();
+  expect(screen.getByText('Override')).toBeInTheDocument();
+
+  await user.type(screen.getByRole('textbox', { name: 'Prefix' }), 'shared-');
+  expect(await screen.findByText('shared-notes.txt')).toBeInTheDocument();
+  expect(screen.getByText('manual.md')).toBeInTheDocument();
+  expect(screen.queryByText('shared-invoice.pdf')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: 'Reset override for invoice.pdf' }));
+  expect(await screen.findByText('shared-invoice.pdf')).toBeInTheDocument();
+  expect(screen.queryByText('manual.md')).not.toBeInTheDocument();
+});
+
 test('associates an invalid regex error with its rule editor', async () => {
   const user = userEvent.setup();
   render(() => <App client={fakeClient()} />);
@@ -681,7 +744,7 @@ test('inspects and exports only the current opaque plan ID', async () => {
   await user.click(inspectButton);
 
   expect(inspectPlan).toHaveBeenCalledWith(9);
-  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 4');
+  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 5');
   await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
   expect(exportPlan).toHaveBeenCalledWith(9);
   expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');
