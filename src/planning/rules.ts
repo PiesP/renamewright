@@ -1,11 +1,14 @@
 export const RULE_PIPELINE_SCHEMA_VERSION = 4;
 export const MAX_RULES = 32;
 export const MAX_RULE_TEXT_BYTES = 4_096;
+export const MAX_RULE_OUTPUT_BYTES = 4_096;
 export const MAX_SEQUENCE_PADDING = 20;
 export const MAX_OVERRIDES = 100_000;
 export const MAX_OVERRIDE_TEXT_BYTES = 4_096;
 export const MAX_RANGE_INTEGER = 4_294_967_295;
 const MAX_U64 = 18_446_744_073_709_551_615n;
+const RULE_OUTPUT_TOO_LONG = Symbol('ruleOutputTooLong');
+const textEncoder = new TextEncoder();
 
 interface RuleBase {
   ruleId: number;
@@ -133,7 +136,7 @@ export interface BrowserRuleResult {
   proposedName: string;
   trace: RuleTraceStep[];
   overrideApplied: boolean;
-  diagnostic?: 'sequenceOverflow';
+  diagnostic?: 'nameTooLong' | 'sequenceOverflow';
 }
 
 export class PlanningError extends Error {
@@ -314,7 +317,7 @@ export function compileBrowserRulePipeline(
         }
         compiledRules.push({
           ruleId: rule.ruleId,
-          apply: (input) => input.replaceAll(rule.search, rule.replacement),
+          apply: (input) => replaceLiteralBounded(input, rule.search, rule.replacement),
         });
         break;
       case 'regexReplace':
@@ -399,11 +402,25 @@ export function compileBrowserRulePipeline(
   return (source) => {
     let proposedName = source.originalName;
     const trace: RuleTraceStep[] = [];
+    if (utf8Length(proposedName) > MAX_RULE_OUTPUT_BYTES) {
+      return { proposedName, trace, overrideApplied: false, diagnostic: 'nameTooLong' };
+    }
     for (const [ruleIndex, rule] of compiledRules.entries()) {
       const before = proposedName;
-      const after = rule.apply(proposedName, source);
+      let after: string | undefined;
+      try {
+        after = rule.apply(proposedName, source);
+      } catch (cause) {
+        if (cause === RULE_OUTPUT_TOO_LONG) {
+          return { proposedName, trace, overrideApplied: false, diagnostic: 'nameTooLong' };
+        }
+        throw cause;
+      }
       if (after === undefined) {
         return { proposedName, trace, overrideApplied: false, diagnostic: 'sequenceOverflow' };
+      }
+      if (utf8Length(after) > MAX_RULE_OUTPUT_BYTES) {
+        return { proposedName, trace, overrideApplied: false, diagnostic: 'nameTooLong' };
       }
       proposedName = after;
       trace.push({ ruleIndex, ruleId: rule.ruleId, before, after: proposedName });
@@ -453,7 +470,7 @@ function validateRequest(request: RulePipelineRequest): void {
       );
     }
     overrideIds.add(nameOverride.sourceId);
-    if (new TextEncoder().encode(nameOverride.value).length > MAX_OVERRIDE_TEXT_BYTES) {
+    if (utf8Length(nameOverride.value) > MAX_OVERRIDE_TEXT_BYTES) {
       throw new PlanningError(
         'overrideTextTooLong',
         `A filename override is longer than ${MAX_OVERRIDE_TEXT_BYTES.toLocaleString()} bytes.`,
@@ -479,9 +496,7 @@ function validateRequest(request: RulePipelineRequest): void {
       );
     }
     ids.add(rule.ruleId);
-    if (
-      ruleText(rule).some((text) => new TextEncoder().encode(text).length > MAX_RULE_TEXT_BYTES)
-    ) {
+    if (ruleText(rule).some((text) => utf8Length(text) > MAX_RULE_TEXT_BYTES)) {
       throw new PlanningError(
         'ruleTextTooLong',
         `Rule ${rule.ruleId} contains text longer than ${MAX_RULE_TEXT_BYTES.toLocaleString()} bytes.`,
@@ -687,6 +702,38 @@ function compareUnicodeScalars(left: string, right: string): number {
   return leftScalars.length - rightScalars.length;
 }
 
+function utf8Length(value: string): number {
+  return textEncoder.encode(value).length;
+}
+
+function consumeOutputBytes(byteLength: { value: number }, chunk: string): void {
+  const nextLength = byteLength.value + utf8Length(chunk);
+  if (!Number.isSafeInteger(nextLength) || nextLength > MAX_RULE_OUTPUT_BYTES) {
+    throw RULE_OUTPUT_TOO_LONG;
+  }
+  byteLength.value = nextLength;
+}
+
+function appendBoundedChunk(chunks: string[], byteLength: { value: number }, chunk: string): void {
+  consumeOutputBytes(byteLength, chunk);
+  chunks.push(chunk);
+}
+
+function replaceLiteralBounded(input: string, search: string, replacement: string): string {
+  const chunks: string[] = [];
+  const byteLength = { value: 0 };
+  let consumed = 0;
+  let offset = input.indexOf(search);
+  while (offset !== -1) {
+    appendBoundedChunk(chunks, byteLength, input.slice(consumed, offset));
+    appendBoundedChunk(chunks, byteLength, replacement);
+    consumed = offset + search.length;
+    offset = input.indexOf(search, consumed);
+  }
+  appendBoundedChunk(chunks, byteLength, input.slice(consumed));
+  return chunks.join('');
+}
+
 function compileRegexReplace(rule: RegexReplaceRule): (input: string) => string {
   if (/\(\?(?:[=!]|<[=!])|\\[1-9]/u.test(rule.pattern)) {
     throw new PlanningError(
@@ -706,17 +753,34 @@ function compileRegexReplace(rule: RegexReplaceRule): (input: string) => string 
       rule.ruleId
     );
   }
-  return (input) =>
-    input.replace(expression, (match, ...arguments_: unknown[]) => {
+  return (input) => {
+    const outputLength = { value: 0 };
+    let consumed = 0;
+    const result = input.replace(expression, (match, ...arguments_: unknown[]) => {
       const possibleGroups = arguments_.at(-1);
       const hasGroups = typeof possibleGroups === 'object' && possibleGroups !== null;
       const captureEnd = arguments_.length - (hasGroups ? 3 : 2);
+      const offset = arguments_[captureEnd];
+      if (typeof offset !== 'number') {
+        throw new PlanningError(
+          'invalidRegex',
+          `Rule ${rule.ruleId} could not apply its regular expression.`,
+          rule.ruleId
+        );
+      }
       const captures = [match, ...arguments_.slice(0, captureEnd)].map((capture) =>
         typeof capture === 'string' ? capture : ''
       );
       const groups = hasGroups ? (possibleGroups as Record<string, string | undefined>) : {};
-      return expandReplacement(rule.replacement, captures, groups);
+      const replacement = expandReplacement(rule.replacement, captures, groups);
+      consumeOutputBytes(outputLength, input.slice(consumed, offset));
+      consumeOutputBytes(outputLength, replacement);
+      consumed = offset + match.length;
+      return replacement;
     });
+    consumeOutputBytes(outputLength, input.slice(consumed));
+    return result;
+  };
 }
 
 function expandReplacement(
@@ -724,17 +788,25 @@ function expandReplacement(
   captures: string[],
   groups: Record<string, string | undefined>
 ): string {
-  return template.replace(
-    /\$(?:\$|\{([^}]+)\}|([0-9A-Za-z_]+))/gu,
-    (token, braced: string | undefined, unbraced: string | undefined) => {
-      if (token === '$$') {
-        return '$';
-      }
-      const key = braced ?? unbraced ?? '';
-      if (/^[0-9]+$/u.test(key)) {
-        return captures[Number(key)] ?? '';
-      }
-      return groups[key] ?? '';
+  const chunks: string[] = [];
+  const byteLength = { value: 0 };
+  let consumed = 0;
+  for (const match of template.matchAll(/\$(?:\$|\{([^}]+)\}|([0-9A-Za-z_]+))/gu)) {
+    const token = match[0];
+    const offset = match.index;
+    appendBoundedChunk(chunks, byteLength, template.slice(consumed, offset));
+    if (token === '$$') {
+      appendBoundedChunk(chunks, byteLength, '$');
+    } else {
+      const key = match[1] ?? match[2] ?? '';
+      appendBoundedChunk(
+        chunks,
+        byteLength,
+        /^[0-9]+$/u.test(key) ? (captures[Number(key)] ?? '') : (groups[key] ?? '')
+      );
     }
-  );
+    consumed = offset + token.length;
+  }
+  appendBoundedChunk(chunks, byteLength, template.slice(consumed));
+  return chunks.join('');
 }
