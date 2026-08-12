@@ -12,6 +12,8 @@ concurrency:
 
 env:
   NODE_VERSION: "26"
+  SYFT_VERSION: "1.51.0"
+  SYFT_WINDOWS_AMD64_SHA256: "fc5ffaeffb993576ece9c791da5a688fb2c8969a1479bbfe58583672c64da336"
 
 jobs:
   package:
@@ -53,6 +55,21 @@ jobs:
       - name: Build the unsigned Windows acceptance package
         run: pnpm tauri build --ci --bundles nsis --no-sign
 
+      - name: Install the verified Syft binary
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'syft.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'syft'
+          Invoke-WebRequest `
+            -Uri "https://github.com/anchore/syft/releases/download/v${env:SYFT_VERSION}/syft_${env:SYFT_VERSION}_windows_amd64.zip" `
+            -OutFile $archive
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:SYFT_WINDOWS_AMD64_SHA256) {
+            throw 'The downloaded Syft archive did not match its reviewed SHA-256 digest.'
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          "SYFT_PATH=$(Join-Path $destination 'syft.exe')" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
       - name: Prepare the source-bound acceptance artifact
         shell: pwsh
         run: >-
@@ -60,6 +77,7 @@ jobs:
           -RepositoryRoot $PWD.Path
           -OutputDirectory (Join-Path $PWD.Path 'acceptance')
           -SourceSha $env:GITHUB_SHA
+          -SyftPath $env:SYFT_PATH
 
       - name: Upload the Windows acceptance artifact
         id: upload

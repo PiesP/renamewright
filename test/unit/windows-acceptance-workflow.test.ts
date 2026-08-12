@@ -1,5 +1,7 @@
 import { expect, test } from 'vitest';
+import securityWorkflow from '../../.github/workflows/security.yaml?raw';
 import workflow from '../../.github/workflows/windows-acceptance.yaml?raw';
+import cargoPolicy from '../../deny.toml?raw';
 import packager from '../../scripts/prepare-windows-acceptance.ps1?raw';
 
 test('keeps Windows acceptance manual, read-only, pinned, and source-bound', () => {
@@ -37,4 +39,33 @@ test('rejects stale packaging output and records immutable checksums and limitat
   expect(packager).toContain('newPlanApplyEnabled = $false');
   expect(packager).toContain('The acceptance package is not code-signed.');
   expect(packager).toContain('ReFS coverage requires a separate compatible Windows environment.');
+});
+
+test('verifies release-evidence tools before enforcing policy or generating an SBOM', () => {
+  expect(securityWorkflow).toContain('CARGO_DENY_VERSION: "0.20.2"');
+  expect(securityWorkflow).toContain(
+    'CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"'
+  );
+  expect(securityWorkflow).toContain('sha256sum --check --strict -');
+  expect(securityWorkflow).toContain('cargo-deny check licenses sources bans');
+  expect(workflow).toContain('SYFT_VERSION: "1.51.0"');
+  expect(workflow).toContain(
+    'SYFT_WINDOWS_AMD64_SHA256: "fc5ffaeffb993576ece9c791da5a688fb2c8969a1479bbfe58583672c64da336"'
+  );
+  expect(workflow).toContain('Get-FileHash -LiteralPath $archive -Algorithm SHA256');
+  expect(workflow).toContain('-SyftPath $env:SYFT_PATH');
+});
+
+test('limits Cargo sources and emits a source-bound pathless CycloneDX inventory', () => {
+  expect(cargoPolicy).toContain('targets = ["x86_64-pc-windows-msvc"]');
+  expect(cargoPolicy).toContain('unknown-registry = "deny"');
+  expect(cargoPolicy).toContain('unknown-git = "deny"');
+  expect(cargoPolicy).toContain('allow-git = []');
+  expect(cargoPolicy).toContain('allow-wildcard-paths = true');
+  expect(packager).toContain("$env:SYFT_CHECK_FOR_APP_UPDATE = 'false'");
+  expect(packager).toContain("$env:SYFT_FILE_METADATA_SELECTION = 'none'");
+  expect(packager).toContain("'--select-catalogers=-file'");
+  expect(packager).toContain("name = 'renamewright:source-sha'");
+  expect(packager).toContain('The generated SBOM contains the native repository path.');
+  expect(packager).toContain('files = @($portableName, $installerName, $sbomName, $checklistName)');
 });

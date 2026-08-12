@@ -8,13 +8,17 @@ param(
 
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-fA-F]{40}$')]
-    [string]$SourceSha
+    [string]$SourceSha,
+
+    [Parameter(Mandatory = $true)]
+    [string]$SyftPath
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $root = (Resolve-Path -LiteralPath $RepositoryRoot).Path
+$syft = (Resolve-Path -LiteralPath $SyftPath).Path
 $expectedSha = $SourceSha.ToLowerInvariant()
 $actualSha = (git -C $root rev-parse HEAD).Trim().ToLowerInvariant()
 if ($actualSha -cne $expectedSha) {
@@ -51,6 +55,45 @@ $installerName = "Renamewright-$version-windows-x86_64-setup.exe"
 Copy-Item -LiteralPath $portableSource -Destination (Join-Path $output $portableName)
 Copy-Item -LiteralPath $installerSources[0].FullName -Destination (Join-Path $output $installerName)
 
+$sbomName = "Renamewright-$version.cdx.json"
+$sbomPath = Join-Path $output $sbomName
+$env:SYFT_CHECK_FOR_APP_UPDATE = 'false'
+$env:SYFT_FILE_METADATA_SELECTION = 'none'
+& $syft scan "dir:$root" `
+    --override-default-catalogers 'rust-cargo-lock-cataloger,javascript-lock-cataloger' `
+    '--select-catalogers=-file' `
+    --base-path $root `
+    --source-name 'Renamewright' `
+    --source-version $version `
+    --output "cyclonedx-json=$sbomPath"
+if ($LASTEXITCODE -ne 0) {
+    throw "Syft could not generate the acceptance SBOM."
+}
+
+$sbom = Get-Content -LiteralPath $sbomPath -Raw | ConvertFrom-Json
+if ($sbom.bomFormat -cne 'CycloneDX' -or $sbom.specVersion -notmatch '^1\.') {
+    throw "The generated SBOM is not a supported CycloneDX document."
+}
+$componentNames = @($sbom.components | ForEach-Object { [string]$_.name })
+foreach ($requiredComponent in @('renamewright-core', '@tauri-apps/api', 'solid-js')) {
+    if ($requiredComponent -notin $componentNames) {
+        throw "The generated SBOM is missing a required application component."
+    }
+}
+$sbom.metadata | Add-Member -NotePropertyName properties -NotePropertyValue @(
+    [ordered]@{ name = 'renamewright:source-sha'; value = $expectedSha },
+    [ordered]@{ name = 'renamewright:dependency-scope'; value = 'Cargo.lock and pnpm-lock.yaml' }
+)
+$sbom | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $sbomPath -Encoding utf8
+$serializedSbom = Get-Content -LiteralPath $sbomPath -Raw
+$escapedRoot = $root.Replace('\', '\\')
+if (
+    $serializedSbom.Contains($root, [StringComparison]::OrdinalIgnoreCase) -or
+    $serializedSbom.Contains($escapedRoot, [StringComparison]::OrdinalIgnoreCase)
+) {
+    throw "The generated SBOM contains the native repository path."
+}
+
 $checklistName = 'ACCEPTANCE-CHECKLIST.txt'
 $checklist = @"
 Renamewright Windows packaged acceptance
@@ -59,6 +102,7 @@ Version: $version
 
 Important boundaries
 - This acceptance build is unsigned. Verify SHA256SUMS.txt before running it.
+- The CycloneDX SBOM inventories the Cargo and pnpm lockfiles and is bound to this source SHA.
 - New-plan Apply remains disabled. Only previously reviewed Recovery and Undo paths may mutate names.
 - Native paths must not appear in the WebView, exported plan, status text, or error text.
 
@@ -97,7 +141,7 @@ $manifest = [ordered]@{
         image = [string]$env:ImageOS
         imageVersion = [string]$env:ImageVersion
     }
-    files = @($portableName, $installerName, $checklistName)
+    files = @($portableName, $installerName, $sbomName, $checklistName)
     limitations = @(
         'The acceptance package is not code-signed.',
         'The hosted build does not perform interactive packaged GUI smoke tests.',
