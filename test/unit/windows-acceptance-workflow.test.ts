@@ -88,7 +88,20 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
   expect(lifecycle).toContain('The lifecycle test requires clean current-user data roots.');
   expect(lifecycle).not.toContain('Start-And-ProbeApplication');
   expect(lifecycle).toContain('Assert-ExecutableVersion');
-  expect(lifecycle).toContain("throw 'The portable artifact is empty.'");
+  expect(lifecycle).toContain(
+    'The portable artifact does not match the installed application payload.'
+  );
+  expect(lifecycle).toContain(
+    '(Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash.ToLowerInvariant()'
+  );
+  expect(lifecycle).toContain(
+    '(Get-FileHash -LiteralPath $currentPortable -Algorithm SHA256).Hash.ToLowerInvariant()'
+  );
+  expect(lifecycle).toContain('$portableDigest -cne $installedDigest');
+  expect(lifecycle).toContain('installedApplicationSha256 = $installedDigest');
+  expect(lifecycle).toContain('portableApplicationSha256 = $portableDigest');
+  expect(lifecycle).toContain('portableArtifactMatchesInstalledBinary = $true');
+  expect(lifecycle).not.toContain('portableArtifactVersionVerified = $true');
   expect(lifecycle).toContain("-Arguments @('/S', '/UPDATE')");
   expect(lifecycle).toContain('Wait-InstalledPackageVersion -Expected $CurrentVersion');
   expect(lifecycle).toContain('Start-Sleep -Milliseconds 250');
@@ -101,8 +114,23 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
   expect(lifecycle).toContain('The uninstaller did not remove the application directory.');
   expect(lifecycle).toContain('journalDataRetained = $true');
   expect(lifecycle).toContain('webviewDataRetained = $true');
-  expect(lifecycle).toContain('sharedDataRootContractVerified = $true');
+  expect(lifecycle).toContain('dataRootsPreservedAcrossPackageLifecycle = $true');
+  expect(lifecycle).not.toContain('sharedDataRootContractVerified = $true');
+  expect(lifecycle).toContain('schemaVersion = 2');
   expect(packager).toContain("$lifecycleEvidenceName = 'windows-lifecycle-evidence.json'");
+  expect(packager).toContain('$lifecycleEvidence.schemaVersion -ne 2');
+  expect(packager).toContain("'portableArtifactMatchesInstalledBinary'");
+  expect(packager).toContain("'dataRootsPreservedAcrossPackageLifecycle'");
+  expect(packager).not.toContain("'portableArtifactVersionVerified'");
+  expect(packager).not.toContain("'sharedDataRootContractVerified'");
+  expect(packager).toContain(
+    'Runtime startup and shared-root behavior require the packaged GUI manual gate.'
+  );
+  expect(packager).toContain('$portablePayloadDigest -cne $installedPayloadDigest');
+  expect(packager).toContain('$packagedPortableDigest -cne $portablePayloadDigest');
+  expect(packager).toContain(
+    'The packaged portable artifact differs from the lifecycle-tested payload.'
+  );
   expect(packager).toContain('$lifecycleEvidence.checks.$check -ne $true');
   expect(installerHooks).toContain('!macro NSIS_HOOK_PREINSTALL');
   expect(installerHooks).toContain(`nsis_tauri_utils::SemverCompare "\${VERSION}" $R8`);

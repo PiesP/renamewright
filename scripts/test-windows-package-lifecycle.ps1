@@ -228,11 +228,13 @@ try {
     Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue
     Assert-ExecutableVersion -Path $currentExecutable -Expected $CurrentVersion
     Assert-ExecutableVersion -Path $currentPortable -Expected $CurrentVersion
-    if ((Get-Item -LiteralPath $currentPortable).Length -le 0) {
-        throw 'The portable artifact is empty.'
+    $installedDigest = (Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+    $portableDigest = (Get-FileHash -LiteralPath $currentPortable -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($portableDigest -cne $installedDigest) {
+        throw 'The portable artifact does not match the installed application payload.'
     }
 
-    $installedDigestBeforeDowngrade = (Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash
+    $installedDigestBeforeDowngrade = $installedDigest
     $downgradeExitCode = Invoke-SilentPackage -Path $previousInstaller -RequireSuccess $false
     if ($downgradeExitCode -eq 0) {
         throw 'The refused downgrade reported a successful package operation.'
@@ -266,7 +268,7 @@ try {
     Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue
 
     $evidence = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         product = 'Renamewright'
         identifier = $Identifier
         currentVersion = $CurrentVersion
@@ -276,12 +278,16 @@ try {
             webview = "%LOCALAPPDATA%\$Identifier"
             portableState = 'sharedUserProfile'
         }
+        artifacts = [ordered]@{
+            installedApplicationSha256 = $installedDigest
+            portableApplicationSha256 = $portableDigest
+        }
         checks = [ordered]@{
             previousVersionInstalled = $true
             upgradeOverInstall = $true
             currentUserInstallLocationVerified = $true
-            portableArtifactVersionVerified = $true
-            sharedDataRootContractVerified = $true
+            portableArtifactMatchesInstalledBinary = $true
+            dataRootsPreservedAcrossPackageLifecycle = $true
             downgradeRefused = $true
             downgradeExitCode = $downgradeExitCode
             installedBinaryPreserved = $true

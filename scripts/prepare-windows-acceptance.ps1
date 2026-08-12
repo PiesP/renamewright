@@ -83,6 +83,10 @@ Storage contract
 - Reinstall, upgrade, and uninstall retain both data roots.
 - The installer refuses to replace a newer installed version with an older one.
 
+Automated evidence boundary
+- Lifecycle automation verifies package operations preserve pre-existing data-root markers.
+- Runtime startup and shared-root behavior require the packaged GUI manual gate.
+
 Recovery-safe backup
 1. Close every Renamewright process.
 2. Copy both data roots to a backup location without editing journal files.
@@ -102,7 +106,7 @@ Set-Content -LiteralPath (Join-Path $output $dataLifecycleName) -Value $dataLife
 $lifecycleEvidenceName = 'windows-lifecycle-evidence.json'
 $lifecycleEvidence = Get-Content -LiteralPath $lifecycleEvidenceSource -Raw | ConvertFrom-Json
 if (
-    $lifecycleEvidence.schemaVersion -ne 1 -or
+    $lifecycleEvidence.schemaVersion -ne 2 -or
     [string]$lifecycleEvidence.product -cne 'Renamewright' -or
     [string]$lifecycleEvidence.identifier -cne $identifier -or
     [string]$lifecycleEvidence.currentVersion -cne $version -or
@@ -116,8 +120,8 @@ $requiredLifecycleChecks = @(
     'previousVersionInstalled',
     'upgradeOverInstall',
     'currentUserInstallLocationVerified',
-    'portableArtifactVersionVerified',
-    'sharedDataRootContractVerified',
+    'portableArtifactMatchesInstalledBinary',
+    'dataRootsPreservedAcrossPackageLifecycle',
     'downgradeRefused',
     'installedBinaryPreserved',
     'uninstallCompleted',
@@ -128,6 +132,19 @@ foreach ($check in $requiredLifecycleChecks) {
     if ($lifecycleEvidence.checks.$check -ne $true) {
         throw "The Windows lifecycle evidence is missing a required successful check."
     }
+}
+$installedPayloadDigest = [string]$lifecycleEvidence.artifacts.installedApplicationSha256
+$portablePayloadDigest = [string]$lifecycleEvidence.artifacts.portableApplicationSha256
+if (
+    $installedPayloadDigest -notmatch '^[0-9a-f]{64}$' -or
+    $portablePayloadDigest -notmatch '^[0-9a-f]{64}$' -or
+    $portablePayloadDigest -cne $installedPayloadDigest
+) {
+    throw "The Windows lifecycle evidence does not bind one installed and portable payload."
+}
+$packagedPortableDigest = (Get-FileHash -LiteralPath (Join-Path $output $portableName) -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($packagedPortableDigest -cne $portablePayloadDigest) {
+    throw "The packaged portable artifact differs from the lifecycle-tested payload."
 }
 $serializedLifecycleEvidence = Get-Content -LiteralPath $lifecycleEvidenceSource -Raw
 if ($serializedLifecycleEvidence.Contains($root, [StringComparison]::OrdinalIgnoreCase)) {
@@ -188,7 +205,7 @@ Important boundaries
 
 Required Windows smoke checks
 1. Verify every SHA-256 digest, then install with the NSIS setup executable.
-2. Start the installed app and the portable executable separately; confirm both identify as Renamewright.
+2. Start the installed app and the portable executable separately; confirm both identify as Renamewright, use the documented shared data roots, and create no portable-adjacent WebView2 profile.
 3. Exercise native picker and drag/drop with files whose names cover Unicode, spaces, long names, and blocked Windows names.
 4. Export JSON and CSV; confirm overwrite is refused and neither export contains absolute native paths.
 5. Check English and Korean at 900x600 and 1280x800, keyboard-only focus order, and Windows high-contrast mode.
@@ -241,6 +258,7 @@ $manifest = [ordered]@{
     limitations = @(
         'The acceptance package is not code-signed.',
         'The hosted build does not perform interactive packaged GUI smoke tests.',
+        'Runtime startup and shared data-root behavior require manual verification.',
         'ReFS coverage requires a separate compatible Windows environment.'
     )
 }
