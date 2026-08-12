@@ -30,6 +30,17 @@ $version = [string]$packageDocument.version
 if ($version -notmatch '^\d+\.\d+\.\d+$') {
     throw "The package version is not a stable semantic version."
 }
+$tauriConfig = Get-Content -LiteralPath (Join-Path $root 'src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json
+$identifier = [string]$tauriConfig.identifier
+if ($identifier -notmatch '^[a-z0-9]+(?:[.-][a-z0-9]+)+$') {
+    throw "The Tauri identifier is not suitable for the Windows data lifecycle contract."
+}
+if ($tauriConfig.bundle.windows.allowDowngrades -ne $false) {
+    throw "Windows packages must refuse downgrades."
+}
+if ([string]$tauriConfig.bundle.windows.nsis.installMode -cne 'currentUser') {
+    throw "The Windows installer must use the explicit current-user install mode."
+}
 
 $releaseDirectory = Join-Path $root 'target/release'
 $portableSource = Join-Path $releaseDirectory 'renamewright-app.exe'
@@ -54,6 +65,35 @@ $portableName = "Renamewright-$version-windows-x86_64-portable.exe"
 $installerName = "Renamewright-$version-windows-x86_64-setup.exe"
 Copy-Item -LiteralPath $portableSource -Destination (Join-Path $output $portableName)
 Copy-Item -LiteralPath $installerSources[0].FullName -Destination (Join-Path $output $installerName)
+
+$dataLifecycleName = 'DATA-LIFECYCLE.txt'
+$dataLifecycle = @"
+Renamewright Windows data lifecycle
+Version: $version
+
+Storage contract
+- Installed and portable executables use the same current-user data roots.
+- Recovery journals: %APPDATA%\$identifier\journals
+- Local presets and WebView state: %LOCALAPPDATA%\$identifier
+- The portable executable is application-portable, not data-isolated.
+- Reinstall, upgrade, and uninstall retain both data roots.
+- The installer refuses to replace a newer installed version with an older one.
+
+Recovery-safe backup
+1. Close every Renamewright process.
+2. Copy both data roots to a backup location without editing journal files.
+3. Keep the journal and WebView-state backups together with the application version.
+
+Complete manual removal
+1. Resolve or deliberately archive every transaction that still requires recovery.
+2. Close Renamewright and uninstall it, or remove the portable executable.
+3. Back up both data roots if any journal or preset may still be needed.
+4. Delete the two data roots manually. The uninstaller never deletes them.
+
+Do not restore journal files into an older Renamewright version. Verify an
+acceptance artifact's SHA-256 manifest before using it for recovery.
+"@
+Set-Content -LiteralPath (Join-Path $output $dataLifecycleName) -Value $dataLifecycle -Encoding utf8
 
 $sbomName = "Renamewright-$version.cdx.json"
 $sbomPath = Join-Path $output $sbomName
@@ -115,6 +155,7 @@ Required Windows smoke checks
 6. If an interrupted journal fixture is available, inspect reconciliation, resume, rollback, and cancellation only after native confirmation.
 7. If a completed journal fixture is available, inspect Undo-ready and blocked states, then verify confirmation, cancellation, and terminal outcomes.
 8. Confirm no new-plan Apply control or callable command is available.
+9. Follow DATA-LIFECYCLE.txt and confirm reinstall, downgrade refusal, uninstall, and retained-data evidence.
 
 Record separately
 - Windows version and filesystem type.
@@ -126,7 +167,7 @@ Set-Content -LiteralPath (Join-Path $output $checklistName) -Value $checklist -E
 
 $manifestName = 'acceptance-manifest.json'
 $manifest = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     product = 'Renamewright'
     version = $version
     sourceSha = $expectedSha
@@ -135,13 +176,21 @@ $manifest = [ordered]@{
     bundle = 'nsis'
     signed = $false
     newPlanApplyEnabled = $false
+    dataLifecycle = [ordered]@{
+        identifier = $identifier
+        journalRoot = "%APPDATA%\$identifier\journals"
+        webviewDataRoot = "%LOCALAPPDATA%\$identifier"
+        portableState = 'sharedUserProfile'
+        uninstall = 'retainUserData'
+        downgrade = 'refuse'
+    }
     runner = [ordered]@{
         os = [string]$env:RUNNER_OS
         architecture = [string]$env:RUNNER_ARCH
         image = [string]$env:ImageOS
         imageVersion = [string]$env:ImageVersion
     }
-    files = @($portableName, $installerName, $sbomName, $checklistName)
+    files = @($portableName, $installerName, $sbomName, $checklistName, $dataLifecycleName)
     limitations = @(
         'The acceptance package is not code-signed.',
         'The hosted build does not perform interactive packaged GUI smoke tests.',
