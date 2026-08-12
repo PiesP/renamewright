@@ -1,4 +1,5 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { type Locale, type MessageKey, message } from '../i18n/catalog';
 import type { PlanRow, RowStatus } from './client';
 import type { SourceOverride } from './rules';
 
@@ -7,6 +8,7 @@ type PlanFilter = 'all' | RowStatus;
 interface VirtualPlanTableProps {
   rows: PlanRow[];
   overrides: SourceOverride[];
+  locale?: Locale;
   onOverride: (sourceId: number, value: string | undefined) => void;
 }
 
@@ -14,37 +16,38 @@ const DEFAULT_ROW_HEIGHT = 92;
 const DEFAULT_VIEWPORT_HEIGHT = 560;
 const OVERSCAN_ROWS = 5;
 
-const diagnosticLabels: Record<string, string> = {
-  unchanged: 'No change',
-  emptyName: 'Empty name',
-  illegalCharacter: 'Illegal Windows character',
-  trailingDotOrSpace: 'Trailing dot or space',
-  reservedName: 'Reserved Windows name',
-  nameTooLong: 'Name exceeds 255 characters',
-  duplicateDestination: 'Duplicate destination',
-  unsupportedEncoding: 'Unsupported name encoding',
-  occupiedDestination: 'Destination already exists',
-  staleSource: 'Source changed since admission',
-  parentUnavailable: 'Source directory could not be validated',
+const diagnosticLabelKeys: Record<string, MessageKey> = {
+  unchanged: 'diagnosticUnchanged',
+  emptyName: 'diagnosticEmptyName',
+  illegalCharacter: 'diagnosticIllegalCharacter',
+  trailingDotOrSpace: 'diagnosticTrailingDotOrSpace',
+  reservedName: 'diagnosticReservedName',
+  nameTooLong: 'diagnosticNameTooLong',
+  duplicateDestination: 'diagnosticDuplicateDestination',
+  unsupportedEncoding: 'diagnosticUnsupportedEncoding',
+  occupiedDestination: 'diagnosticOccupiedDestination',
+  staleSource: 'diagnosticStaleSource',
+  parentUnavailable: 'diagnosticParentUnavailable',
+  sequenceOverflow: 'diagnosticSequenceOverflow',
 };
 
-const filterLabels: Record<PlanFilter, string> = {
-  all: 'All',
-  changed: 'Changed',
-  blocked: 'Blocked',
-  unchanged: 'Unchanged',
+const filterLabelKeys: Record<PlanFilter, MessageKey> = {
+  all: 'filterAll',
+  changed: 'filterChanged',
+  blocked: 'filterBlocked',
+  unchanged: 'filterUnchanged',
 };
 
 const filters: PlanFilter[] = ['all', 'changed', 'blocked', 'unchanged'];
 
-function statusLabel(status: RowStatus) {
+function statusLabelKey(status: RowStatus): MessageKey {
   if (status === 'blocked') {
-    return 'Blocked';
+    return 'statusBlocked';
   }
   if (status === 'changed') {
-    return 'Changed';
+    return 'statusChanged';
   }
-  return 'Unchanged';
+  return 'statusUnchanged';
 }
 
 function statusMark(status: RowStatus) {
@@ -58,6 +61,8 @@ function statusMark(status: RowStatus) {
 }
 
 export function VirtualPlanTable(props: VirtualPlanTableProps) {
+  const text = (key: MessageKey, values?: Readonly<Record<string, string | number>>) =>
+    message(props.locale ?? 'en', key, values);
   const [filter, setFilter] = createSignal<PlanFilter>('all');
   const [scrollTop, setScrollTop] = createSignal(0);
   const [viewportHeight, setViewportHeight] = createSignal(DEFAULT_VIEWPORT_HEIGHT);
@@ -141,10 +146,10 @@ export function VirtualPlanTable(props: VirtualPlanTableProps) {
   };
 
   return (
-    <section class="plan-results" aria-label="Rename plan rows">
+    <section class="plan-results" aria-label={text('planRows')}>
       <div class="preview-toolbar">
         <fieldset class="filter-group">
-          <legend class="visually-hidden">Filter plan rows</legend>
+          <legend class="visually-hidden">{text('filterPlanRows')}</legend>
           <For each={filters}>
             {(candidate) => (
               <button
@@ -153,29 +158,32 @@ export function VirtualPlanTable(props: VirtualPlanTableProps) {
                 aria-pressed={filter() === candidate}
                 onClick={() => chooseFilter(candidate)}
               >
-                {filterLabels[candidate]} <span>{counts()[candidate]}</span>
+                {text(filterLabelKeys[candidate])} <span>{counts()[candidate]}</span>
               </button>
             )}
           </For>
         </fieldset>
         <span class="visible-count" aria-live="polite">
-          Showing {filteredRows().length} of {props.rows.length}
+          {text('showingRows', {
+            visible: filteredRows().length,
+            total: props.rows.length,
+          })}
         </span>
       </div>
 
       <div class="virtual-table">
         <section
           class="virtual-viewport"
-          aria-label="Scrollable rename plan"
+          aria-label={text('scrollablePlan')}
           ref={viewport}
           onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
         >
           <table aria-rowcount={filteredRows().length + 1}>
             <thead class="virtual-header">
               <tr>
-                <th scope="col">Source</th>
-                <th scope="col">Proposed</th>
-                <th scope="col">Status</th>
+                <th scope="col">{text('columnSource')}</th>
+                <th scope="col">{text('columnProposed')}</th>
+                <th scope="col">{text('columnStatus')}</th>
               </tr>
             </thead>
             <tbody
@@ -193,10 +201,10 @@ export function VirtualPlanTable(props: VirtualPlanTableProps) {
                       transform: `translateY(${index * rowHeight()}px)`,
                     }}
                   >
-                    <td class="virtual-cell" data-label="Source">
+                    <td class="virtual-cell" data-label={text('columnSource')}>
                       <span class="file-name">{row.originalName}</span>
                     </td>
-                    <td class="virtual-cell" data-label="Proposed">
+                    <td class="virtual-cell" data-label={text('columnProposed')}>
                       <Show
                         when={editingSourceId() === row.sourceId}
                         fallback={
@@ -204,24 +212,24 @@ export function VirtualPlanTable(props: VirtualPlanTableProps) {
                             <span class="file-name proposed-name">{row.proposedName}</span>
                             <div class="override-actions">
                               <Show when={row.overrideApplied}>
-                                <span class="override-badge">Override</span>
+                                <span class="override-badge">{text('overrideBadge')}</span>
                               </Show>
                               <button
                                 class="table-action"
                                 type="button"
-                                aria-label={`Edit override for ${row.originalName}`}
+                                aria-label={text('editOverride', { name: row.originalName })}
                                 onClick={() => beginOverride(row)}
                               >
-                                Edit
+                                {text('edit')}
                               </button>
                               <Show when={row.overrideApplied}>
                                 <button
                                   class="table-action table-action-reset"
                                   type="button"
-                                  aria-label={`Reset override for ${row.originalName}`}
+                                  aria-label={text('resetOverride', { name: row.originalName })}
                                   onClick={() => props.onOverride(row.sourceId, undefined)}
                                 >
-                                  Reset
+                                  {text('reset')}
                                 </button>
                               </Show>
                             </div>
@@ -236,7 +244,7 @@ export function VirtualPlanTable(props: VirtualPlanTableProps) {
                           }}
                         >
                           <label class="visually-hidden" for={`override-${row.sourceId}`}>
-                            Override name for {row.originalName}
+                            {text('overrideName', { name: row.originalName })}
                           </label>
                           <input
                             id={`override-${row.sourceId}`}
@@ -247,23 +255,28 @@ export function VirtualPlanTable(props: VirtualPlanTableProps) {
                           />
                           <div class="override-actions">
                             <button class="table-action" type="submit">
-                              Save
+                              {text('save')}
                             </button>
                             <button class="table-action" type="button" onClick={cancelOverride}>
-                              Cancel
+                              {text('cancel')}
                             </button>
                           </div>
                         </form>
                       </Show>
                     </td>
-                    <td class="virtual-cell virtual-status-cell" data-label="Status">
+                    <td class="virtual-cell virtual-status-cell" data-label={text('columnStatus')}>
                       <span class={`status status-${row.status}`}>
                         <span aria-hidden="true">{statusMark(row.status)}</span>
-                        {statusLabel(row.status)}
+                        {text(statusLabelKey(row.status))}
                       </span>
                       <Show when={row.diagnostics.length > 0}>
                         <span class="diagnostic">
-                          {row.diagnostics.map((code) => diagnosticLabels[code] ?? code).join(', ')}
+                          {row.diagnostics
+                            .map((code) => {
+                              const key = diagnosticLabelKeys[code];
+                              return key ? text(key) : code;
+                            })
+                            .join(', ')}
                         </span>
                       </Show>
                     </td>

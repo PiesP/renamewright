@@ -466,7 +466,7 @@ test('refreshes the ledger after an Undo command error', async () => {
   expect(await screen.findByText('Undo of plan 84')).toBeInTheDocument();
   expect(screen.getByText('Recovery required')).toBeInTheDocument();
   expect(screen.queryByText('Undo checks passed')).not.toBeInTheDocument();
-  expect(screen.getByRole('status')).toHaveTextContent('Undo stopped safely');
+  expect(screen.getByRole('status')).toHaveTextContent('Undo could not run.');
 });
 
 test('loads sample sources and previews a prefix rule', async () => {
@@ -762,7 +762,7 @@ test('does not mutate active rules when local preset data is malformed', async (
   render(() => <App client={fakeClient()} />);
 
   expect(await screen.findByRole('status')).toHaveTextContent(
-    'Stored presets are invalid and were not loaded.'
+    'The saved preset data is invalid and was not loaded.'
   );
   expect(screen.getByRole('status')).not.toHaveTextContent('/private/value');
   await user.click(screen.getByRole('button', { name: 'Load sample' }));

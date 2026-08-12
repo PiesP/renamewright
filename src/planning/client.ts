@@ -152,6 +152,16 @@ interface BrowserPlanResult {
   traces: Map<number, RuleTraceStep[]>;
 }
 
+class CommandError extends Error {
+  readonly code: string;
+
+  constructor(code: string) {
+    super(code);
+    this.name = 'CommandError';
+    this.code = code;
+  }
+}
+
 function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
   const traces = new Map<number, RuleTraceStep[]>();
   const sources = sampleNames.map((originalName, index) => ({
@@ -210,18 +220,20 @@ function recoveryCommandError(cause: unknown): Error {
     typeof cause === 'object' && cause !== null && 'code' in cause
       ? (cause as { code?: unknown }).code
       : undefined;
-  const messages: Record<string, string> = {
-    busy: 'Another filesystem operation is already active.',
-    stateUnavailable: 'The recovery worker is unavailable.',
-    inspectionChanged: 'The recovery state changed. Inspect the transaction again.',
-    actionUnavailable: 'That recovery action is no longer available.',
-    recoveryFailed: 'Recovery stopped safely. Inspect the transaction again.',
-    ledgerRefreshFailed: 'The Rename Ledger could not be refreshed. Inspect the transaction again.',
-  };
-  return new Error(
-    typeof code === 'string' && code in messages
-      ? messages[code]
-      : 'The recovery action could not be completed.'
+  return new CommandError(
+    `recovery.${
+      typeof code === 'string' &&
+      [
+        'busy',
+        'stateUnavailable',
+        'inspectionChanged',
+        'actionUnavailable',
+        'recoveryFailed',
+        'ledgerRefreshFailed',
+      ].includes(code)
+        ? code
+        : 'commandFailed'
+    }`
   );
 }
 
@@ -230,16 +242,20 @@ function undoCommandError(cause: unknown): Error {
     typeof cause === 'object' && cause !== null && 'code' in cause
       ? (cause as { code?: unknown }).code
       : undefined;
-  const messages: Record<string, string> = {
-    busy: 'Another filesystem operation is already active.',
-    stateUnavailable: 'The Undo worker is unavailable.',
-    inspectionChanged: 'The files changed. Inspect Undo again before continuing.',
-    actionUnavailable: 'Undo is no longer available for that transaction.',
-    undoFailed: 'Undo stopped safely. Inspect the Rename Ledger before continuing.',
-    ledgerRefreshFailed: 'The Rename Ledger could not be refreshed. Inspect it again.',
-  };
-  return new Error(
-    typeof code === 'string' && code in messages ? messages[code] : 'Undo could not be completed.'
+  return new CommandError(
+    `undo.${
+      typeof code === 'string' &&
+      [
+        'busy',
+        'stateUnavailable',
+        'inspectionChanged',
+        'actionUnavailable',
+        'undoFailed',
+        'ledgerRefreshFailed',
+      ].includes(code)
+        ? code
+        : 'commandFailed'
+    }`
   );
 }
 
@@ -256,7 +272,7 @@ export function createPlanningClient(): PlanningClient {
 
   const inspectBrowserPlan = (planId: number) => {
     if (!latestBrowserPlan || latestBrowserPlan.plan.planId !== planId) {
-      throw new Error('The requested plan is no longer current.');
+      throw new CommandError('plan.notCurrent');
     }
     const { plan, request, traces } = latestBrowserPlan;
     return JSON.stringify(
@@ -321,13 +337,13 @@ export function createPlanningClient(): PlanningClient {
     listLedger: async () => (nativeSelectionAvailable ? invoke<LedgerEntry[]>('list_ledger') : []),
     inspectRecovery: async (ledgerId) => {
       if (!nativeSelectionAvailable) {
-        throw new Error('Recovery inspection is available in the Windows desktop app.');
+        throw new CommandError('recovery.inspectionDesktopOnly');
       }
       return invoke<RecoveryInspection>('inspect_recovery', { ledgerId });
     },
     applyRecoveryAction: async (action, inspection) => {
       if (!nativeSelectionAvailable) {
-        throw new Error('Recovery actions are available in the Windows desktop app.');
+        throw new CommandError('recovery.desktopOnly');
       }
       try {
         return await invoke<RecoveryCommandResult>('apply_recovery_action', {
@@ -339,7 +355,7 @@ export function createPlanningClient(): PlanningClient {
     },
     cancelRecovery: async () => {
       if (!nativeSelectionAvailable) {
-        throw new Error('Recovery actions are available in the Windows desktop app.');
+        throw new CommandError('recovery.desktopOnly');
       }
       try {
         return await invoke<boolean>('cancel_recovery');
@@ -349,7 +365,7 @@ export function createPlanningClient(): PlanningClient {
     },
     inspectUndo: async (ledgerId) => {
       if (!nativeSelectionAvailable) {
-        throw new Error('Undo inspection is available in the Windows desktop app.');
+        throw new CommandError('undo.inspectionDesktopOnly');
       }
       try {
         return await invoke<UndoInspection>('inspect_undo', { ledgerId });
@@ -359,7 +375,7 @@ export function createPlanningClient(): PlanningClient {
     },
     applyUndo: async (inspection) => {
       if (!nativeSelectionAvailable) {
-        throw new Error('Undo is available in the Windows desktop app.');
+        throw new CommandError('undo.desktopOnly');
       }
       try {
         return await invoke<UndoCommandResult>('apply_undo', {
@@ -371,7 +387,7 @@ export function createPlanningClient(): PlanningClient {
     },
     cancelUndo: async () => {
       if (!nativeSelectionAvailable) {
-        throw new Error('Undo is available in the Windows desktop app.');
+        throw new CommandError('undo.desktopOnly');
       }
       try {
         return await invoke<boolean>('cancel_undo');
