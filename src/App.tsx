@@ -282,7 +282,13 @@ export function App(props: AppProps) {
     nextRuleId = nextRules.reduce((maximum, rule) => Math.max(maximum, rule.ruleId), 0) + 1;
     setRuleError(undefined);
     setError('');
-    schedulePreview(`Preset “${preset.name}” applied. Source overrides were preserved.`);
+    setNotice('');
+    const appliedNotice = `Preset “${preset.name}” applied. Source overrides were preserved.`;
+    if (plan()) {
+      schedulePreview(appliedNotice);
+    } else {
+      setNotice(appliedNotice);
+    }
   };
 
   const removePreset = (presetId: number) => {

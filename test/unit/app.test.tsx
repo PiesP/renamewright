@@ -736,6 +736,7 @@ test('migrates schema-one presets before they can replace the active pipeline', 
   expect(await screen.findByText('Legacy')).toBeInTheDocument();
   expect(screen.getByRole('status')).toHaveTextContent('updated to the current format');
   await user.click(screen.getByRole('button', { name: 'Apply' }));
+  expect(screen.getByRole('status')).toHaveTextContent('Preset “Legacy” applied.');
   await user.click(screen.getByRole('button', { name: 'Load sample' }));
   expect(await screen.findByText('legacy-invoice.pdf')).toBeInTheDocument();
   expect(JSON.parse(presetStorage.getItem(PRESET_STORAGE_KEY) ?? '{}')).toMatchObject({
