@@ -139,8 +139,10 @@ violation. Validate source, reachability, and impact for each candidate.
 ## Known limitations and accepted pre-release risk
 
 - No stable release is supported yet. Review the exact commit and artifact SHA.
-- Acceptance artifacts are currently unsigned. A release signing method and key
-  custody model require a separate owner decision before publication.
+- Version 0.1.0 is an explicitly disclosed unsigned bootstrap candidate.
+  SignPath Foundation is the selected future signing path, subject to external
+  project acceptance and trusted-build configuration. Never infer a signature
+  from checksums alone.
 - Hosted CI does not perform interactive packaged GUI testing, and ReFS coverage
   requires a compatible external Windows environment. Lack of ReFS evidence is
   recorded as unavailable rather than inferred from NTFS results.
