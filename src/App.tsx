@@ -174,8 +174,8 @@ export function App(props: AppProps) {
   let requestSequence = 0;
   let planInspector: HTMLDialogElement | undefined;
   let planInspectorOpener: HTMLButtonElement | undefined;
-  let recoveryInspectionPanel: HTMLDivElement | undefined;
-  let undoInspectionPanel: HTMLDivElement | undefined;
+  let recoveryInspectionPanel: HTMLElement | undefined;
+  let undoInspectionPanel: HTMLElement | undefined;
   let ledgerHeading: HTMLHeadingElement | undefined;
   let previewTimer: number | undefined;
   let nextRuleId = 2;
@@ -689,6 +689,28 @@ export function App(props: AppProps) {
       unreadable: 'ledgerUnreadable',
     };
     return text(labels[status]);
+  };
+
+  const ledgerStatusDescription = (status: LedgerStatus) => {
+    if (status === 'completed') {
+      return text('ledgerTerminalCompletedDescription');
+    }
+    if (status === 'rolledBack') {
+      return text('ledgerTerminalRolledBackDescription');
+    }
+    if (status === 'reconciliationRequired') {
+      return text('ledgerReconciliationDescription');
+    }
+    if (
+      status === 'forwardPending' ||
+      status === 'completionPending' ||
+      status === 'rollbackPending' ||
+      status === 'rollbackCompletionPending' ||
+      status === 'recoveryRequired'
+    ) {
+      return text('ledgerInterruptedDescription');
+    }
+    return text('ledgerUnavailableDescription');
   };
 
   const dispositionLabel = (disposition: RecoveryDisposition | null) => {
@@ -1564,239 +1586,240 @@ export function App(props: AppProps) {
             <strong>{text('currentScope')}</strong>
             <p>{text('currentScopeDescription')}</p>
           </div>
-          <Show when={ledger().length > 0}>
-            <section class="ledger-panel" aria-labelledby="ledger-heading">
-              <div class="ledger-heading">
+        </aside>
+        <Show when={ledger().length > 0}>
+          <section class="ledger-panel" aria-labelledby="ledger-heading">
+            <div class="ledger-heading">
+              <div>
+                <span class="transaction-kicker">{text('renameLedger')}</span>
                 <h2 id="ledger-heading" tabIndex={-1} ref={ledgerHeading}>
-                  {text('renameLedger')}
+                  {text('transactionActivity')}
                 </h2>
-                <span>{ledger().length}</span>
               </div>
-              <p>{text('ledgerDescription')}</p>
-              <ul aria-label={text('renameJournalStatus')}>
-                {ledger().map((entry) => (
-                  <li>
-                    <div class="ledger-entry-summary">
-                      <strong>
-                        {entry.undoOfPlanId !== null
-                          ? text('undoOfPlan', { planId: entry.undoOfPlanId })
-                          : entry.planId === null
-                            ? text('ledgerNumber', { ledgerId: entry.ledgerId })
-                            : text('planNumber', { planId: entry.planId })}
-                      </strong>
-                      <span>
-                        {entry.undoOfPlanId !== null && entry.planId !== null
-                          ? `${text('planNumber', { planId: entry.planId })} · `
-                          : ''}
-                        {text('sourceCount', { count: count(entry.sourceCount) })}
-                      </span>
-                    </div>
-                    <div class="ledger-entry-actions">
-                      <span
-                        data-recovery={entry.recoveryAvailable ? 'true' : 'false'}
-                        data-undo={entry.undoAvailable ? 'true' : 'false'}
-                      >
-                        {ledgerStatusLabel(entry.status)}
-                      </span>
-                      <Show when={entry.recoveryAvailable}>
-                        <button
-                          class="button button-secondary button-compact ledger-inspect-button"
-                          type="button"
-                          disabled={
-                            inspectingLedgerId() !== undefined ||
-                            inspectingUndoLedgerId() !== undefined ||
-                            recoveryBusyAction() !== undefined ||
-                            undoBusy()
-                          }
-                          aria-label={text('inspectLedgerRecovery', {
-                            subject:
-                              entry.planId === null
-                                ? text('subjectLedger', { id: entry.ledgerId })
-                                : text('subjectPlan', { id: entry.planId }),
-                          })}
-                          onClick={() => void inspectLedgerEntry(entry)}
-                        >
-                          {inspectingLedgerId() === entry.ledgerId
-                            ? text('inspecting')
-                            : text('inspect')}
-                        </button>
-                      </Show>
-                      <Show when={entry.undoAvailable}>
-                        <button
-                          class="button button-secondary button-compact ledger-inspect-button"
-                          type="button"
-                          disabled={
-                            inspectingLedgerId() !== undefined ||
-                            inspectingUndoLedgerId() !== undefined ||
-                            recoveryBusyAction() !== undefined ||
-                            undoBusy()
-                          }
-                          aria-label={text('inspectLedgerUndo', {
-                            subject:
-                              entry.planId === null
-                                ? text('subjectLedger', { id: entry.ledgerId })
-                                : text('subjectPlan', { id: entry.planId }),
-                          })}
-                          onClick={() => void inspectUndoEntry(entry)}
-                        >
-                          {inspectingUndoLedgerId() === entry.ledgerId
-                            ? text('inspecting')
-                            : text('inspectUndo')}
-                        </button>
-                      </Show>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-              <Show when={recoveryInspection()}>
-                <div
-                  class="ledger-inspection"
-                  role="status"
-                  aria-live="polite"
-                  ref={recoveryInspectionPanel}
-                >
-                  <strong>{recoveryInspectionTitle()}</strong>
-                  <p>{recoveryInspectionDescription()}</p>
-                  <span>
-                    {recoveryInspection()?.direction === 'forward'
-                      ? text('recoveryDirectionForward')
-                      : text('recoveryDirectionRollback')}
-                    {recoveryInspection()?.stepIndex === null
-                      ? ` · ${text('recoveryTerminalRecord')}`
-                      : ` · ${text('recoveryStep', { step: recoveryInspection()?.stepIndex ?? 0 })}`}
-                  </span>
-                  <fieldset class="ledger-recovery-actions">
-                    <legend class="visually-hidden">{text('availableRecoveryActions')}</legend>
-                    <Show when={recoveryInspection()?.reconcileAvailable}>
-                      <button
-                        class="button button-primary button-compact"
-                        type="button"
-                        disabled={recoveryBusyAction() !== undefined}
-                        onClick={() => void applyRecoveryAction('reconcile')}
-                      >
-                        {recoveryBusyAction() === 'reconcile'
-                          ? text('waitingForConfirmation')
-                          : text('recordObservation')}
-                      </button>
-                    </Show>
-                    <Show when={recoveryInspection()?.resumeAvailable}>
-                      <button
-                        class="button button-primary button-compact"
-                        type="button"
-                        disabled={recoveryBusyAction() !== undefined}
-                        onClick={() => void applyRecoveryAction('resume')}
-                      >
-                        {recoveryBusyAction() === 'resume'
-                          ? text('recovering')
-                          : recoveryInspection()?.direction === 'forward'
-                            ? text('resume')
-                            : text('continueRollback')}
-                      </button>
-                    </Show>
-                    <Show
-                      when={
-                        recoveryBusyAction() === 'resume' &&
-                        recoveryInspection()?.direction === 'forward'
-                      }
+              <span>{ledger().length}</span>
+            </div>
+            <p>{text('ledgerDescription')}</p>
+            <p class="transaction-safety-boundary">{text('transactionSafetyBoundary')}</p>
+            <ul aria-label={text('renameJournalStatus')}>
+              {ledger().map((entry) => (
+                <li>
+                  <div class="ledger-entry-summary">
+                    <strong>
+                      {entry.undoOfPlanId !== null
+                        ? text('undoOfPlan', { planId: entry.undoOfPlanId })
+                        : entry.planId === null
+                          ? text('ledgerNumber', { ledgerId: entry.ledgerId })
+                          : text('planNumber', { planId: entry.planId })}
+                    </strong>
+                    <span>
+                      {entry.undoOfPlanId !== null && entry.planId !== null
+                        ? `${text('planNumber', { planId: entry.planId })} · `
+                        : ''}
+                      {text('sourceCount', { count: count(entry.sourceCount) })}
+                    </span>
+                  </div>
+                  <div class="ledger-entry-actions">
+                    <span
+                      data-recovery={entry.recoveryAvailable ? 'true' : 'false'}
+                      data-undo={entry.undoAvailable ? 'true' : 'false'}
                     >
+                      {ledgerStatusLabel(entry.status)}
+                    </span>
+                    <Show when={entry.recoveryAvailable}>
                       <button
-                        class="button button-secondary button-compact"
+                        class="button button-secondary button-compact ledger-inspect-button"
                         type="button"
                         disabled={
-                          recoveryCancellationState() === 'requesting' ||
-                          recoveryCancellationState() === 'accepted'
+                          inspectingLedgerId() !== undefined ||
+                          inspectingUndoLedgerId() !== undefined ||
+                          recoveryBusyAction() !== undefined ||
+                          undoBusy()
                         }
-                        onClick={() => void requestRecoveryCancellation()}
+                        aria-label={text('inspectLedgerRecovery', {
+                          subject:
+                            entry.planId === null
+                              ? text('subjectLedger', { id: entry.ledgerId })
+                              : text('subjectPlan', { id: entry.planId }),
+                        })}
+                        onClick={() => void inspectLedgerEntry(entry)}
                       >
-                        {recoveryCancellationState() === 'accepted'
-                          ? text('cancellationRequested')
-                          : recoveryCancellationState() === 'requesting'
-                            ? text('requestingCancellation')
-                            : recoveryCancellationState() === 'rejected'
-                              ? text('tryCancelAgain')
-                              : text('cancelAndRollback')}
+                        {inspectingLedgerId() === entry.ledgerId
+                          ? text('inspecting')
+                          : text('inspect')}
                       </button>
                     </Show>
-                    <Show when={recoveryInspection()?.rollbackAvailable}>
+                    <Show when={entry.undoAvailable}>
                       <button
-                        class="button button-secondary button-compact"
+                        class="button button-secondary button-compact ledger-inspect-button"
                         type="button"
-                        disabled={recoveryBusyAction() !== undefined}
-                        onClick={() => void applyRecoveryAction('rollback')}
+                        disabled={
+                          inspectingLedgerId() !== undefined ||
+                          inspectingUndoLedgerId() !== undefined ||
+                          recoveryBusyAction() !== undefined ||
+                          undoBusy()
+                        }
+                        aria-label={text('inspectLedgerUndo', {
+                          subject:
+                            entry.planId === null
+                              ? text('subjectLedger', { id: entry.ledgerId })
+                              : text('subjectPlan', { id: entry.planId }),
+                        })}
+                        onClick={() => void inspectUndoEntry(entry)}
                       >
-                        {recoveryBusyAction() === 'rollback'
-                          ? text('rollingBack')
-                          : text('rollBack')}
+                        {inspectingUndoLedgerId() === entry.ledgerId
+                          ? text('inspecting')
+                          : text('inspectUndo')}
                       </button>
-                    </Show>
-                  </fieldset>
-                </div>
-              </Show>
-              <Show when={undoInspection()}>
-                {(inspection) => (
-                  <div
-                    class="ledger-inspection ledger-undo-inspection"
-                    data-readiness={inspection().readiness}
-                    role="status"
-                    aria-live="polite"
-                    ref={undoInspectionPanel}
-                  >
-                    <strong>
-                      {inspection().readiness === 'ready'
-                        ? text('undoChecksPassed')
-                        : text('undoBlocked')}
-                    </strong>
-                    <p>
-                      {inspection().readiness === 'ready'
-                        ? text('undoReadyDescription')
-                        : undoBlockDescription(inspection().blockReason)}
-                    </p>
-                    <span>
-                      {text('planNumber', { planId: inspection().originalPlanId })} ·{' '}
-                      {text('sourceCount', { count: count(inspection().sourceCount) })}
-                    </span>
-                    <Show when={inspection().undoAvailable}>
-                      <fieldset class="ledger-recovery-actions">
-                        <legend class="visually-hidden">{text('availableUndoActions')}</legend>
-                        <button
-                          class="button button-primary button-compact ledger-action-button"
-                          data-state={undoBusy() ? 'loading' : 'default'}
-                          type="button"
-                          disabled={undoBusy() || recoveryBusyAction() !== undefined}
-                          onClick={() => void applyUndo()}
-                        >
-                          {undoBusy() ? text('undoing') : text('undoRename')}
-                        </button>
-                        <Show when={undoBusy()}>
-                          <button
-                            class="button button-secondary button-compact ledger-action-button"
-                            data-state={
-                              undoCancellationState() === 'accepted' ? 'success' : 'default'
-                            }
-                            type="button"
-                            disabled={
-                              undoCancellationState() === 'requesting' ||
-                              undoCancellationState() === 'accepted'
-                            }
-                            onClick={() => void requestUndoCancellation()}
-                          >
-                            {undoCancellationState() === 'accepted'
-                              ? text('cancellationRequested')
-                              : undoCancellationState() === 'requesting'
-                                ? text('requestingCancellation')
-                                : undoCancellationState() === 'rejected'
-                                  ? text('tryCancelAgain')
-                                  : text('cancelAndRollback')}
-                          </button>
-                        </Show>
-                      </fieldset>
                     </Show>
                   </div>
-                )}
-              </Show>
-            </section>
-          </Show>
-        </aside>
+                  <p class="ledger-entry-description">{ledgerStatusDescription(entry.status)}</p>
+                </li>
+              ))}
+            </ul>
+            <Show when={recoveryInspection()}>
+              <section
+                class="ledger-inspection"
+                aria-labelledby="recovery-inspection-heading"
+                ref={recoveryInspectionPanel}
+              >
+                <h3 id="recovery-inspection-heading">{recoveryInspectionTitle()}</h3>
+                <p>{recoveryInspectionDescription()}</p>
+                <span>
+                  {recoveryInspection()?.direction === 'forward'
+                    ? text('recoveryDirectionForward')
+                    : text('recoveryDirectionRollback')}
+                  {recoveryInspection()?.stepIndex === null
+                    ? ` · ${text('recoveryTerminalRecord')}`
+                    : ` · ${text('recoveryStep', { step: recoveryInspection()?.stepIndex ?? 0 })}`}
+                </span>
+                <fieldset class="ledger-recovery-actions">
+                  <legend class="visually-hidden">{text('availableRecoveryActions')}</legend>
+                  <Show when={recoveryInspection()?.reconcileAvailable}>
+                    <button
+                      class="button button-primary button-compact"
+                      type="button"
+                      disabled={recoveryBusyAction() !== undefined}
+                      onClick={() => void applyRecoveryAction('reconcile')}
+                    >
+                      {recoveryBusyAction() === 'reconcile'
+                        ? text('waitingForConfirmation')
+                        : text('recordObservation')}
+                    </button>
+                  </Show>
+                  <Show when={recoveryInspection()?.resumeAvailable}>
+                    <button
+                      class="button button-primary button-compact"
+                      type="button"
+                      disabled={recoveryBusyAction() !== undefined}
+                      onClick={() => void applyRecoveryAction('resume')}
+                    >
+                      {recoveryBusyAction() === 'resume'
+                        ? text('recovering')
+                        : recoveryInspection()?.direction === 'forward'
+                          ? text('resume')
+                          : text('continueRollback')}
+                    </button>
+                  </Show>
+                  <Show
+                    when={
+                      recoveryBusyAction() === 'resume' &&
+                      recoveryInspection()?.direction === 'forward'
+                    }
+                  >
+                    <button
+                      class="button button-secondary button-compact"
+                      type="button"
+                      disabled={
+                        recoveryCancellationState() === 'requesting' ||
+                        recoveryCancellationState() === 'accepted'
+                      }
+                      onClick={() => void requestRecoveryCancellation()}
+                    >
+                      {recoveryCancellationState() === 'accepted'
+                        ? text('cancellationRequested')
+                        : recoveryCancellationState() === 'requesting'
+                          ? text('requestingCancellation')
+                          : recoveryCancellationState() === 'rejected'
+                            ? text('tryCancelAgain')
+                            : text('cancelAndRollback')}
+                    </button>
+                  </Show>
+                  <Show when={recoveryInspection()?.rollbackAvailable}>
+                    <button
+                      class="button button-secondary button-compact"
+                      type="button"
+                      disabled={recoveryBusyAction() !== undefined}
+                      onClick={() => void applyRecoveryAction('rollback')}
+                    >
+                      {recoveryBusyAction() === 'rollback' ? text('rollingBack') : text('rollBack')}
+                    </button>
+                  </Show>
+                </fieldset>
+              </section>
+            </Show>
+            <Show when={undoInspection()}>
+              {(inspection) => (
+                <section
+                  class="ledger-inspection ledger-undo-inspection"
+                  data-readiness={inspection().readiness}
+                  aria-labelledby="undo-inspection-heading"
+                  ref={undoInspectionPanel}
+                >
+                  <h3 id="undo-inspection-heading">
+                    {inspection().readiness === 'ready'
+                      ? text('undoChecksPassed')
+                      : text('undoBlocked')}
+                  </h3>
+                  <p>
+                    {inspection().readiness === 'ready'
+                      ? text('undoReadyDescription')
+                      : undoBlockDescription(inspection().blockReason)}
+                  </p>
+                  <span>
+                    {text('planNumber', { planId: inspection().originalPlanId })} ·{' '}
+                    {text('sourceCount', { count: count(inspection().sourceCount) })}
+                  </span>
+                  <Show when={inspection().undoAvailable}>
+                    <fieldset class="ledger-recovery-actions">
+                      <legend class="visually-hidden">{text('availableUndoActions')}</legend>
+                      <button
+                        class="button button-primary button-compact ledger-action-button"
+                        data-state={undoBusy() ? 'loading' : 'default'}
+                        type="button"
+                        disabled={undoBusy() || recoveryBusyAction() !== undefined}
+                        onClick={() => void applyUndo()}
+                      >
+                        {undoBusy() ? text('undoing') : text('undoRename')}
+                      </button>
+                      <Show when={undoBusy()}>
+                        <button
+                          class="button button-secondary button-compact ledger-action-button"
+                          data-state={
+                            undoCancellationState() === 'accepted' ? 'success' : 'default'
+                          }
+                          type="button"
+                          disabled={
+                            undoCancellationState() === 'requesting' ||
+                            undoCancellationState() === 'accepted'
+                          }
+                          onClick={() => void requestUndoCancellation()}
+                        >
+                          {undoCancellationState() === 'accepted'
+                            ? text('cancellationRequested')
+                            : undoCancellationState() === 'requesting'
+                              ? text('requestingCancellation')
+                              : undoCancellationState() === 'rejected'
+                                ? text('tryCancelAgain')
+                                : text('cancelAndRollback')}
+                        </button>
+                      </Show>
+                    </fieldset>
+                  </Show>
+                </section>
+              )}
+            </Show>
+          </section>
+        </Show>
 
         <section class="preview-pane" aria-labelledby="preview-heading">
           <div class="preview-heading">
