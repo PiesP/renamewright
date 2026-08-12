@@ -143,10 +143,11 @@ export interface BrowserRuleResult {
 
 export interface BrowserTraceBudget {
   remainingBytes: number;
+  retainedBytes: number;
 }
 
 export function createBrowserTraceBudget(): BrowserTraceBudget {
-  return { remainingBytes: MAX_PLAN_TRACE_BYTES };
+  return { remainingBytes: MAX_PLAN_TRACE_BYTES, retainedBytes: 0 };
 }
 
 export class PlanningError extends Error {
@@ -462,6 +463,7 @@ export function compileBrowserRulePipeline(
       const retainedBytes = utf8Length(before) + utf8Length(proposedName);
       if (retainedBytes <= traceBudget.remainingBytes) {
         traceBudget.remainingBytes -= retainedBytes;
+        traceBudget.retainedBytes += retainedBytes;
         trace.push({ ruleIndex, ruleId: rule.ruleId, before, after: proposedName });
       } else {
         traceBudget.remainingBytes = 0;

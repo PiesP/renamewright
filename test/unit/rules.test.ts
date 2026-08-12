@@ -148,9 +148,7 @@ test('bounds traces across 10,000 browser rows without changing proposed names',
   expect(
     results.every((result) => result.proposedName.startsWith('x'.repeat(120 * MAX_RULES)))
   ).toBe(true);
-  expect(MAX_PLAN_TRACE_BYTES - traceBudget.remainingBytes).toBeLessThanOrEqual(
-    MAX_PLAN_TRACE_BYTES
-  );
+  expect(traceBudget.retainedBytes).toBeLessThanOrEqual(MAX_PLAN_TRACE_BYTES);
   expect(results.some((result) => result.traceTruncated)).toBe(true);
   expect(results.at(-1)?.trace).toEqual([]);
 });

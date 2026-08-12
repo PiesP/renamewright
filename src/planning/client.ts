@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core';
 import {
   compileBrowserRulePipeline,
   createBrowserTraceBudget,
-  MAX_PLAN_TRACE_BYTES,
   planningError,
   type RulePipelineRequest,
   type RuleTraceStep,
@@ -220,7 +219,7 @@ function browserPlan(request: RulePipelineRequest): BrowserPlanResult {
       canApply: changedCount > 0 && blockedCount === 0,
     },
     traces,
-    retainedTraceBytes: MAX_PLAN_TRACE_BYTES - traceBudget.remainingBytes,
+    retainedTraceBytes: traceBudget.retainedBytes,
     traceTruncatedRowCount: [...traces.values()].filter((trace) => trace.truncated).length,
   };
 }
