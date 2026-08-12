@@ -79,8 +79,9 @@ function Assert-Version {
         [Parameter(Mandatory = $true)][string]$Expected
     )
 
-    if ([string]$Record.DisplayVersion -cne $Expected) {
-        throw 'The installed package version does not match the expected lifecycle state.'
+    $actual = [string]$Record.DisplayVersion
+    if ($actual -cne $Expected) {
+        throw "The installed package version was '$actual' instead of '$Expected'."
     }
 }
 

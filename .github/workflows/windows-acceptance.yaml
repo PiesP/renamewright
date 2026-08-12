@@ -52,30 +52,30 @@ jobs:
       - name: Test the complete Rust workspace
         run: cargo test --workspace --all-targets --locked
 
-      - name: Build the unsigned Windows acceptance package
-        run: pnpm tauri build --ci --bundles nsis --no-sign
-
       - name: Build the previous-version compatibility fixture
         shell: pwsh
         run: |
           $fixtureConfig = Join-Path $env:RUNNER_TEMP 'previous-version.json'
-          $fixtureTarget = Join-Path $env:RUNNER_TEMP 'renamewright-previous-target'
           @{ version = '0.0.0' } |
             ConvertTo-Json |
             Set-Content -LiteralPath $fixtureConfig -Encoding utf8
-          $env:CARGO_TARGET_DIR = $fixtureTarget
           pnpm tauri build --ci --bundles nsis --no-sign --config $fixtureConfig
           if ($LASTEXITCODE -ne 0) {
             throw 'The previous-version compatibility fixture could not be built.'
           }
           $installers = @(
-            Get-ChildItem -LiteralPath (Join-Path $fixtureTarget 'release/bundle/nsis') -Filter '*.exe' -File
+            Get-ChildItem -LiteralPath 'target/release/bundle/nsis' -Filter '*.exe' -File
           )
           if ($installers.Count -ne 1) {
             throw 'Exactly one previous-version installer fixture is required.'
           }
-          "PREVIOUS_INSTALLER_PATH=$($installers[0].FullName)" |
+          $isolatedInstaller = Join-Path $env:RUNNER_TEMP $installers[0].Name
+          Move-Item -LiteralPath $installers[0].FullName -Destination $isolatedInstaller
+          "PREVIOUS_INSTALLER_PATH=$isolatedInstaller" |
             Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Build the unsigned Windows acceptance package
+        run: pnpm tauri build --ci --bundles nsis --no-sign
 
       - name: Verify install, upgrade, portable, downgrade, and uninstall behavior
         shell: pwsh
