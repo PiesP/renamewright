@@ -115,9 +115,9 @@ if (
 $requiredLifecycleChecks = @(
     'previousVersionInstalled',
     'upgradeOverInstall',
-    'installedApplicationStarted',
-    'portableApplicationStarted',
-    'portableCreatedNoAdjacentProfile',
+    'currentUserInstallLocationVerified',
+    'portableArtifactMatchesInstalledBinary',
+    'sharedDataRootContractVerified',
     'downgradeRefused',
     'installedBinaryPreserved',
     'uninstallCompleted',
