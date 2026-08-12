@@ -21,8 +21,9 @@ pub use planner::{
     build_plan_with_rule_pipeline_and_environment,
 };
 pub use rules::{
-    MAX_RULE_TEXT_BYTES, MAX_RULES, MAX_SEQUENCE_PADDING, RenameRule, RulePipeline,
-    RuleValidationError, RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope,
+    CaseMode, ExtensionOperation, FilenamePart, MAX_RULE_TEXT_BYTES, MAX_RULES,
+    MAX_SEQUENCE_PADDING, RenameRule, RulePipeline, RuleValidationError, RuleValidationErrorKind,
+    SequenceOrder, SequencePlacement, SequenceScope, UnicodeNormalizationForm,
 };
 pub use windows::windows_name_comparison_key;
 

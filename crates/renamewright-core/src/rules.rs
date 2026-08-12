@@ -1,8 +1,10 @@
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
+use std::path::Path;
 
 use regex::{Regex, RegexBuilder};
+use unicode_normalization::UnicodeNormalization;
 
 pub const MAX_RULES: usize = 32;
 pub const MAX_RULE_TEXT_BYTES: usize = 4_096;
@@ -25,6 +27,33 @@ pub enum SequenceOrder {
 pub enum SequencePlacement {
     Prefix,
     Suffix,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilenamePart {
+    WholeName,
+    Stem,
+    Extension,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionOperation {
+    Remove,
+    Replace(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseMode {
+    Lowercase,
+    Uppercase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnicodeNormalizationForm {
+    Nfc,
+    Nfd,
+    Nfkc,
+    Nfkd,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +80,21 @@ pub enum RenameRule {
         padding: u8,
         placement: SequencePlacement,
         separator: String,
+    },
+    Extension {
+        operation: ExtensionOperation,
+    },
+    Case {
+        target: FilenamePart,
+        mode: CaseMode,
+    },
+    WhitespaceCleanup {
+        target: FilenamePart,
+        replacement: String,
+    },
+    UnicodeNormalization {
+        target: FilenamePart,
+        form: UnicodeNormalizationForm,
     },
 }
 
@@ -105,6 +149,38 @@ impl RenameRule {
             separator: separator.into(),
         }
     }
+
+    #[must_use]
+    pub const fn remove_extension() -> Self {
+        Self::Extension {
+            operation: ExtensionOperation::Remove,
+        }
+    }
+
+    #[must_use]
+    pub fn replace_extension(value: impl Into<String>) -> Self {
+        Self::Extension {
+            operation: ExtensionOperation::Replace(value.into()),
+        }
+    }
+
+    #[must_use]
+    pub const fn change_case(target: FilenamePart, mode: CaseMode) -> Self {
+        Self::Case { target, mode }
+    }
+
+    #[must_use]
+    pub fn cleanup_whitespace(target: FilenamePart, replacement: impl Into<String>) -> Self {
+        Self::WhitespaceCleanup {
+            target,
+            replacement: replacement.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn normalize_unicode(target: FilenamePart, form: UnicodeNormalizationForm) -> Self {
+        Self::UnicodeNormalization { target, form }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +191,7 @@ pub enum RuleValidationErrorKind {
     InvalidRegex,
     InvalidSequenceStep,
     InvalidSequencePadding,
+    InvalidExtensionReplacement,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +244,19 @@ enum CompiledRule {
         padding: u8,
         placement: SequencePlacement,
         separator: String,
+    },
+    Extension(ExtensionOperation),
+    Case {
+        target: FilenamePart,
+        mode: CaseMode,
+    },
+    WhitespaceCleanup {
+        target: FilenamePart,
+        replacement: String,
+    },
+    UnicodeNormalization {
+        target: FilenamePart,
+        form: UnicodeNormalizationForm,
     },
 }
 
@@ -277,6 +367,20 @@ impl RulePipeline {
                 }
                 Ok(proposed)
             }
+            CompiledRule::Extension(operation) => apply_extension(name, operation),
+            CompiledRule::Case { target, mode } => {
+                apply_unicode_part(name, *target, |text| match mode {
+                    CaseMode::Lowercase => text.to_lowercase(),
+                    CaseMode::Uppercase => text.to_uppercase(),
+                })
+            }
+            CompiledRule::WhitespaceCleanup {
+                target,
+                replacement,
+            } => apply_unicode_part(name, *target, |text| cleanup_whitespace(text, replacement)),
+            CompiledRule::UnicodeNormalization { target, form } => {
+                apply_unicode_part(name, *target, |text| normalize_unicode(text, *form))
+            }
         }
     }
 }
@@ -364,6 +468,125 @@ fn compile_rule(index: usize, rule: &RenameRule) -> Result<CompiledRule, RuleVal
                 separator: separator.clone(),
             })
         }
+        RenameRule::Extension { operation } => match operation {
+            ExtensionOperation::Remove => Ok(CompiledRule::Extension(ExtensionOperation::Remove)),
+            ExtensionOperation::Replace(value) => {
+                validate_text(index, invalid_text(&[value]))?;
+                if value.is_empty() || value.starts_with('.') {
+                    return Err(RuleValidationError::new(
+                        Some(index),
+                        RuleValidationErrorKind::InvalidExtensionReplacement,
+                    ));
+                }
+                Ok(CompiledRule::Extension(ExtensionOperation::Replace(
+                    value.clone(),
+                )))
+            }
+        },
+        RenameRule::Case { target, mode } => Ok(CompiledRule::Case {
+            target: *target,
+            mode: *mode,
+        }),
+        RenameRule::WhitespaceCleanup {
+            target,
+            replacement,
+        } => {
+            validate_text(index, invalid_text(&[replacement]))?;
+            Ok(CompiledRule::WhitespaceCleanup {
+                target: *target,
+                replacement: replacement.clone(),
+            })
+        }
+        RenameRule::UnicodeNormalization { target, form } => {
+            Ok(CompiledRule::UnicodeNormalization {
+                target: *target,
+                form: *form,
+            })
+        }
+    }
+}
+
+fn apply_extension(
+    name: &OsStr,
+    operation: &ExtensionOperation,
+) -> Result<OsString, RuleApplicationError> {
+    let path = Path::new(name);
+    let Some(stem) = path.file_stem().filter(|_| path.extension().is_some()) else {
+        if let ExtensionOperation::Replace(value) = operation {
+            let mut proposed = name.to_os_string();
+            proposed.push(".");
+            proposed.push(value);
+            return Ok(proposed);
+        }
+        return Ok(name.to_os_string());
+    };
+    let mut proposed = stem.to_os_string();
+    if let ExtensionOperation::Replace(value) = operation {
+        proposed.push(".");
+        proposed.push(value);
+    }
+    Ok(proposed)
+}
+
+fn apply_unicode_part(
+    name: &OsStr,
+    target: FilenamePart,
+    transform: impl FnOnce(&str) -> String,
+) -> Result<OsString, RuleApplicationError> {
+    let text = name
+        .to_str()
+        .ok_or(RuleApplicationError::UnsupportedEncoding)?;
+    Ok(OsString::from(transform_filename_part(
+        text, target, transform,
+    )))
+}
+
+fn transform_filename_part(
+    name: &str,
+    target: FilenamePart,
+    transform: impl FnOnce(&str) -> String,
+) -> String {
+    let boundary = name.rfind('.').filter(|index| *index > 0);
+    match (target, boundary) {
+        (FilenamePart::WholeName, _) => transform(name),
+        (FilenamePart::Stem, Some(index)) => {
+            let mut result = transform(&name[..index]);
+            result.push_str(&name[index..]);
+            result
+        }
+        (FilenamePart::Extension, Some(index)) => {
+            let mut result = name[..=index].to_owned();
+            result.push_str(&transform(&name[index + 1..]));
+            result
+        }
+        (FilenamePart::Stem, None) => transform(name),
+        (FilenamePart::Extension, None) => name.to_owned(),
+    }
+}
+
+fn cleanup_whitespace(text: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut pending_separator = false;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            pending_separator = !result.is_empty();
+        } else {
+            if pending_separator {
+                result.push_str(replacement);
+                pending_separator = false;
+            }
+            result.push(character);
+        }
+    }
+    result
+}
+
+fn normalize_unicode(text: &str, form: UnicodeNormalizationForm) -> String {
+    match form {
+        UnicodeNormalizationForm::Nfc => text.nfc().collect(),
+        UnicodeNormalizationForm::Nfd => text.nfd().collect(),
+        UnicodeNormalizationForm::Nfkc => text.nfkc().collect(),
+        UnicodeNormalizationForm::Nfkd => text.nfkd().collect(),
     }
 }
 
