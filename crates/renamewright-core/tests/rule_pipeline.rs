@@ -349,6 +349,26 @@ fn extension_rules_handle_hidden_trailing_and_multiple_dots() -> Result<(), Box<
 }
 
 #[test]
+fn extension_rules_never_reinterpret_filename_units_as_a_path() -> Result<(), Box<dyn Error>> {
+    for separator in ["/", "\\"] {
+        let invalid_prefix = format!("invalid{separator}");
+        let expected = format!("{invalid_prefix}report.md");
+        assert_eq!(
+            proposal(
+                "report.txt",
+                vec![
+                    RenameRule::prefix(invalid_prefix),
+                    RenameRule::replace_extension("md"),
+                ],
+            )?
+            .0,
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn structure_boundary_is_recomputed_after_each_rule() -> Result<(), Box<dyn Error>> {
     let (proposed, trace) = proposal(
         "archive.tar.gz",

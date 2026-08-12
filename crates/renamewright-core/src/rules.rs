@@ -1,7 +1,11 @@
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
-use std::path::Path;
+
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 use regex::{Regex, RegexBuilder};
 use unicode_normalization::UnicodeNormalization;
@@ -510,8 +514,7 @@ fn apply_extension(
     name: &OsStr,
     operation: &ExtensionOperation,
 ) -> Result<OsString, RuleApplicationError> {
-    let path = Path::new(name);
-    let Some(stem) = path.file_stem().filter(|_| path.extension().is_some()) else {
+    let Some(stem) = stem_before_final_dot(name)? else {
         if let ExtensionOperation::Replace(value) = operation {
             let mut proposed = name.to_os_string();
             proposed.push(".");
@@ -526,6 +529,37 @@ fn apply_extension(
         proposed.push(value);
     }
     Ok(proposed)
+}
+
+#[cfg(unix)]
+fn stem_before_final_dot(name: &OsStr) -> Result<Option<OsString>, RuleApplicationError> {
+    let units = name.as_bytes();
+    Ok(units
+        .iter()
+        .rposition(|unit| *unit == b'.')
+        .filter(|index| *index > 0)
+        .map(|index| OsString::from_vec(units[..index].to_vec())))
+}
+
+#[cfg(windows)]
+fn stem_before_final_dot(name: &OsStr) -> Result<Option<OsString>, RuleApplicationError> {
+    let units = name.encode_wide().collect::<Vec<_>>();
+    Ok(units
+        .iter()
+        .rposition(|unit| *unit == u16::from(b'.'))
+        .filter(|index| *index > 0)
+        .map(|index| OsString::from_wide(&units[..index])))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stem_before_final_dot(name: &OsStr) -> Result<Option<OsString>, RuleApplicationError> {
+    let text = name
+        .to_str()
+        .ok_or(RuleApplicationError::UnsupportedEncoding)?;
+    Ok(text
+        .rfind('.')
+        .filter(|index| *index > 0)
+        .map(|index| OsString::from(&text[..index])))
 }
 
 fn apply_unicode_part(

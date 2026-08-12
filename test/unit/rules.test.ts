@@ -248,6 +248,21 @@ test('recomputes the extension boundary through ordered structure rules', () => 
     { before: 'archive.tar', after: 'archive.TAR' },
     { before: 'archive.TAR', after: 'archive.backup.zip' },
   ]);
+
+  const pathLikeUnits: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    rules: [
+      { kind: 'prefix', ruleId: 80, enabled: true, value: 'invalid/' },
+      {
+        kind: 'extension',
+        ruleId: 81,
+        enabled: true,
+        operation: 'replace',
+        value: 'md',
+      },
+    ],
+  };
+  expect(applyBrowserRules('report.txt', pathLikeUnits).proposedName).toBe('invalid/report.md');
 });
 
 test('handles hidden files, trailing dots, case, and Unicode whitespace by selected part', () => {
