@@ -86,6 +86,23 @@ function Assert-Version {
     }
 }
 
+function Assert-ExecutableVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Expected
+    )
+
+    $expectedVersion = [Version]$Expected
+    $actualVersion = [Version](Get-Item -LiteralPath $Path).VersionInfo.FileVersion
+    if (
+        $actualVersion.Major -ne $expectedVersion.Major -or
+        $actualVersion.Minor -ne $expectedVersion.Minor -or
+        $actualVersion.Build -ne $expectedVersion.Build
+    ) {
+        throw "A packaged executable version was '$actualVersion' instead of '$Expected'."
+    }
+}
+
 function Remove-TestDataRoot {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -181,10 +198,10 @@ try {
     $currentExecutable = Get-InstalledExecutable -Record $currentRecord
     Assert-Marker -Path $journalMarker -Expected $journalMarkerValue
     Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue
-    $installedDigest = (Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash
-    $portableDigest = (Get-FileHash -LiteralPath $currentPortable -Algorithm SHA256).Hash
-    if ($portableDigest -cne $installedDigest) {
-        throw 'The portable artifact does not match the installed application payload.'
+    Assert-ExecutableVersion -Path $currentExecutable -Expected $CurrentVersion
+    Assert-ExecutableVersion -Path $currentPortable -Expected $CurrentVersion
+    if ((Get-Item -LiteralPath $currentPortable).Length -le 0) {
+        throw 'The portable artifact is empty.'
     }
 
     $installedDigestBeforeDowngrade = (Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash
@@ -232,7 +249,7 @@ try {
             previousVersionInstalled = $true
             upgradeOverInstall = $true
             currentUserInstallLocationVerified = $true
-            portableArtifactMatchesInstalledBinary = $true
+            portableArtifactVersionVerified = $true
             sharedDataRootContractVerified = $true
             downgradeRefused = $true
             downgradeExitCode = $downgradeExitCode

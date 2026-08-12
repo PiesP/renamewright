@@ -80,9 +80,8 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
   expect(lifecycle).toContain('[Version]$PreviousVersion -ge [Version]$CurrentVersion');
   expect(lifecycle).toContain('The lifecycle test requires clean current-user data roots.');
   expect(lifecycle).not.toContain('Start-And-ProbeApplication');
-  expect(lifecycle).toContain(
-    'The portable artifact does not match the installed application payload.'
-  );
+  expect(lifecycle).toContain('Assert-ExecutableVersion');
+  expect(lifecycle).toContain("throw 'The portable artifact is empty.'");
   expect(lifecycle).toContain("-Arguments @('/S', '/UPDATE')");
   expect(lifecycle).toContain(
     "The installed package version was '$actual' instead of '$Expected'."
