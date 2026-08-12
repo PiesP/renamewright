@@ -43,6 +43,7 @@ function App(props: { client: PlanningClient }) {
 afterEach(() => {
   cleanup();
   presetStorage.clear();
+  vi.useRealTimers();
 });
 
 const emptyRequest = (): RulePipelineRequest => ({
@@ -682,9 +683,9 @@ test('keeps an inline source override stable until it is reset', async () => {
 });
 
 test('saves, applies, and deletes local presets without clearing source overrides', async () => {
-  const user = userEvent.setup();
+  vi.useFakeTimers();
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
   render(() => <App client={fakeClient()} />);
-  const findPlanName = (name: string) => screen.findByText(name, {}, { timeout: 3_000 });
 
   await user.click(screen.getByRole('button', { name: 'Load sample' }));
   const prefix = screen.getByRole('textbox', { name: 'Prefix' });
@@ -694,7 +695,8 @@ test('saves, applies, and deletes local presets without clearing source override
   await user.clear(override);
   await user.type(override, 'manual.md');
   await user.click(screen.getByRole('button', { name: /^Save$/u }));
-  expect(await findPlanName('manual.md')).toBeInTheDocument();
+  await vi.advanceTimersByTimeAsync(120);
+  expect(screen.getByText('manual.md')).toBeInTheDocument();
 
   await user.type(screen.getByRole('textbox', { name: 'Preset name' }), 'Reports');
   await user.click(screen.getByRole('button', { name: 'Save preset' }));
@@ -702,10 +704,12 @@ test('saves, applies, and deletes local presets without clearing source override
 
   await user.clear(prefix);
   await user.type(prefix, 'other-');
-  expect(await findPlanName('other-notes.txt')).toBeInTheDocument();
+  await vi.advanceTimersByTimeAsync(120);
+  expect(screen.getByText('other-notes.txt')).toBeInTheDocument();
   expect(screen.getByText('manual.md')).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: 'Apply' }));
-  expect(await findPlanName('saved-notes.txt')).toBeInTheDocument();
+  await vi.advanceTimersByTimeAsync(120);
+  expect(screen.getByText('saved-notes.txt')).toBeInTheDocument();
   expect(screen.getByText('manual.md')).toBeInTheDocument();
   expect(screen.getByRole('status')).toHaveTextContent('Source overrides were preserved.');
 
