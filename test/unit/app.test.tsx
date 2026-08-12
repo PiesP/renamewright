@@ -68,7 +68,7 @@ function fakeClient(): PlanningClient {
     selectSources: async (request) => makePlan(request),
     previewRules: async (request) => makePlan(request),
     inspectPlan: async (planId) =>
-      JSON.stringify({ schemaVersion: 3, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
+      JSON.stringify({ schemaVersion: 4, planId, rows: makePlan(emptyRequest()).rows }, null, 2),
     exportPlan: async () => false,
     listLedger: async () => [],
     inspectRecovery: async () => {
@@ -519,6 +519,78 @@ test('edits sequence allocation independently from preview row order', async () 
   );
 });
 
+test('edits filename structure rules as one ordered pipeline', async () => {
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  await user.click(screen.getByRole('button', { name: 'Load sample' }));
+  await user.type(screen.getByRole('textbox', { name: 'Prefix' }), '  Final   ');
+
+  await user.selectOptions(screen.getByRole('combobox', { name: 'New rule' }), 'extension');
+  await user.click(screen.getByRole('button', { name: 'Add rule' }));
+  const extensionEditor = screen
+    .getByRole('heading', { name: 'Change extension' })
+    .closest('section');
+  if (!extensionEditor) {
+    throw new Error('Extension editor was not rendered.');
+  }
+  await user.selectOptions(
+    within(extensionEditor).getByRole('combobox', { name: 'Operation' }),
+    'replace'
+  );
+  const extension = within(extensionEditor).getByRole('textbox', {
+    name: 'New extension (without dot)',
+  });
+  await user.clear(extension);
+  await user.type(extension, 'md');
+
+  await user.selectOptions(screen.getByRole('combobox', { name: 'New rule' }), 'whitespaceCleanup');
+  await user.click(screen.getByRole('button', { name: 'Add rule' }));
+  const whitespaceEditor = screen
+    .getByRole('heading', { name: 'Clean whitespace' })
+    .closest('section');
+  if (!whitespaceEditor) {
+    throw new Error('Whitespace editor was not rendered.');
+  }
+  const replacement = within(whitespaceEditor).getByRole('textbox', {
+    name: 'Collapse runs to',
+  });
+  await user.clear(replacement);
+  await user.type(replacement, '-');
+  expect(await screen.findByText('Final-invoice.md')).toBeInTheDocument();
+
+  await user.selectOptions(screen.getByRole('combobox', { name: 'New rule' }), 'case');
+  await user.click(screen.getByRole('button', { name: 'Add rule' }));
+  const caseEditor = screen.getByRole('heading', { name: 'Change case' }).closest('section');
+  if (!caseEditor) {
+    throw new Error('Case editor was not rendered.');
+  }
+  await user.selectOptions(
+    within(caseEditor).getByRole('combobox', { name: 'Apply to' }),
+    'extension'
+  );
+  await user.selectOptions(within(caseEditor).getByRole('combobox', { name: 'Case' }), 'uppercase');
+  expect(await screen.findByText('Final-invoice.MD')).toBeInTheDocument();
+
+  await user.selectOptions(
+    screen.getByRole('combobox', { name: 'New rule' }),
+    'unicodeNormalization'
+  );
+  await user.click(screen.getByRole('button', { name: 'Add rule' }));
+  const normalizationEditor = screen
+    .getByRole('heading', { name: 'Normalize Unicode' })
+    .closest('section');
+  if (!normalizationEditor) {
+    throw new Error('Unicode normalization editor was not rendered.');
+  }
+  expect(
+    within(normalizationEditor).getByRole('combobox', { name: 'Normalization form' })
+  ).toHaveValue('nfc');
+  expect(normalizationEditor).toHaveTextContent(
+    'Normalization changes names only while this rule is enabled.'
+  );
+});
+
 test('associates an invalid regex error with its rule editor', async () => {
   const user = userEvent.setup();
   render(() => <App client={fakeClient()} />);
@@ -609,7 +681,7 @@ test('inspects and exports only the current opaque plan ID', async () => {
   await user.click(inspectButton);
 
   expect(inspectPlan).toHaveBeenCalledWith(9);
-  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 3');
+  expect(screen.getByRole('dialog', { name: 'Plan 9' })).toHaveTextContent('"schemaVersion": 4');
   await user.click(screen.getByRole('button', { name: 'Export JSON…' }));
   expect(exportPlan).toHaveBeenCalledWith(9);
   expect(screen.getByRole('status')).toHaveTextContent('Plan JSON exported.');

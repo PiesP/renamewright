@@ -2,9 +2,9 @@ use std::error::Error;
 use std::ffi::OsString;
 
 use renamewright_core::{
-    DiagnosticCode, MAX_RULES, ParentId, PlanId, RenameRule, RulePipeline, RuleValidationErrorKind,
-    SequenceOrder, SequencePlacement, SequenceScope, SourceId, SourceSnapshot, TargetPolicy,
-    build_plan_with_rule_pipeline,
+    CaseMode, DiagnosticCode, FilenamePart, MAX_RULES, ParentId, PlanId, RenameRule, RulePipeline,
+    RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope, SourceId,
+    SourceSnapshot, TargetPolicy, UnicodeNormalizationForm, build_plan_with_rule_pipeline,
 };
 
 fn source(name: &str) -> SourceSnapshot {
@@ -327,6 +327,191 @@ fn sequence_overflow_blocks_only_unrepresentable_rows() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+#[test]
+fn extension_rules_handle_hidden_trailing_and_multiple_dots() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        proposal("archive.tar.gz", vec![RenameRule::remove_extension()])?.0,
+        "archive.tar"
+    );
+    assert_eq!(
+        proposal(".env", vec![RenameRule::replace_extension("txt")])?.0,
+        ".env.txt"
+    );
+    assert_eq!(
+        proposal("report.", vec![RenameRule::replace_extension("md")])?.0,
+        "report.md"
+    );
+    assert_eq!(
+        proposal("README", vec![RenameRule::remove_extension()])?.0,
+        "README"
+    );
+    Ok(())
+}
+
+#[test]
+fn extension_rules_never_reinterpret_filename_units_as_a_path() -> Result<(), Box<dyn Error>> {
+    for separator in ["/", "\\"] {
+        let invalid_prefix = format!("invalid{separator}");
+        let expected = format!("{invalid_prefix}report.md");
+        assert_eq!(
+            proposal(
+                "report.txt",
+                vec![
+                    RenameRule::prefix(invalid_prefix),
+                    RenameRule::replace_extension("md"),
+                ],
+            )?
+            .0,
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn structure_boundary_is_recomputed_after_each_rule() -> Result<(), Box<dyn Error>> {
+    let (proposed, trace) = proposal(
+        "archive.tar.gz",
+        vec![
+            RenameRule::remove_extension(),
+            RenameRule::change_case(FilenamePart::Extension, CaseMode::Uppercase),
+            RenameRule::replace_extension("backup.zip"),
+        ],
+    )?;
+
+    assert_eq!(proposed, "archive.backup.zip");
+    assert_eq!(trace[0].1, "archive.tar");
+    assert_eq!(trace[1].1, "archive.TAR");
+    assert_eq!(trace[2].0, "archive.TAR");
+    Ok(())
+}
+
+#[test]
+fn case_conversion_targets_whole_stem_or_extension() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        proposal(
+            "Résumé.TXT",
+            vec![RenameRule::change_case(
+                FilenamePart::Stem,
+                CaseMode::Lowercase,
+            )],
+        )?
+        .0,
+        "résumé.TXT"
+    );
+    assert_eq!(
+        proposal(
+            "report.Txt",
+            vec![RenameRule::change_case(
+                FilenamePart::Extension,
+                CaseMode::Uppercase,
+            )],
+        )?
+        .0,
+        "report.TXT"
+    );
+    assert_eq!(
+        proposal(
+            "straße.txt",
+            vec![RenameRule::change_case(
+                FilenamePart::WholeName,
+                CaseMode::Uppercase,
+            )],
+        )?
+        .0,
+        "STRASSE.TXT"
+    );
+    Ok(())
+}
+
+#[test]
+fn whitespace_cleanup_trims_and_collapses_only_the_selected_part() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        proposal(
+            "\u{2003}draft\t report \n.TXT",
+            vec![RenameRule::cleanup_whitespace(FilenamePart::Stem, "-")],
+        )?
+        .0,
+        "draft-report.TXT"
+    );
+    assert_eq!(
+        proposal(
+            "report. t x t ",
+            vec![RenameRule::cleanup_whitespace(FilenamePart::Extension, "",)],
+        )?
+        .0,
+        "report.txt"
+    );
+    Ok(())
+}
+
+#[test]
+fn unicode_normalization_is_explicit_and_targeted() -> Result<(), Box<dyn Error>> {
+    let decomposed = "re\u{301}sume\u{301}.txt";
+    assert_eq!(
+        proposal(decomposed, vec![RenameRule::prefix("")])?.0,
+        decomposed
+    );
+    assert_eq!(
+        proposal(
+            decomposed,
+            vec![RenameRule::normalize_unicode(
+                FilenamePart::Stem,
+                UnicodeNormalizationForm::Nfc,
+            )],
+        )?
+        .0,
+        "résumé.txt"
+    );
+    assert_eq!(
+        proposal(
+            "Ｆｉｌｅ.txt",
+            vec![RenameRule::normalize_unicode(
+                FilenamePart::Stem,
+                UnicodeNormalizationForm::Nfkc,
+            )],
+        )?
+        .0,
+        "File.txt"
+    );
+    let nfd = proposal(
+        "é.txt",
+        vec![RenameRule::normalize_unicode(
+            FilenamePart::Stem,
+            UnicodeNormalizationForm::Nfd,
+        )],
+    )?
+    .0;
+    assert_eq!(nfd, "e\u{301}.txt");
+    assert_eq!(
+        proposal(
+            "ﬁle.txt",
+            vec![RenameRule::normalize_unicode(
+                FilenamePart::Stem,
+                UnicodeNormalizationForm::Nfkd,
+            )],
+        )?
+        .0,
+        "file.txt"
+    );
+    Ok(())
+}
+
+#[test]
+fn extension_replacement_rejects_empty_or_dot_prefixed_values() {
+    let empty = RulePipeline::compile(vec![RenameRule::replace_extension("")]).err();
+    let prefixed = RulePipeline::compile(vec![RenameRule::replace_extension(".txt")]).err();
+
+    assert_eq!(
+        empty.map(|error| error.kind()),
+        Some(RuleValidationErrorKind::InvalidExtensionReplacement)
+    );
+    assert_eq!(
+        prefixed.map(|error| error.kind()),
+        Some(RuleValidationErrorKind::InvalidExtensionReplacement)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn unicode_dependent_rules_block_non_unicode_names_without_loss() -> Result<(), Box<dyn Error>> {
@@ -381,6 +566,30 @@ fn sequence_preserves_non_unicode_native_names() -> Result<(), Box<dyn Error>> {
     );
     let mut expected = OsString::from("01-");
     expected.push(native_name);
+
+    assert_eq!(plan.rows()[0].proposed_name(), expected.as_os_str());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn extension_removal_preserves_non_unicode_native_units() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let native_name = OsString::from_vec(vec![b'f', b'o', 0x80, b'.', b't', b'x', b't']);
+    let expected = OsString::from_vec(vec![b'f', b'o', 0x80]);
+    let pipeline = RulePipeline::compile(vec![RenameRule::remove_extension()])?;
+    let plan = build_plan_with_rule_pipeline(
+        PlanId::new(8),
+        1,
+        &[SourceSnapshot::new(
+            SourceId::new(1),
+            ParentId::new(1),
+            native_name,
+        )],
+        &pipeline,
+        TargetPolicy::windows(),
+    );
 
     assert_eq!(plan.rows()[0].proposed_name(), expected.as_os_str());
     Ok(())

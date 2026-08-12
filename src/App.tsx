@@ -14,6 +14,7 @@ import {
 } from './planning/client';
 import {
   createRule,
+  type FilenamePart,
   MAX_RULES,
   PlanningError,
   RULE_PIPELINE_SCHEMA_VERSION,
@@ -87,6 +88,27 @@ function RuleNumberInput(props: RuleNumberInputProps) {
         />
         <span aria-hidden="true">{props.invalid ? '!' : ''}</span>
       </div>
+    </div>
+  );
+}
+
+function FilenamePartSelect(props: {
+  id: string;
+  value: FilenamePart;
+  onChange: (value: FilenamePart) => void;
+}) {
+  return (
+    <div class="rule-field">
+      <label for={props.id}>Apply to</label>
+      <select
+        id={props.id}
+        value={props.value}
+        onChange={(event) => props.onChange(event.currentTarget.value as FilenamePart)}
+      >
+        <option value="wholeName">Whole filename</option>
+        <option value="stem">Name without extension</option>
+        <option value="extension">Extension only</option>
+      </select>
     </div>
   );
 }
@@ -638,6 +660,10 @@ export function App(props: AppProps) {
                 const invalid = () => ruleError()?.ruleId === rule.ruleId;
                 const enabled = () =>
                   rules().find((candidate) => candidate.ruleId === rule.ruleId)?.enabled ?? false;
+                const extensionReplacementEnabled = () => {
+                  const current = rules().find((candidate) => candidate.ruleId === rule.ruleId);
+                  return current?.kind === 'extension' && current.operation === 'replace';
+                };
                 return (
                   <section
                     class="rule-editor"
@@ -929,6 +955,170 @@ export function App(props: AppProps) {
                           </>
                         )}
                       </Match>
+                      <Match when={rule.kind === 'extension' && rule}>
+                        {(current) => (
+                          <>
+                            <div class="rule-field">
+                              <label for={inputId('operation')}>Operation</label>
+                              <select
+                                id={inputId('operation')}
+                                value={current().operation}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'extension'
+                                      ? {
+                                          ...candidate,
+                                          operation: event.currentTarget.value as
+                                            | 'remove'
+                                            | 'replace',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="remove">Remove extension</option>
+                                <option value="replace">Replace extension</option>
+                              </select>
+                            </div>
+                            <Show when={extensionReplacementEnabled()}>
+                              <RuleTextInput
+                                id={inputId('value')}
+                                label="New extension (without dot)"
+                                value={current().value}
+                                placeholder="txt"
+                                invalid={invalid()}
+                                onInput={(value) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'extension'
+                                      ? { ...candidate, value }
+                                      : candidate
+                                  )
+                                }
+                              />
+                            </Show>
+                            <p class="field-help">
+                              Uses the final dot; leading-dot files have no extension.
+                            </p>
+                          </>
+                        )}
+                      </Match>
+                      <Match when={rule.kind === 'case' && rule}>
+                        {(current) => (
+                          <>
+                            <FilenamePartSelect
+                              id={inputId('target')}
+                              value={current().target}
+                              onChange={(target) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'case' ? { ...candidate, target } : candidate
+                                )
+                              }
+                            />
+                            <div class="rule-field">
+                              <label for={inputId('mode')}>Case</label>
+                              <select
+                                id={inputId('mode')}
+                                value={current().mode}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'case'
+                                      ? {
+                                          ...candidate,
+                                          mode: event.currentTarget.value as
+                                            | 'lowercase'
+                                            | 'uppercase',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="lowercase">Lowercase</option>
+                                <option value="uppercase">Uppercase</option>
+                              </select>
+                            </div>
+                          </>
+                        )}
+                      </Match>
+                      <Match when={rule.kind === 'whitespaceCleanup' && rule}>
+                        {(current) => (
+                          <>
+                            <FilenamePartSelect
+                              id={inputId('target')}
+                              value={current().target}
+                              onChange={(target) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'whitespaceCleanup'
+                                    ? { ...candidate, target }
+                                    : candidate
+                                )
+                              }
+                            />
+                            <RuleTextInput
+                              id={inputId('replacement')}
+                              label="Collapse runs to"
+                              value={current().replacement}
+                              placeholder="-"
+                              invalid={invalid()}
+                              onInput={(replacement) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'whitespaceCleanup'
+                                    ? { ...candidate, replacement }
+                                    : candidate
+                                )
+                              }
+                            />
+                            <p class="field-help">
+                              Leading and trailing Unicode whitespace is removed.
+                            </p>
+                          </>
+                        )}
+                      </Match>
+                      <Match when={rule.kind === 'unicodeNormalization' && rule}>
+                        {(current) => (
+                          <>
+                            <FilenamePartSelect
+                              id={inputId('target')}
+                              value={current().target}
+                              onChange={(target) =>
+                                replaceRule(rule.ruleId, (candidate) =>
+                                  candidate.kind === 'unicodeNormalization'
+                                    ? { ...candidate, target }
+                                    : candidate
+                                )
+                              }
+                            />
+                            <div class="rule-field">
+                              <label for={inputId('form')}>Normalization form</label>
+                              <select
+                                id={inputId('form')}
+                                value={current().form}
+                                onChange={(event) =>
+                                  replaceRule(rule.ruleId, (candidate) =>
+                                    candidate.kind === 'unicodeNormalization'
+                                      ? {
+                                          ...candidate,
+                                          form: event.currentTarget.value as
+                                            | 'nfc'
+                                            | 'nfd'
+                                            | 'nfkc'
+                                            | 'nfkd',
+                                        }
+                                      : candidate
+                                  )
+                                }
+                              >
+                                <option value="nfc">NFC · canonical composed</option>
+                                <option value="nfd">NFD · canonical decomposed</option>
+                                <option value="nfkc">NFKC · compatibility composed</option>
+                                <option value="nfkd">NFKD · compatibility decomposed</option>
+                              </select>
+                            </div>
+                            <p class="field-help">
+                              Normalization changes names only while this rule is enabled.
+                            </p>
+                          </>
+                        )}
+                      </Match>
                     </Switch>
                     <Show when={invalid()}>
                       <p class="field-help field-help-error">{error()}</p>
@@ -951,6 +1141,10 @@ export function App(props: AppProps) {
                 <option value="literalReplace">Replace text</option>
                 <option value="regexReplace">Regular expression</option>
                 <option value="sequence">Sequence numbering</option>
+                <option value="extension">Extension</option>
+                <option value="case">Letter case</option>
+                <option value="whitespaceCleanup">Whitespace cleanup</option>
+                <option value="unicodeNormalization">Unicode normalization</option>
               </select>
               <button
                 class="button button-secondary"

@@ -258,8 +258,8 @@ export function createPlanningClient(): PlanningClient {
     const { plan, request, traces } = latestBrowserPlan;
     return JSON.stringify(
       {
-        schemaVersion: 3,
-        protocolVersion: 3,
+        schemaVersion: 4,
+        protocolVersion: 4,
         ruleSchemaVersion: request.schemaVersion,
         product: 'Renamewright',
         planId: plan.planId,
