@@ -4,7 +4,7 @@ param(
     [string]$CurrentInstallerPath,
 
     [Parameter(Mandatory = $true)]
-    [string]$VerifiedPortableOutputPath,
+    [string]$CurrentPortablePath,
 
     [Parameter(Mandatory = $true)]
     [string]$PreviousInstallerPath,
@@ -103,22 +103,34 @@ function Assert-ExecutableVersion {
     }
 }
 
-function Wait-InstalledPackageVersion {
+function Wait-InstalledPackagePayload {
     param(
-        [Parameter(Mandatory = $true)][string]$Expected,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$ExpectedDigest,
         [ValidateRange(1, 120)][int]$TimeoutSeconds = 30
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $lastObservedVersion = '<unavailable>'
+    $lastObservedDigest = '<unavailable>'
     do {
         try {
             $record = Get-InstallRecord
             $lastObservedVersion = [string]$record.DisplayVersion
-            if ($lastObservedVersion -ceq $Expected) {
+            if ($lastObservedVersion -ceq $ExpectedVersion) {
                 $executable = Get-InstalledExecutable -Record $record
-                Assert-ExecutableVersion -Path $executable -Expected $Expected
-                return $record
+                Assert-ExecutableVersion -Path $executable -Expected $ExpectedVersion
+                $installedDigest = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+                $lastObservedDigest = $installedDigest
+                if ($installedDigest -ceq $ExpectedDigest) {
+                    return [PSCustomObject]@{
+                        Record = $record
+                        Executable = $executable
+                        Digest = $installedDigest
+                    }
+                }
             }
         }
         catch {
@@ -129,7 +141,7 @@ function Wait-InstalledPackageVersion {
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    throw "The installed package did not converge to version '$Expected'; the last observed version was '$lastObservedVersion'."
+    throw "The installed package did not converge to the independently built portable payload for version '$ExpectedVersion'; the last observed version was '$lastObservedVersion' and its payload digest was '$lastObservedDigest'."
 }
 
 function Remove-TestDataRoot {
@@ -181,17 +193,16 @@ function Assert-ExactChild {
 }
 
 $currentInstaller = Resolve-PackageFile $CurrentInstallerPath
+$currentPortable = Resolve-PackageFile $CurrentPortablePath
 $previousInstaller = Resolve-PackageFile $PreviousInstallerPath
-$verifiedPortable = [IO.Path]::GetFullPath($VerifiedPortableOutputPath)
 if ([Version]$PreviousVersion -ge [Version]$CurrentVersion) {
     throw 'The compatibility fixture must be older than the current package.'
 }
 if (Test-Path -LiteralPath $OutputPath) {
     throw 'The lifecycle evidence output already exists.'
 }
-if (Test-Path -LiteralPath $verifiedPortable) {
-    throw 'The verified portable output already exists.'
-}
+Assert-ExecutableVersion -Path $currentPortable -Expected $CurrentVersion
+$portableDigest = (Get-FileHash -LiteralPath $currentPortable -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $roamingBase = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
 $localBase = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
@@ -225,15 +236,13 @@ try {
     Set-Content -LiteralPath $webViewMarker -Value $webViewMarkerValue -NoNewline -Encoding ascii
 
     [void](Invoke-SilentPackage -Path $currentInstaller -Arguments @('/S', '/UPDATE'))
-    $currentRecord = Wait-InstalledPackageVersion -Expected $CurrentVersion
-    $currentExecutable = Get-InstalledExecutable -Record $currentRecord
+    $currentPayload = Wait-InstalledPackagePayload -ExpectedVersion $CurrentVersion -ExpectedDigest $portableDigest
+    $currentRecord = $currentPayload.Record
+    $currentExecutable = [string]$currentPayload.Executable
+    $installedDigest = [string]$currentPayload.Digest
     Assert-Marker -Path $journalMarker -Expected $journalMarkerValue
     Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue
     Assert-ExecutableVersion -Path $currentExecutable -Expected $CurrentVersion
-    Copy-Item -LiteralPath $currentExecutable -Destination $verifiedPortable
-    Assert-ExecutableVersion -Path $verifiedPortable -Expected $CurrentVersion
-    $installedDigest = (Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
-    $portableDigest = (Get-FileHash -LiteralPath $verifiedPortable -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($portableDigest -cne $installedDigest) {
         throw 'The portable artifact does not match the installed application payload.'
     }
@@ -328,9 +337,6 @@ finally {
     }
     Remove-TestDataRoot -Path $roamingRoot
     Remove-TestDataRoot -Path $webViewRoot
-    if (-not $lifecycleSucceeded -and (Test-Path -LiteralPath $verifiedPortable)) {
-        Remove-Item -LiteralPath $verifiedPortable -Force
-    }
 }
 
 if (-not $lifecycleSucceeded) {
