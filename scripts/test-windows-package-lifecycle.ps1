@@ -106,15 +106,13 @@ function Assert-ExecutableVersion {
 function Wait-InstalledPackagePayload {
     param(
         [Parameter(Mandatory = $true)][string]$ExpectedVersion,
-        [Parameter(Mandatory = $true)]
-        [ValidatePattern('^[0-9a-f]{64}$')]
-        [string]$ExpectedDigest,
+        [Parameter(Mandatory = $true)][string]$IndependentPortablePath,
         [ValidateRange(1, 120)][int]$TimeoutSeconds = 30
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $lastObservedVersion = '<unavailable>'
-    $lastObservedDigest = '<unavailable>'
+    $verifier = Join-Path $PSScriptRoot 'verify-tauri-nsis-payload.mjs'
     do {
         try {
             $record = Get-InstallRecord
@@ -122,13 +120,15 @@ function Wait-InstalledPackagePayload {
             if ($lastObservedVersion -ceq $ExpectedVersion) {
                 $executable = Get-InstalledExecutable -Record $record
                 Assert-ExecutableVersion -Path $executable -Expected $ExpectedVersion
-                $installedDigest = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-                $lastObservedDigest = $installedDigest
-                if ($installedDigest -ceq $ExpectedDigest) {
+                $verificationJson = & node $verifier `
+                    --portable $IndependentPortablePath `
+                    --installed $executable 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $verification = $verificationJson | ConvertFrom-Json
                     return [PSCustomObject]@{
                         Record = $record
                         Executable = $executable
-                        Digest = $installedDigest
+                        Verification = $verification
                     }
                 }
             }
@@ -141,7 +141,7 @@ function Wait-InstalledPackagePayload {
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    throw "The installed package did not converge to the independently built portable payload for version '$ExpectedVersion'; the last observed version was '$lastObservedVersion' and its payload digest was '$lastObservedDigest'."
+    throw "The installed package did not converge to the independently built portable payload for version '$ExpectedVersion'; the last observed version was '$lastObservedVersion'."
 }
 
 function Remove-TestDataRoot {
@@ -202,7 +202,6 @@ if (Test-Path -LiteralPath $OutputPath) {
     throw 'The lifecycle evidence output already exists.'
 }
 Assert-ExecutableVersion -Path $currentPortable -Expected $CurrentVersion
-$portableDigest = (Get-FileHash -LiteralPath $currentPortable -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $roamingBase = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
 $localBase = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
@@ -236,15 +235,20 @@ try {
     Set-Content -LiteralPath $webViewMarker -Value $webViewMarkerValue -NoNewline -Encoding ascii
 
     [void](Invoke-SilentPackage -Path $currentInstaller -Arguments @('/S', '/UPDATE'))
-    $currentPayload = Wait-InstalledPackagePayload -ExpectedVersion $CurrentVersion -ExpectedDigest $portableDigest
+    $currentPayload = Wait-InstalledPackagePayload `
+        -ExpectedVersion $CurrentVersion `
+        -IndependentPortablePath $currentPortable
     $currentRecord = $currentPayload.Record
     $currentExecutable = [string]$currentPayload.Executable
-    $installedDigest = [string]$currentPayload.Digest
+    $portableDigest = [string]$currentPayload.Verification.portableApplicationSha256
+    $installedDigest = [string]$currentPayload.Verification.installedApplicationSha256
+    $expectedNsisDigest = [string]$currentPayload.Verification.expectedNsisApplicationSha256
+    $bundleMarkerOffset = [int64]$currentPayload.Verification.bundleMarkerOffset
     Assert-Marker -Path $journalMarker -Expected $journalMarkerValue
     Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue
     Assert-ExecutableVersion -Path $currentExecutable -Expected $CurrentVersion
-    if ($portableDigest -cne $installedDigest) {
-        throw 'The portable artifact does not match the installed application payload.'
+    if ($expectedNsisDigest -cne $installedDigest) {
+        throw 'The installed application does not match the independent portable after the expected Tauri NSIS marker transition.'
     }
 
     $installedDigestBeforeDowngrade = $installedDigest
@@ -281,7 +285,7 @@ try {
     Assert-Marker -Path $webViewMarker -Expected $webViewMarkerValue
 
     $evidence = [ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         product = 'Renamewright'
         identifier = $Identifier
         currentVersion = $CurrentVersion
@@ -294,12 +298,14 @@ try {
         artifacts = [ordered]@{
             installedApplicationSha256 = $installedDigest
             portableApplicationSha256 = $portableDigest
+            expectedNsisApplicationSha256 = $expectedNsisDigest
+            tauriBundleMarkerOffset = $bundleMarkerOffset
         }
         checks = [ordered]@{
             previousVersionInstalled = $true
             upgradeOverInstall = $true
             currentUserInstallLocationVerified = $true
-            portableArtifactMatchesInstalledBinary = $true
+            independentPortableMatchesInstalledApplicationPayload = $true
             dataRootsPreservedAcrossPackageLifecycle = $true
             downgradeRefused = $true
             downgradeExitCode = $downgradeExitCode

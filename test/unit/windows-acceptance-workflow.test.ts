@@ -4,6 +4,7 @@ import workflow from '../../.github/workflows/windows-acceptance.yaml?raw';
 import cargoPolicy from '../../deny.toml?raw';
 import packager from '../../scripts/prepare-windows-acceptance.ps1?raw';
 import lifecycle from '../../scripts/test-windows-package-lifecycle.ps1?raw';
+import { verifyTauriNsisPayload } from '../../scripts/verify-tauri-nsis-payload.mjs';
 import installerHooks from '../../src-tauri/installer-hooks.nsh?raw';
 import tauriConfigText from '../../src-tauri/tauri.conf.json?raw';
 
@@ -93,7 +94,7 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
   expect(lifecycle).not.toContain('Start-And-ProbeApplication');
   expect(lifecycle).toContain('Assert-ExecutableVersion');
   expect(lifecycle).toContain(
-    'The portable artifact does not match the installed application payload.'
+    'The installed application does not match the independent portable after the expected Tauri NSIS marker transition.'
   );
   expect(lifecycle).toContain('[string]$CurrentPortablePath');
   expect(lifecycle).not.toContain('[string]$VerifiedPortableOutputPath');
@@ -101,22 +102,21 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
     'Copy-Item -LiteralPath $currentExecutable -Destination $verifiedPortable'
   );
   expect(lifecycle).toContain(
-    '(Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()'
+    "$verifier = Join-Path $PSScriptRoot 'verify-tauri-nsis-payload.mjs'"
   );
-  expect(lifecycle).toContain(
-    '(Get-FileHash -LiteralPath $currentPortable -Algorithm SHA256).Hash.ToLowerInvariant()'
-  );
-  expect(lifecycle).toContain('$portableDigest -cne $installedDigest');
+  expect(lifecycle).toContain('--portable $IndependentPortablePath');
+  expect(lifecycle).toContain('--installed $executable');
+  expect(lifecycle).toContain('$expectedNsisDigest -cne $installedDigest');
   expect(lifecycle).toContain('installedApplicationSha256 = $installedDigest');
   expect(lifecycle).toContain('portableApplicationSha256 = $portableDigest');
-  expect(lifecycle).toContain('portableArtifactMatchesInstalledBinary = $true');
+  expect(lifecycle).toContain('expectedNsisApplicationSha256 = $expectedNsisDigest');
+  expect(lifecycle).toContain('tauriBundleMarkerOffset = $bundleMarkerOffset');
+  expect(lifecycle).toContain('independentPortableMatchesInstalledApplicationPayload = $true');
   expect(lifecycle).not.toContain('portableArtifactVersionVerified = $true');
   expect(lifecycle).toContain("-Arguments @('/S', '/UPDATE')");
   expect(lifecycle).toContain('function Wait-InstalledPackagePayload');
-  expect(lifecycle).toContain('$installedDigest -ceq $ExpectedDigest');
-  expect(lifecycle).toContain(
-    'Wait-InstalledPackagePayload -ExpectedVersion $CurrentVersion -ExpectedDigest $portableDigest'
-  );
+  expect(lifecycle).toContain('$LASTEXITCODE -eq 0');
+  expect(lifecycle).toContain('-IndependentPortablePath $currentPortable');
   expect(lifecycle).toContain('Start-Sleep -Milliseconds 250');
   expect(lifecycle).toContain(
     "The installed package did not converge to the independently built portable payload for version '$ExpectedVersion'"
@@ -131,17 +131,17 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
   expect(lifecycle).toContain('webviewDataRetained = $true');
   expect(lifecycle).toContain('dataRootsPreservedAcrossPackageLifecycle = $true');
   expect(lifecycle).not.toContain('sharedDataRootContractVerified = $true');
-  expect(lifecycle).toContain('schemaVersion = 2');
+  expect(lifecycle).toContain('schemaVersion = 3');
   expect(packager).toContain("$lifecycleEvidenceName = 'windows-lifecycle-evidence.json'");
-  expect(packager).toContain('$lifecycleEvidence.schemaVersion -ne 2');
-  expect(packager).toContain("'portableArtifactMatchesInstalledBinary'");
+  expect(packager).toContain('$lifecycleEvidence.schemaVersion -ne 3');
+  expect(packager).toContain("'independentPortableMatchesInstalledApplicationPayload'");
   expect(packager).toContain("'dataRootsPreservedAcrossPackageLifecycle'");
   expect(packager).not.toContain("'portableArtifactVersionVerified'");
   expect(packager).not.toContain("'sharedDataRootContractVerified'");
   expect(packager).toContain(
     'Runtime startup and shared-root behavior require the packaged GUI manual gate.'
   );
-  expect(packager).toContain('$portablePayloadDigest -cne $installedPayloadDigest');
+  expect(packager).toContain('$expectedNsisPayloadDigest -cne $installedPayloadDigest');
   expect(packager).toContain('$packagedPortableDigest -cne $portablePayloadDigest');
   expect(packager).not.toContain('[string]$PortableSourcePath');
   expect(packager).toContain("$releaseDirectory = Join-Path $root 'target/release'");
@@ -157,6 +157,27 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
   expect(installerHooks).toContain(`\${If} $R9 = -1`);
   expect(installerHooks).toContain('SetErrorLevel 2');
   expect(installerHooks).toContain('Quit');
+});
+
+test('accepts only the single Tauri UNK-to-NSS bundle marker transition', () => {
+  const encode = (value: string) => new TextEncoder().encode(value);
+  const portable = encode('MZ-independent-__TAURI_BUNDLE_TYPE_VAR_UNK-payload');
+  const installed = encode('MZ-independent-__TAURI_BUNDLE_TYPE_VAR_NSS-payload');
+
+  const verified = verifyTauriNsisPayload(portable, installed);
+  expect(verified.portableApplicationSha256).not.toBe(verified.installedApplicationSha256);
+  expect(verified.expectedNsisApplicationSha256).toBe(verified.installedApplicationSha256);
+  expect(verified.bundleMarkerOffset).toBe('MZ-independent-'.length);
+
+  const substituted = new Uint8Array(installed);
+  const lastIndex = substituted.length - 1;
+  substituted[lastIndex] = (substituted[lastIndex] ?? 0) ^ 1;
+  expect(() => verifyTauriNsisPayload(portable, substituted)).toThrow(
+    'differs from the independent portable outside the Tauri NSIS marker'
+  );
+  expect(() => verifyTauriNsisPayload(installed, installed)).toThrow(
+    'must contain exactly one expected Tauri bundle marker'
+  );
 });
 
 test('verifies release-evidence tools before enforcing policy or generating an SBOM', () => {

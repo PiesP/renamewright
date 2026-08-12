@@ -106,7 +106,7 @@ Set-Content -LiteralPath (Join-Path $output $dataLifecycleName) -Value $dataLife
 $lifecycleEvidenceName = 'windows-lifecycle-evidence.json'
 $lifecycleEvidence = Get-Content -LiteralPath $lifecycleEvidenceSource -Raw | ConvertFrom-Json
 if (
-    $lifecycleEvidence.schemaVersion -ne 2 -or
+    $lifecycleEvidence.schemaVersion -ne 3 -or
     [string]$lifecycleEvidence.product -cne 'Renamewright' -or
     [string]$lifecycleEvidence.identifier -cne $identifier -or
     [string]$lifecycleEvidence.currentVersion -cne $version -or
@@ -120,7 +120,7 @@ $requiredLifecycleChecks = @(
     'previousVersionInstalled',
     'upgradeOverInstall',
     'currentUserInstallLocationVerified',
-    'portableArtifactMatchesInstalledBinary',
+    'independentPortableMatchesInstalledApplicationPayload',
     'dataRootsPreservedAcrossPackageLifecycle',
     'downgradeRefused',
     'installedBinaryPreserved',
@@ -135,12 +135,17 @@ foreach ($check in $requiredLifecycleChecks) {
 }
 $installedPayloadDigest = [string]$lifecycleEvidence.artifacts.installedApplicationSha256
 $portablePayloadDigest = [string]$lifecycleEvidence.artifacts.portableApplicationSha256
+$expectedNsisPayloadDigest = [string]$lifecycleEvidence.artifacts.expectedNsisApplicationSha256
+$bundleMarkerOffset = $lifecycleEvidence.artifacts.tauriBundleMarkerOffset
 if (
     $installedPayloadDigest -notmatch '^[0-9a-f]{64}$' -or
     $portablePayloadDigest -notmatch '^[0-9a-f]{64}$' -or
-    $portablePayloadDigest -cne $installedPayloadDigest
+    $expectedNsisPayloadDigest -notmatch '^[0-9a-f]{64}$' -or
+    $expectedNsisPayloadDigest -cne $installedPayloadDigest -or
+    $bundleMarkerOffset -isnot [long] -or
+    $bundleMarkerOffset -lt 0
 ) {
-    throw "The Windows lifecycle evidence does not bind one installed and portable payload."
+    throw "The Windows lifecycle evidence does not bind the independent portable to the installed NSIS payload."
 }
 $packagedPortableDigest = (Get-FileHash -LiteralPath (Join-Path $output $portableName) -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($packagedPortableDigest -cne $portablePayloadDigest) {
