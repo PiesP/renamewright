@@ -1,5 +1,15 @@
-import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
+import { createEffect, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
 import { APP_NAME } from './app-meta';
+import {
+  formatNumber,
+  type Locale,
+  type LocaleStorage,
+  localizedError,
+  type MessageKey,
+  message,
+  persistLocale,
+  resolveLocale,
+} from './i18n/catalog';
 import {
   createPlanningClient,
   type LedgerEntry,
@@ -31,7 +41,6 @@ import {
   type RuleKind,
   type RulePipelineRequest,
   type RuleRequest,
-  ruleLabel,
   type SourceOverride,
 } from './planning/rules';
 import { VirtualPlanTable } from './planning/VirtualPlanTable';
@@ -39,6 +48,7 @@ import { VirtualPlanTable } from './planning/VirtualPlanTable';
 interface AppProps {
   client?: PlanningClient;
   presetStorage?: PresetStorage;
+  localeStorage?: LocaleStorage;
 }
 
 interface RuleTextInputProps {
@@ -109,19 +119,20 @@ function RuleNumberInput(props: RuleNumberInputProps) {
 function FilenamePartSelect(props: {
   id: string;
   value: FilenamePart;
+  locale: Locale;
   onChange: (value: FilenamePart) => void;
 }) {
   return (
     <div class="rule-field">
-      <label for={props.id}>Apply to</label>
+      <label for={props.id}>{message(props.locale, 'fieldApplyTo')}</label>
       <select
         id={props.id}
         value={props.value}
         onChange={(event) => props.onChange(event.currentTarget.value as FilenamePart)}
       >
-        <option value="wholeName">Whole filename</option>
-        <option value="stem">Name without extension</option>
-        <option value="extension">Extension only</option>
+        <option value="wholeName">{message(props.locale, 'partWholeName')}</option>
+        <option value="stem">{message(props.locale, 'partStem')}</option>
+        <option value="extension">{message(props.locale, 'partExtension')}</option>
       </select>
     </div>
   );
@@ -129,6 +140,10 @@ function FilenamePartSelect(props: {
 
 export function App(props: AppProps) {
   const planningClient = props.client ?? createPlanningClient();
+  const localeStorage = props.localeStorage ?? window.localStorage;
+  const [locale, setLocale] = createSignal<Locale>(
+    resolveLocale(localeStorage, typeof navigator === 'undefined' ? [] : navigator.languages)
+  );
   const [rules, setRules] = createSignal<RuleRequest[]>([createRule(1, 'prefix')]);
   const [overrides, setOverrides] = createSignal<SourceOverride[]>([]);
   const [presetDocument, setPresetDocument] = createSignal<PresetDocument>(emptyPresetDocument());
@@ -164,6 +179,42 @@ export function App(props: AppProps) {
   let ledgerHeading: HTMLHeadingElement | undefined;
   let previewTimer: number | undefined;
   let nextRuleId = 2;
+
+  const text = (key: MessageKey, values?: Readonly<Record<string, string | number>>) =>
+    message(locale(), key, values);
+  const count = (value: number) => formatNumber(locale(), value);
+  const ruleLabelKey = (kind: RuleKind): MessageKey => {
+    const keys: Record<RuleKind, MessageKey> = {
+      prefix: 'rulePrefix',
+      suffix: 'ruleSuffix',
+      literalReplace: 'ruleLiteralReplace',
+      regexReplace: 'ruleRegexReplace',
+      sequence: 'ruleSequence',
+      extension: 'ruleExtension',
+      case: 'ruleCase',
+      whitespaceCleanup: 'ruleWhitespaceCleanup',
+      unicodeNormalization: 'ruleUnicodeNormalization',
+      range: 'ruleRange',
+      characterClass: 'ruleCharacterClass',
+    };
+    return keys[kind];
+  };
+  const localizedRuleLabel = (kind: RuleKind) => text(ruleLabelKey(kind));
+  const selectLocale = (nextLocale: Locale) => {
+    setLocale(nextLocale);
+    setError('');
+    if (!persistLocale(localeStorage, nextLocale)) {
+      setError(text('errorLocaleStorageUnavailable'));
+    }
+  };
+
+  const originalDocumentLanguage = document.documentElement.lang;
+  createEffect(() => {
+    document.documentElement.lang = locale();
+  });
+  onCleanup(() => {
+    document.documentElement.lang = originalDocumentLanguage;
+  });
 
   const currentRuleRequest = (): RulePipelineRequest => ({
     schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
@@ -212,7 +263,7 @@ export function App(props: AppProps) {
         if (cause instanceof PlanningError) {
           setRuleError({ code: cause.code, ruleId: cause.ruleId });
         }
-        setError(cause instanceof Error ? cause.message : 'The rename plan could not be updated.');
+        setError(localizedError(locale(), cause, 'errorPlanningFailed'));
       }
     } finally {
       if (sequence === requestSequence) {
@@ -266,9 +317,9 @@ export function App(props: AppProps) {
       writePresetDocument(props.presetStorage ?? window.localStorage, next);
       setPresetDocument(next);
       setPresetName('');
-      setNotice('Local rule preset saved.');
+      setNotice(text('noticePresetSaved'));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The local preset could not be saved.');
+      setError(localizedError(locale(), cause, 'errorPresetSaveFailed'));
     }
   };
 
@@ -283,7 +334,7 @@ export function App(props: AppProps) {
     setRuleError(undefined);
     setError('');
     setNotice('');
-    const appliedNotice = `Preset “${preset.name}” applied. Source overrides were preserved.`;
+    const appliedNotice = text('noticePresetApplied', { name: preset.name });
     if (plan()) {
       schedulePreview(appliedNotice);
     } else {
@@ -298,9 +349,9 @@ export function App(props: AppProps) {
       const next = deletePreset(presetDocument(), presetId);
       writePresetDocument(props.presetStorage ?? window.localStorage, next);
       setPresetDocument(next);
-      setNotice('Local rule preset deleted. The current rules were not changed.');
+      setNotice(text('noticePresetDeleted'));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The local preset could not be deleted.');
+      setError(localizedError(locale(), cause, 'errorPresetDeleteFailed'));
     }
   };
 
@@ -346,7 +397,7 @@ export function App(props: AppProps) {
       setPlanDocument(await planningClient.inspectPlan(current.planId));
     } catch (cause) {
       planInspectorOpener = undefined;
-      setError(cause instanceof Error ? cause.message : 'The plan document could not be opened.');
+      setError(localizedError(locale(), cause, 'errorPlanOpenFailed'));
     } finally {
       setBusy(false);
     }
@@ -362,9 +413,9 @@ export function App(props: AppProps) {
     setNotice('');
     try {
       const exported = await planningClient.exportPlan(current.planId);
-      setNotice(exported ? 'Plan JSON exported.' : 'Plan export cancelled.');
+      setNotice(exported ? text('noticePlanJsonExported') : text('noticePlanExportCancelled'));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The plan document could not be exported.');
+      setError(localizedError(locale(), cause, 'errorPlanExportFailed'));
     } finally {
       setBusy(false);
     }
@@ -380,9 +431,9 @@ export function App(props: AppProps) {
     setNotice('');
     try {
       const exported = await planningClient.exportPlanCsv(current.planId);
-      setNotice(exported ? 'Plan CSV exported.' : 'Plan CSV export cancelled.');
+      setNotice(exported ? text('noticePlanCsvExported') : text('noticePlanCsvExportCancelled'));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The plan CSV could not be exported.');
+      setError(localizedError(locale(), cause, 'errorPlanCsvExportFailed'));
     } finally {
       setBusy(false);
     }
@@ -399,9 +450,7 @@ export function App(props: AppProps) {
         recoveryInspectionPanel?.scrollIntoView?.({ block: 'nearest' });
       });
     } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : 'The recovery state could not be inspected.'
-      );
+      setError(localizedError(locale(), cause, 'errorRecoveryInspectFailed'));
     } finally {
       setInspectingLedgerId(undefined);
     }
@@ -418,7 +467,7 @@ export function App(props: AppProps) {
         undoInspectionPanel?.scrollIntoView?.({ block: 'nearest' });
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Undo could not be inspected.');
+      setError(localizedError(locale(), cause, 'errorUndoInspectFailed'));
     } finally {
       setInspectingUndoLedgerId(undefined);
     }
@@ -438,21 +487,21 @@ export function App(props: AppProps) {
       const result = await planningClient.applyRecoveryAction(action, inspection);
       setLedger(result.ledger);
       if (!result.performed) {
-        setNotice('Recovery action cancelled. No journal or file was changed.');
+        setNotice(text('noticeRecoveryCancelledNoChange'));
         return;
       }
       setRecoveryInspection(undefined);
-      const messages = {
-        cancelled: 'Recovery action cancelled.',
-        completed: 'The interrupted rename transaction completed.',
-        rolledBack: 'The interrupted rename transaction was rolled back.',
-        recoveryRequired: 'Recovery stopped safely. Inspect the transaction again.',
-        reconciled: 'Prepared-step observation recorded. Inspect the transaction again.',
-      } as const;
-      setNotice(messages[result.outcome]);
+      const messageKeys = {
+        cancelled: 'noticeRecoveryCancelled',
+        completed: 'noticeRecoveryCompleted',
+        rolledBack: 'noticeRecoveryRolledBack',
+        recoveryRequired: 'noticeRecoveryRequired',
+        reconciled: 'noticeRecoveryReconciled',
+      } as const satisfies Record<typeof result.outcome, MessageKey>;
+      setNotice(text(messageKeys[result.outcome]));
       queueMicrotask(() => ledgerHeading?.focus({ preventScroll: true }));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The recovery action could not run.');
+      setError(localizedError(locale(), cause, 'errorRecoveryActionFailed'));
     } finally {
       setRecoveryCancellationState(undefined);
       setRecoveryBusyAction(undefined);
@@ -479,9 +528,7 @@ export function App(props: AppProps) {
       }
     } catch (cause) {
       setRecoveryCancellationState(undefined);
-      setError(
-        cause instanceof Error ? cause.message : 'Recovery cancellation could not be requested.'
-      );
+      setError(localizedError(locale(), cause, 'errorRecoveryCancelFailed'));
     }
   };
 
@@ -499,20 +546,20 @@ export function App(props: AppProps) {
       const result = await planningClient.applyUndo(inspection);
       setLedger(result.ledger);
       if (!result.performed) {
-        setNotice('Undo cancelled. No journal or file was changed.');
+        setNotice(text('noticeUndoCancelledNoChange'));
         return;
       }
       setUndoInspection(undefined);
-      const messages = {
-        cancelled: 'Undo was cancelled and rolled back safely.',
-        completed: 'The completed rename transaction was undone.',
-        rolledBack: 'Undo could not finish and all completed steps were rolled back.',
-        recoveryRequired: 'Undo stopped safely. Use the new ledger recovery entry to continue.',
-      } as const;
-      setNotice(messages[result.outcome]);
+      const messageKeys = {
+        cancelled: 'noticeUndoCancelled',
+        completed: 'noticeUndoCompleted',
+        rolledBack: 'noticeUndoRolledBack',
+        recoveryRequired: 'noticeUndoRecoveryRequired',
+      } as const satisfies Record<typeof result.outcome, MessageKey>;
+      setNotice(text(messageKeys[result.outcome]));
       queueMicrotask(() => ledgerHeading?.focus({ preventScroll: true }));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Undo could not run.');
+      setError(localizedError(locale(), cause, 'errorUndoRunFailed'));
       setUndoInspection(undefined);
       try {
         setLedger(await planningClient.listLedger());
@@ -544,9 +591,7 @@ export function App(props: AppProps) {
       }
     } catch (cause) {
       setUndoCancellationState(undefined);
-      setError(
-        cause instanceof Error ? cause.message : 'Undo cancellation could not be requested.'
-      );
+      setError(localizedError(locale(), cause, 'errorUndoCancelFailed'));
     }
   };
 
@@ -555,20 +600,20 @@ export function App(props: AppProps) {
       const loaded = readPresetDocument(props.presetStorage ?? window.localStorage);
       setPresetDocument(loaded.document);
       if (loaded.migrated) {
-        setNotice('Local rule presets were updated to the current format.');
+        setNotice(text('noticePresetMigrated'));
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Local presets could not be loaded.');
+      setError(localizedError(locale(), cause, 'errorPresetLoadFailed'));
     }
     void planningClient
       .listLedger()
       .then(setLedger)
       .catch((cause: unknown) => {
-        setError(cause instanceof Error ? cause.message : 'The Rename Ledger could not be loaded.');
+        setError(localizedError(locale(), cause, 'errorLedgerLoadFailed'));
       });
     const stopWatching = planningClient.watchSourceChanges((change) => {
       if (change.error) {
-        setError(change.error);
+        setError(text('errorSourceChangesFailed'));
         return;
       }
       void run(() => planningClient.previewRules(currentRuleRequest()));
@@ -587,87 +632,87 @@ export function App(props: AppProps) {
       return error();
     }
     if (undoCancellationState() === 'accepted') {
-      return 'Cancellation requested. Undo will roll back at the next safe step…';
+      return text('statusUndoCancelAccepted');
     }
     if (undoCancellationState() === 'requesting') {
-      return 'Requesting Undo cancellation…';
+      return text('statusUndoCancelRequesting');
     }
     if (undoCancellationState() === 'rejected') {
-      return 'Cancellation was not confirmed, or Undo is no longer active. Try again if the operation is still running.';
+      return text('statusUndoCancelRejected');
     }
     if (undoBusy()) {
-      return 'Waiting for native confirmation or Undo completion…';
+      return text('statusUndoBusy');
     }
     if (recoveryCancellationState() === 'accepted') {
-      return 'Cancellation requested. Renamewright will roll back at the next safe step…';
+      return text('statusRecoveryCancelAccepted');
     }
     if (recoveryCancellationState() === 'requesting') {
-      return 'Requesting recovery cancellation…';
+      return text('statusRecoveryCancelRequesting');
     }
     if (recoveryCancellationState() === 'rejected') {
-      return 'Cancellation was not confirmed, or forward recovery is no longer active. Try again if the operation is still running.';
+      return text('statusRecoveryCancelRejected');
     }
     if (recoveryBusyAction()) {
-      return 'Waiting for native confirmation or recovery completion…';
+      return text('statusRecoveryBusy');
     }
     if (busy()) {
-      return 'Updating the rename plan…';
+      return text('statusUpdatingPlan');
     }
     if (notice()) {
       return notice();
     }
     if (!current) {
-      return 'No sources are loaded.';
+      return text('statusNoSources');
     }
     if (current.blockedCount > 0) {
-      return `${current.blockedCount} names are blocked. Review diagnostics before continuing.`;
+      return text('statusBlockedNames', { count: count(current.blockedCount) });
     }
-    return `${current.changedCount} names are ready for review.`;
+    return text('statusReadyNames', { count: count(current.changedCount) });
   };
 
   const ledgerStatusLabel = (status: LedgerStatus) => {
-    const labels: Record<LedgerStatus, string> = {
-      completed: 'Completed',
-      rolledBack: 'Rolled back',
-      forwardPending: 'Forward recovery pending',
-      completionPending: 'Completion record pending',
-      rollbackPending: 'Rollback pending',
-      rollbackCompletionPending: 'Rollback record pending',
-      reconciliationRequired: 'Inspection required',
-      recoveryRequired: 'Recovery required',
-      legacyInspectionRequired: 'Legacy inspection required',
-      torn: 'Torn journal',
-      damaged: 'Damaged journal',
-      unsupportedVersion: 'Unsupported journal',
-      tooLarge: 'Journal too large',
-      discoveryLimitExceeded: 'Discovery limit reached',
-      unreadable: 'Journal unreadable',
+    const labels: Record<LedgerStatus, MessageKey> = {
+      completed: 'ledgerCompleted',
+      rolledBack: 'ledgerRolledBack',
+      forwardPending: 'ledgerForwardPending',
+      completionPending: 'ledgerCompletionPending',
+      rollbackPending: 'ledgerRollbackPending',
+      rollbackCompletionPending: 'ledgerRollbackCompletionPending',
+      reconciliationRequired: 'ledgerReconciliationRequired',
+      recoveryRequired: 'ledgerRecoveryRequired',
+      legacyInspectionRequired: 'ledgerLegacyInspectionRequired',
+      torn: 'ledgerTorn',
+      damaged: 'ledgerDamaged',
+      unsupportedVersion: 'ledgerUnsupportedVersion',
+      tooLarge: 'ledgerTooLarge',
+      discoveryLimitExceeded: 'ledgerDiscoveryLimitExceeded',
+      unreadable: 'ledgerUnreadable',
     };
-    return labels[status];
+    return text(labels[status]);
   };
 
   const dispositionLabel = (disposition: RecoveryDisposition | null) => {
     if (!disposition) {
       return '';
     }
-    const labels: Record<RecoveryDisposition, string> = {
-      notApplied: 'The prepared rename was not applied.',
-      applied: 'The prepared rename was applied.',
-      missing: 'The expected entry is missing.',
-      multipleLocations: 'The same identity appears in multiple locations.',
-      unexpectedLocation: 'The entry is in an unexpected location.',
+    const labels: Record<RecoveryDisposition, MessageKey> = {
+      notApplied: 'dispositionNotApplied',
+      applied: 'dispositionApplied',
+      missing: 'dispositionMissing',
+      multipleLocations: 'dispositionMultiple',
+      unexpectedLocation: 'dispositionUnexpected',
     };
-    return labels[disposition];
+    return text(labels[disposition]);
   };
 
   const recoveryInspectionTitle = () => {
     switch (recoveryInspection()?.readiness) {
       case 'ready':
-        return 'Identity checks passed';
+        return text('identityChecksPassed');
       case 'reconciliationRequired':
-        return 'Observation ready to record';
+        return text('observationReady');
       case 'blocked':
-        return 'Recovery is blocked';
+        return text('recoveryBlocked');
       default:
         return '';
     }
@@ -679,24 +724,26 @@ export function App(props: AppProps) {
       return '';
     }
     if (inspection.readiness === 'reconciliationRequired') {
-      return `${dispositionLabel(inspection.disposition)} Recording this observation requires native confirmation.`;
+      return text('recoveryObservationConfirmation', {
+        disposition: dispositionLabel(inspection.disposition),
+      });
     }
     if (inspection.readiness === 'blocked') {
-      return 'The journal no longer matches one expected entry location. No action is available.';
+      return text('recoveryBlockedDescription');
     }
     return inspection.direction === 'forward'
-      ? 'Resume or roll back only after native confirmation and a fresh identity check.'
-      : 'Continue rollback only after native confirmation and a fresh identity check.';
+      ? text('recoveryForwardDescription')
+      : text('recoveryRollbackDescription');
   };
 
   const undoBlockDescription = (reason: UndoBlockReason | null) => {
     switch (reason) {
       case 'sourceChanged':
-        return 'A renamed source no longer has the recorded identity. No file was changed.';
+        return text('undoSourceChanged');
       case 'destinationOccupied':
-        return 'An original name is occupied. Renamewright will not replace that entry.';
+        return text('undoDestinationOccupied');
       default:
-        return 'The transaction no longer passes the Undo safety checks.';
+        return text('undoSafetyFailed');
     }
   };
 
@@ -710,13 +757,26 @@ export function App(props: AppProps) {
           </span>
           <div>
             <strong>{APP_NAME}</strong>
-            <span class="brand-mode">Plan every rename.</span>
+            <span class="brand-mode">{text('appTagline')}</span>
           </div>
         </div>
         <div class="source-actions">
-          <span class="read-only-badge">Recovery-only milestone</span>
+          <label class="locale-control">
+            <span>{text('localeLabel')}</span>
+            <select
+              aria-label={text('localeLabel')}
+              value={locale()}
+              onChange={(event) => selectLocale(event.currentTarget.value as Locale)}
+            >
+              <option value="en">{text('localeEnglish')}</option>
+              <option value="ko">{text('localeKorean')}</option>
+            </select>
+          </label>
+          <span class="read-only-badge">{text('recoveryOnlyMilestone')}</span>
           <span class="drop-hint">
-            {planningClient.nativeSelectionAvailable ? 'Drop files anywhere' : 'Desktop drop ready'}
+            {planningClient.nativeSelectionAvailable
+              ? text('dropFilesAnywhere')
+              : text('desktopDropReady')}
           </span>
           <button
             class="button button-secondary"
@@ -725,7 +785,7 @@ export function App(props: AppProps) {
             aria-describedby="native-selection-note"
             onClick={() => void run(() => planningClient.selectSources(currentRuleRequest()))}
           >
-            Add files
+            {text('addFiles')}
           </button>
         </div>
       </header>
@@ -733,23 +793,24 @@ export function App(props: AppProps) {
       <p id="native-selection-note" class="browser-note">
         <Show
           when={planningClient.nativeSelectionAvailable}
-          fallback="File selection is available in the desktop app. Use the sample in this browser preview."
+          fallback={text('fileSelectionDesktopOnly')}
         >
-          Native picker and drop paths stay inside the Rust process.
+          {text('nativePathsStayInRust')}
         </Show>
       </p>
 
       <div class="workbench-grid">
         <aside class="rule-rail" aria-labelledby="rule-heading">
           <div class="rail-heading">
-            <h1 id="rule-heading">Rename rules</h1>
-            <span>{rules().filter((rule) => rule.enabled).length} active</span>
+            <h1 id="rule-heading">{text('renameRules')}</h1>
+            <span>
+              {text('activeRules', {
+                count: count(rules().filter((rule) => rule.enabled).length),
+              })}
+            </span>
           </div>
           <div class="rule-list">
-            <For
-              each={rules()}
-              fallback={<p class="empty-rules">No rules. Add one to build a rename pipeline.</p>}
-            >
+            <For each={rules()} fallback={<p class="empty-rules">{text('noRules')}</p>}>
               {(rule, index) => {
                 const inputId = (field: string) => `rule-${rule.ruleId}-${field}`;
                 const invalid = () => ruleError()?.ruleId === rule.ruleId;
@@ -773,14 +834,14 @@ export function App(props: AppProps) {
                     <div class="rule-title">
                       <div>
                         <span class="rule-order">{String(index() + 1).padStart(2, '0')}</span>
-                        <h2 id={inputId('heading')}>{ruleLabel(rule.kind)}</h2>
+                        <h2 id={inputId('heading')}>{localizedRuleLabel(rule.kind)}</h2>
                       </div>
                       <div class="rule-actions">
                         <button
                           class="rule-icon-button"
                           type="button"
                           disabled={index() === 0}
-                          aria-label={`Move ${ruleLabel(rule.kind)} up`}
+                          aria-label={text('moveRuleUp', { rule: localizedRuleLabel(rule.kind) })}
                           onClick={() => moveRule(rule.ruleId, -1)}
                         >
                           ↑
@@ -789,7 +850,7 @@ export function App(props: AppProps) {
                           class="rule-icon-button"
                           type="button"
                           disabled={index() === rules().length - 1}
-                          aria-label={`Move ${ruleLabel(rule.kind)} down`}
+                          aria-label={text('moveRuleDown', { rule: localizedRuleLabel(rule.kind) })}
                           onClick={() => moveRule(rule.ruleId, 1)}
                         >
                           ↓
@@ -797,7 +858,7 @@ export function App(props: AppProps) {
                         <button
                           class="rule-icon-button rule-remove-button"
                           type="button"
-                          aria-label={`Remove ${ruleLabel(rule.kind)}`}
+                          aria-label={text('removeRule', { rule: localizedRuleLabel(rule.kind) })}
                           onClick={() => removeRule(rule.ruleId)}
                         >
                           ×
@@ -815,14 +876,14 @@ export function App(props: AppProps) {
                           }))
                         }
                       />
-                      Enabled
+                      {text('enabled')}
                     </label>
                     <Switch>
                       <Match when={rule.kind === 'prefix' && rule}>
                         {(current) => (
                           <RuleTextInput
                             id={inputId('value')}
-                            label="Prefix"
+                            label={text('fieldPrefix')}
                             value={current().value}
                             placeholder="2026-"
                             invalid={invalid()}
@@ -838,7 +899,7 @@ export function App(props: AppProps) {
                         {(current) => (
                           <RuleTextInput
                             id={inputId('value')}
-                            label="Suffix"
+                            label={text('fieldSuffix')}
                             value={current().value}
                             placeholder="-final"
                             invalid={invalid()}
@@ -855,7 +916,7 @@ export function App(props: AppProps) {
                           <>
                             <RuleTextInput
                               id={inputId('search')}
-                              label="Find"
+                              label={text('fieldFind')}
                               value={current().search}
                               placeholder="draft"
                               invalid={invalid()}
@@ -869,7 +930,7 @@ export function App(props: AppProps) {
                             />
                             <RuleTextInput
                               id={inputId('replacement')}
-                              label="Replace with"
+                              label={text('fieldReplaceWith')}
                               value={current().replacement}
                               placeholder="final"
                               invalid={invalid()}
@@ -889,7 +950,7 @@ export function App(props: AppProps) {
                           <>
                             <RuleTextInput
                               id={inputId('pattern')}
-                              label="Rust regex"
+                              label={text('fieldRustRegex')}
                               value={current().pattern}
                               placeholder="^(.*)\\.txt$"
                               invalid={invalid()}
@@ -903,7 +964,7 @@ export function App(props: AppProps) {
                             />
                             <RuleTextInput
                               id={inputId('replacement')}
-                              label="Replace with"
+                              label={text('fieldReplaceWith')}
                               value={current().replacement}
                               placeholder="$1.md"
                               invalid={invalid()}
@@ -922,7 +983,7 @@ export function App(props: AppProps) {
                         {(current) => (
                           <>
                             <div class="rule-field">
-                              <label for={inputId('scope')}>Numbering scope</label>
+                              <label for={inputId('scope')}>{text('fieldNumberingScope')}</label>
                               <select
                                 id={inputId('scope')}
                                 value={current().scope}
@@ -939,12 +1000,12 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="allSources">All sources</option>
-                                <option value="perParent">Restart in each folder</option>
+                                <option value="allSources">{text('scopeAllSources')}</option>
+                                <option value="perParent">{text('scopePerParent')}</option>
                               </select>
                             </div>
                             <div class="rule-field">
-                              <label for={inputId('order')}>Number by</label>
+                              <label for={inputId('order')}>{text('fieldNumberBy')}</label>
                               <select
                                 id={inputId('order')}
                                 value={current().order}
@@ -961,14 +1022,14 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="sourceOrder">Stable source order</option>
-                                <option value="nameAscending">Filename (ordinal)</option>
+                                <option value="sourceOrder">{text('orderSource')}</option>
+                                <option value="nameAscending">{text('orderName')}</option>
                               </select>
                             </div>
                             <div class="sequence-number-fields">
                               <RuleNumberInput
                                 id={inputId('start')}
-                                label="Start"
+                                label={text('fieldStart')}
                                 value={current().start}
                                 min={0}
                                 max={Number.MAX_SAFE_INTEGER}
@@ -983,7 +1044,7 @@ export function App(props: AppProps) {
                               />
                               <RuleNumberInput
                                 id={inputId('step')}
-                                label="Step"
+                                label={text('fieldStep')}
                                 value={current().step}
                                 min={1}
                                 max={Number.MAX_SAFE_INTEGER}
@@ -998,7 +1059,7 @@ export function App(props: AppProps) {
                               />
                               <RuleNumberInput
                                 id={inputId('padding')}
-                                label="Padding"
+                                label={text('fieldPadding')}
                                 value={current().padding}
                                 min={1}
                                 max={20}
@@ -1013,7 +1074,7 @@ export function App(props: AppProps) {
                               />
                             </div>
                             <div class="rule-field">
-                              <label for={inputId('placement')}>Placement</label>
+                              <label for={inputId('placement')}>{text('fieldPlacement')}</label>
                               <select
                                 id={inputId('placement')}
                                 value={current().placement}
@@ -1030,13 +1091,13 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="prefix">Before filename</option>
-                                <option value="suffix">After filename</option>
+                                <option value="prefix">{text('placementPrefix')}</option>
+                                <option value="suffix">{text('placementSuffix')}</option>
                               </select>
                             </div>
                             <RuleTextInput
                               id={inputId('separator')}
-                              label="Separator"
+                              label={text('fieldSeparator')}
                               value={current().separator}
                               placeholder="-"
                               invalid={invalid()}
@@ -1048,9 +1109,7 @@ export function App(props: AppProps) {
                                 )
                               }
                             />
-                            <p class="field-help">
-                              Number allocation is fixed before preview rows are rendered.
-                            </p>
+                            <p class="field-help">{text('sequenceHelp')}</p>
                           </>
                         )}
                       </Match>
@@ -1058,7 +1117,7 @@ export function App(props: AppProps) {
                         {(current) => (
                           <>
                             <div class="rule-field">
-                              <label for={inputId('operation')}>Operation</label>
+                              <label for={inputId('operation')}>{text('fieldOperation')}</label>
                               <select
                                 id={inputId('operation')}
                                 value={current().operation}
@@ -1075,14 +1134,14 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="remove">Remove extension</option>
-                                <option value="replace">Replace extension</option>
+                                <option value="remove">{text('extensionRemove')}</option>
+                                <option value="replace">{text('extensionReplace')}</option>
                               </select>
                             </div>
                             <Show when={extensionReplacementEnabled()}>
                               <RuleTextInput
                                 id={inputId('value')}
-                                label="New extension (without dot)"
+                                label={text('fieldNewExtension')}
                                 value={current().value}
                                 placeholder="txt"
                                 invalid={invalid()}
@@ -1095,9 +1154,7 @@ export function App(props: AppProps) {
                                 }
                               />
                             </Show>
-                            <p class="field-help">
-                              Uses the final dot; leading-dot files have no extension.
-                            </p>
+                            <p class="field-help">{text('extensionHelp')}</p>
                           </>
                         )}
                       </Match>
@@ -1107,6 +1164,7 @@ export function App(props: AppProps) {
                             <FilenamePartSelect
                               id={inputId('target')}
                               value={current().target}
+                              locale={locale()}
                               onChange={(target) =>
                                 replaceRule(rule.ruleId, (candidate) =>
                                   candidate.kind === 'case' ? { ...candidate, target } : candidate
@@ -1114,7 +1172,7 @@ export function App(props: AppProps) {
                               }
                             />
                             <div class="rule-field">
-                              <label for={inputId('mode')}>Case</label>
+                              <label for={inputId('mode')}>{text('fieldCase')}</label>
                               <select
                                 id={inputId('mode')}
                                 value={current().mode}
@@ -1131,8 +1189,8 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="lowercase">Lowercase</option>
-                                <option value="uppercase">Uppercase</option>
+                                <option value="lowercase">{text('caseLowercase')}</option>
+                                <option value="uppercase">{text('caseUppercase')}</option>
                               </select>
                             </div>
                           </>
@@ -1144,6 +1202,7 @@ export function App(props: AppProps) {
                             <FilenamePartSelect
                               id={inputId('target')}
                               value={current().target}
+                              locale={locale()}
                               onChange={(target) =>
                                 replaceRule(rule.ruleId, (candidate) =>
                                   candidate.kind === 'whitespaceCleanup'
@@ -1154,7 +1213,7 @@ export function App(props: AppProps) {
                             />
                             <RuleTextInput
                               id={inputId('replacement')}
-                              label="Collapse runs to"
+                              label={text('fieldCollapseRunsTo')}
                               value={current().replacement}
                               placeholder="-"
                               invalid={invalid()}
@@ -1166,9 +1225,7 @@ export function App(props: AppProps) {
                                 )
                               }
                             />
-                            <p class="field-help">
-                              Leading and trailing Unicode whitespace is removed.
-                            </p>
+                            <p class="field-help">{text('whitespaceHelp')}</p>
                           </>
                         )}
                       </Match>
@@ -1178,6 +1235,7 @@ export function App(props: AppProps) {
                             <FilenamePartSelect
                               id={inputId('target')}
                               value={current().target}
+                              locale={locale()}
                               onChange={(target) =>
                                 replaceRule(rule.ruleId, (candidate) =>
                                   candidate.kind === 'unicodeNormalization'
@@ -1187,7 +1245,7 @@ export function App(props: AppProps) {
                               }
                             />
                             <div class="rule-field">
-                              <label for={inputId('form')}>Normalization form</label>
+                              <label for={inputId('form')}>{text('fieldNormalizationForm')}</label>
                               <select
                                 id={inputId('form')}
                                 value={current().form}
@@ -1206,15 +1264,13 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="nfc">NFC · canonical composed</option>
-                                <option value="nfd">NFD · canonical decomposed</option>
-                                <option value="nfkc">NFKC · compatibility composed</option>
-                                <option value="nfkd">NFKD · compatibility decomposed</option>
+                                <option value="nfc">{text('normalizationNfc')}</option>
+                                <option value="nfd">{text('normalizationNfd')}</option>
+                                <option value="nfkc">{text('normalizationNfkc')}</option>
+                                <option value="nfkd">{text('normalizationNfkd')}</option>
                               </select>
                             </div>
-                            <p class="field-help">
-                              Normalization changes names only while this rule is enabled.
-                            </p>
+                            <p class="field-help">{text('normalizationHelp')}</p>
                           </>
                         )}
                       </Match>
@@ -1224,6 +1280,7 @@ export function App(props: AppProps) {
                             <FilenamePartSelect
                               id={inputId('target')}
                               value={current().target}
+                              locale={locale()}
                               onChange={(target) =>
                                 replaceRule(rule.ruleId, (candidate) =>
                                   candidate.kind === 'range' ? { ...candidate, target } : candidate
@@ -1231,7 +1288,7 @@ export function App(props: AppProps) {
                               }
                             />
                             <div class="rule-field">
-                              <label for={inputId('operation')}>Range action</label>
+                              <label for={inputId('operation')}>{text('fieldRangeAction')}</label>
                               <select
                                 id={inputId('operation')}
                                 value={current().operation}
@@ -1246,12 +1303,12 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="keep">Keep selected range</option>
-                                <option value="remove">Remove selected range</option>
+                                <option value="keep">{text('rangeKeep')}</option>
+                                <option value="remove">{text('rangeRemove')}</option>
                               </select>
                             </div>
                             <div class="rule-field">
-                              <label for={inputId('origin')}>Count from</label>
+                              <label for={inputId('origin')}>{text('fieldCountFrom')}</label>
                               <select
                                 id={inputId('origin')}
                                 value={current().origin}
@@ -1266,14 +1323,14 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="start">Start</option>
-                                <option value="end">End</option>
+                                <option value="start">{text('originStart')}</option>
+                                <option value="end">{text('originEnd')}</option>
                               </select>
                             </div>
                             <div class="sequence-number-fields">
                               <RuleNumberInput
                                 id={inputId('offset')}
-                                label="Skip characters"
+                                label={text('fieldSkipCharacters')}
                                 value={current().offset}
                                 min={0}
                                 max={4_294_967_295}
@@ -1288,7 +1345,7 @@ export function App(props: AppProps) {
                               />
                               <RuleNumberInput
                                 id={inputId('length')}
-                                label="Range length"
+                                label={text('fieldRangeLength')}
                                 value={current().length ?? 1}
                                 min={1}
                                 max={4_294_967_295}
@@ -1318,11 +1375,9 @@ export function App(props: AppProps) {
                                   )
                                 }
                               />
-                              Continue to opposite edge
+                              {text('rangeOpenEnded')}
                             </label>
-                            <p class="field-help">
-                              Positions count Unicode code points; combining marks count separately.
-                            </p>
+                            <p class="field-help">{text('rangeHelp')}</p>
                           </>
                         )}
                       </Match>
@@ -1332,6 +1387,7 @@ export function App(props: AppProps) {
                             <FilenamePartSelect
                               id={inputId('target')}
                               value={current().target}
+                              locale={locale()}
                               onChange={(target) =>
                                 replaceRule(rule.ruleId, (candidate) =>
                                   candidate.kind === 'characterClass'
@@ -1341,7 +1397,7 @@ export function App(props: AppProps) {
                               }
                             />
                             <div class="rule-field">
-                              <label for={inputId('operation')}>Class action</label>
+                              <label for={inputId('operation')}>{text('fieldClassAction')}</label>
                               <select
                                 id={inputId('operation')}
                                 value={current().operation}
@@ -1356,12 +1412,12 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="keep">Keep matching characters</option>
-                                <option value="remove">Remove matching characters</option>
+                                <option value="keep">{text('classKeep')}</option>
+                                <option value="remove">{text('classRemove')}</option>
                               </select>
                             </div>
                             <div class="rule-field">
-                              <label for={inputId('class')}>Unicode class</label>
+                              <label for={inputId('class')}>{text('fieldUnicodeClass')}</label>
                               <select
                                 id={inputId('class')}
                                 value={current().class}
@@ -1381,16 +1437,14 @@ export function App(props: AppProps) {
                                   )
                                 }
                               >
-                                <option value="decimalNumber">Decimal numbers</option>
-                                <option value="letter">Letters</option>
-                                <option value="whitespace">Whitespace</option>
-                                <option value="punctuation">Punctuation</option>
-                                <option value="symbol">Symbols</option>
+                                <option value="decimalNumber">{text('classDecimalNumber')}</option>
+                                <option value="letter">{text('classLetter')}</option>
+                                <option value="whitespace">{text('classWhitespace')}</option>
+                                <option value="punctuation">{text('classPunctuation')}</option>
+                                <option value="symbol">{text('classSymbol')}</option>
                               </select>
                             </div>
-                            <p class="field-help">
-                              Uses Unicode properties, not ASCII-only ranges.
-                            </p>
+                            <p class="field-help">{text('characterClassHelp')}</p>
                           </>
                         )}
                       </Match>
@@ -1404,24 +1458,24 @@ export function App(props: AppProps) {
             </For>
           </div>
           <div class="add-rule-controls">
-            <label for="new-rule-kind">New rule</label>
+            <label for="new-rule-kind">{text('newRule')}</label>
             <div>
               <select
                 id="new-rule-kind"
                 value={newRuleKind()}
                 onChange={(event) => setNewRuleKind(event.currentTarget.value as RuleKind)}
               >
-                <option value="prefix">Prefix</option>
-                <option value="suffix">Suffix</option>
-                <option value="literalReplace">Replace text</option>
-                <option value="regexReplace">Regular expression</option>
-                <option value="sequence">Sequence numbering</option>
-                <option value="extension">Extension</option>
-                <option value="case">Letter case</option>
-                <option value="whitespaceCleanup">Whitespace cleanup</option>
-                <option value="unicodeNormalization">Unicode normalization</option>
-                <option value="range">Character range</option>
-                <option value="characterClass">Character class</option>
+                <option value="prefix">{text('newRulePrefix')}</option>
+                <option value="suffix">{text('newRuleSuffix')}</option>
+                <option value="literalReplace">{text('newRuleLiteralReplace')}</option>
+                <option value="regexReplace">{text('newRuleRegexReplace')}</option>
+                <option value="sequence">{text('newRuleSequence')}</option>
+                <option value="extension">{text('newRuleExtension')}</option>
+                <option value="case">{text('newRuleCase')}</option>
+                <option value="whitespaceCleanup">{text('newRuleWhitespaceCleanup')}</option>
+                <option value="unicodeNormalization">{text('newRuleUnicodeNormalization')}</option>
+                <option value="range">{text('newRuleRange')}</option>
+                <option value="characterClass">{text('newRuleCharacterClass')}</option>
               </select>
               <button
                 class="button button-secondary"
@@ -1429,20 +1483,20 @@ export function App(props: AppProps) {
                 disabled={rules().length >= MAX_RULES}
                 onClick={addRule}
               >
-                Add rule
+                {text('addRule')}
               </button>
             </div>
-            <p class="field-help">Rules run from top to bottom. Up to {MAX_RULES} are allowed.</p>
+            <p class="field-help">{text('ruleLimitHelp', { count: count(MAX_RULES) })}</p>
           </div>
           <section class="preset-panel" aria-labelledby="preset-heading">
             <div class="preset-heading">
               <div>
-                <h2 id="preset-heading">Local presets</h2>
+                <h2 id="preset-heading">{text('localPresets')}</h2>
                 <span>
                   {presetDocument().presets.length}/{MAX_PRESETS}
                 </span>
               </div>
-              <p>Shared rules only. Source overrides stay with the current plan.</p>
+              <p>{text('presetScopeHelp')}</p>
             </div>
             <form
               class="preset-save"
@@ -1451,7 +1505,7 @@ export function App(props: AppProps) {
                 savePreset();
               }}
             >
-              <label for="preset-name">Preset name</label>
+              <label for="preset-name">{text('presetName')}</label>
               <div>
                 <input
                   id="preset-name"
@@ -1465,21 +1519,23 @@ export function App(props: AppProps) {
                   type="submit"
                   disabled={presetDocument().presets.length >= MAX_PRESETS}
                 >
-                  Save preset
+                  {text('savePreset')}
                 </button>
               </div>
             </form>
             <Show
               when={presetDocument().presets.length > 0}
-              fallback={<p class="preset-empty">No local presets saved.</p>}
+              fallback={<p class="preset-empty">{text('noLocalPresets')}</p>}
             >
-              <ul aria-label="Saved local presets">
+              <ul aria-label={text('savedLocalPresets')}>
                 <For each={presetDocument().presets}>
                   {(preset) => (
                     <li>
                       <div>
                         <strong>{preset.name}</strong>
-                        <span>{preset.rules.length} rules</span>
+                        <span>
+                          {text('presetRuleCount', { count: count(preset.rules.length) })}
+                        </span>
                       </div>
                       <div class="preset-actions">
                         <button
@@ -1487,15 +1543,15 @@ export function App(props: AppProps) {
                           type="button"
                           onClick={() => applyPreset(preset.presetId)}
                         >
-                          Apply
+                          {text('applyPreset')}
                         </button>
                         <button
                           class="button button-secondary button-compact preset-delete"
                           type="button"
-                          aria-label={`Delete preset ${preset.name}`}
+                          aria-label={text('deleteNamedPreset', { name: preset.name })}
                           onClick={() => removePreset(preset.presetId)}
                         >
-                          Delete
+                          {text('deletePreset')}
                         </button>
                       </div>
                     </li>
@@ -1505,39 +1561,34 @@ export function App(props: AppProps) {
             </Show>
           </section>
           <div class="scope-note">
-            <strong>Current scope</strong>
-            <p>
-              New plan execution remains locked. Recovery and Undo require fresh identity checks and
-              native confirmation.
-            </p>
+            <strong>{text('currentScope')}</strong>
+            <p>{text('currentScopeDescription')}</p>
           </div>
           <Show when={ledger().length > 0}>
             <section class="ledger-panel" aria-labelledby="ledger-heading">
               <div class="ledger-heading">
                 <h2 id="ledger-heading" tabIndex={-1} ref={ledgerHeading}>
-                  Rename Ledger
+                  {text('renameLedger')}
                 </h2>
                 <span>{ledger().length}</span>
               </div>
-              <p>
-                Inspect interrupted work or a completed rename before any native-confirmed action.
-              </p>
-              <ul aria-label="Rename journal status">
+              <p>{text('ledgerDescription')}</p>
+              <ul aria-label={text('renameJournalStatus')}>
                 {ledger().map((entry) => (
                   <li>
                     <div class="ledger-entry-summary">
                       <strong>
                         {entry.undoOfPlanId !== null
-                          ? `Undo of plan ${entry.undoOfPlanId}`
+                          ? text('undoOfPlan', { planId: entry.undoOfPlanId })
                           : entry.planId === null
-                            ? `Ledger ${entry.ledgerId}`
-                            : `Plan ${entry.planId}`}
+                            ? text('ledgerNumber', { ledgerId: entry.ledgerId })
+                            : text('planNumber', { planId: entry.planId })}
                       </strong>
                       <span>
                         {entry.undoOfPlanId !== null && entry.planId !== null
-                          ? `Plan ${entry.planId} · `
+                          ? `${text('planNumber', { planId: entry.planId })} · `
                           : ''}
-                        {entry.sourceCount} sources
+                        {text('sourceCount', { count: count(entry.sourceCount) })}
                       </span>
                     </div>
                     <div class="ledger-entry-actions">
@@ -1557,10 +1608,17 @@ export function App(props: AppProps) {
                             recoveryBusyAction() !== undefined ||
                             undoBusy()
                           }
-                          aria-label={`Inspect ${entry.planId === null ? `ledger ${entry.ledgerId}` : `plan ${entry.planId}`} recovery`}
+                          aria-label={text('inspectLedgerRecovery', {
+                            subject:
+                              entry.planId === null
+                                ? text('subjectLedger', { id: entry.ledgerId })
+                                : text('subjectPlan', { id: entry.planId }),
+                          })}
                           onClick={() => void inspectLedgerEntry(entry)}
                         >
-                          {inspectingLedgerId() === entry.ledgerId ? 'Inspecting…' : 'Inspect'}
+                          {inspectingLedgerId() === entry.ledgerId
+                            ? text('inspecting')
+                            : text('inspect')}
                         </button>
                       </Show>
                       <Show when={entry.undoAvailable}>
@@ -1573,12 +1631,17 @@ export function App(props: AppProps) {
                             recoveryBusyAction() !== undefined ||
                             undoBusy()
                           }
-                          aria-label={`Inspect ${entry.planId === null ? `ledger ${entry.ledgerId}` : `plan ${entry.planId}`} Undo`}
+                          aria-label={text('inspectLedgerUndo', {
+                            subject:
+                              entry.planId === null
+                                ? text('subjectLedger', { id: entry.ledgerId })
+                                : text('subjectPlan', { id: entry.planId }),
+                          })}
                           onClick={() => void inspectUndoEntry(entry)}
                         >
                           {inspectingUndoLedgerId() === entry.ledgerId
-                            ? 'Inspecting…'
-                            : 'Inspect Undo'}
+                            ? text('inspecting')
+                            : text('inspectUndo')}
                         </button>
                       </Show>
                     </div>
@@ -1595,13 +1658,15 @@ export function App(props: AppProps) {
                   <strong>{recoveryInspectionTitle()}</strong>
                   <p>{recoveryInspectionDescription()}</p>
                   <span>
-                    {recoveryInspection()?.direction === 'forward' ? 'Forward' : 'Rollback'}
+                    {recoveryInspection()?.direction === 'forward'
+                      ? text('recoveryDirectionForward')
+                      : text('recoveryDirectionRollback')}
                     {recoveryInspection()?.stepIndex === null
-                      ? ' · terminal record'
-                      : ` · step ${recoveryInspection()?.stepIndex}`}
+                      ? ` · ${text('recoveryTerminalRecord')}`
+                      : ` · ${text('recoveryStep', { step: recoveryInspection()?.stepIndex ?? 0 })}`}
                   </span>
                   <fieldset class="ledger-recovery-actions">
-                    <legend class="visually-hidden">Available recovery actions</legend>
+                    <legend class="visually-hidden">{text('availableRecoveryActions')}</legend>
                     <Show when={recoveryInspection()?.reconcileAvailable}>
                       <button
                         class="button button-primary button-compact"
@@ -1610,8 +1675,8 @@ export function App(props: AppProps) {
                         onClick={() => void applyRecoveryAction('reconcile')}
                       >
                         {recoveryBusyAction() === 'reconcile'
-                          ? 'Waiting for confirmation…'
-                          : 'Record observation'}
+                          ? text('waitingForConfirmation')
+                          : text('recordObservation')}
                       </button>
                     </Show>
                     <Show when={recoveryInspection()?.resumeAvailable}>
@@ -1622,10 +1687,10 @@ export function App(props: AppProps) {
                         onClick={() => void applyRecoveryAction('resume')}
                       >
                         {recoveryBusyAction() === 'resume'
-                          ? 'Recovering…'
+                          ? text('recovering')
                           : recoveryInspection()?.direction === 'forward'
-                            ? 'Resume'
-                            : 'Continue rollback'}
+                            ? text('resume')
+                            : text('continueRollback')}
                       </button>
                     </Show>
                     <Show
@@ -1644,12 +1709,12 @@ export function App(props: AppProps) {
                         onClick={() => void requestRecoveryCancellation()}
                       >
                         {recoveryCancellationState() === 'accepted'
-                          ? 'Cancellation requested'
+                          ? text('cancellationRequested')
                           : recoveryCancellationState() === 'requesting'
-                            ? 'Requesting cancellation…'
+                            ? text('requestingCancellation')
                             : recoveryCancellationState() === 'rejected'
-                              ? 'Try cancel again'
-                              : 'Cancel and roll back'}
+                              ? text('tryCancelAgain')
+                              : text('cancelAndRollback')}
                       </button>
                     </Show>
                     <Show when={recoveryInspection()?.rollbackAvailable}>
@@ -1659,7 +1724,9 @@ export function App(props: AppProps) {
                         disabled={recoveryBusyAction() !== undefined}
                         onClick={() => void applyRecoveryAction('rollback')}
                       >
-                        {recoveryBusyAction() === 'rollback' ? 'Rolling back…' : 'Roll back'}
+                        {recoveryBusyAction() === 'rollback'
+                          ? text('rollingBack')
+                          : text('rollBack')}
                       </button>
                     </Show>
                   </fieldset>
@@ -1676,20 +1743,21 @@ export function App(props: AppProps) {
                   >
                     <strong>
                       {inspection().readiness === 'ready'
-                        ? 'Undo checks passed'
-                        : 'Undo is blocked'}
+                        ? text('undoChecksPassed')
+                        : text('undoBlocked')}
                     </strong>
                     <p>
                       {inspection().readiness === 'ready'
-                        ? 'Native confirmation and one more identity check are required before the reverse transaction starts.'
+                        ? text('undoReadyDescription')
                         : undoBlockDescription(inspection().blockReason)}
                     </p>
                     <span>
-                      Plan {inspection().originalPlanId} · {inspection().sourceCount} sources
+                      {text('planNumber', { planId: inspection().originalPlanId })} ·{' '}
+                      {text('sourceCount', { count: count(inspection().sourceCount) })}
                     </span>
                     <Show when={inspection().undoAvailable}>
                       <fieldset class="ledger-recovery-actions">
-                        <legend class="visually-hidden">Available Undo actions</legend>
+                        <legend class="visually-hidden">{text('availableUndoActions')}</legend>
                         <button
                           class="button button-primary button-compact ledger-action-button"
                           data-state={undoBusy() ? 'loading' : 'default'}
@@ -1697,7 +1765,7 @@ export function App(props: AppProps) {
                           disabled={undoBusy() || recoveryBusyAction() !== undefined}
                           onClick={() => void applyUndo()}
                         >
-                          {undoBusy() ? 'Undoing…' : 'Undo rename'}
+                          {undoBusy() ? text('undoing') : text('undoRename')}
                         </button>
                         <Show when={undoBusy()}>
                           <button
@@ -1713,12 +1781,12 @@ export function App(props: AppProps) {
                             onClick={() => void requestUndoCancellation()}
                           >
                             {undoCancellationState() === 'accepted'
-                              ? 'Cancellation requested'
+                              ? text('cancellationRequested')
                               : undoCancellationState() === 'requesting'
-                                ? 'Requesting cancellation…'
+                                ? text('requestingCancellation')
                                 : undoCancellationState() === 'rejected'
-                                  ? 'Try cancel again'
-                                  : 'Cancel and roll back'}
+                                  ? text('tryCancelAgain')
+                                  : text('cancelAndRollback')}
                           </button>
                         </Show>
                       </fieldset>
@@ -1733,11 +1801,13 @@ export function App(props: AppProps) {
         <section class="preview-pane" aria-labelledby="preview-heading">
           <div class="preview-heading">
             <div>
-              <h2 id="preview-heading">Proposed names</h2>
-              <p>Original names remain untouched while you inspect this plan.</p>
+              <h2 id="preview-heading">{text('proposedNames')}</h2>
+              <p>{text('proposedNamesDescription')}</p>
             </div>
             <div class="plan-heading-actions">
-              <span class="generation">Generation {plan()?.generation ?? 0}</span>
+              <span class="generation">
+                {text('generation', { generation: count(plan()?.generation ?? 0) })}
+              </span>
               <button
                 class="button button-secondary button-compact"
                 type="button"
@@ -1747,7 +1817,7 @@ export function App(props: AppProps) {
                   void inspectCurrentPlan();
                 }}
               >
-                Inspect JSON
+                {text('inspectJson')}
               </button>
             </div>
           </div>
@@ -1759,11 +1829,8 @@ export function App(props: AppProps) {
                 <span class="empty-mark" aria-hidden="true">
                   A → B
                 </span>
-                <h2>No sources in this plan</h2>
-                <p>
-                  Load the local sample to test this rule pipeline, or select and drop files in the
-                  desktop app.
-                </p>
+                <h2>{text('noSourcesInPlan')}</h2>
+                <p>{text('noSourcesDescription')}</p>
                 <button
                   class="button button-primary"
                   type="button"
@@ -1772,11 +1839,11 @@ export function App(props: AppProps) {
                 >
                   {busy()
                     ? planningClient.nativeSelectionAvailable
-                      ? 'Opening…'
-                      : 'Loading…'
+                      ? text('opening')
+                      : text('loading')
                     : planningClient.nativeSelectionAvailable
-                      ? 'Add files'
-                      : 'Load sample'}
+                      ? text('addFiles')
+                      : text('loadSample')}
                 </button>
               </div>
             }
@@ -1784,6 +1851,7 @@ export function App(props: AppProps) {
             <VirtualPlanTable
               rows={plan()?.rows ?? []}
               overrides={overrides()}
+              locale={locale()}
               onOverride={(sourceId, value) => {
                 setOverrides((current) => {
                   const retained = current.filter((item) => item.sourceId !== sourceId);
@@ -1799,19 +1867,19 @@ export function App(props: AppProps) {
       <footer class="review-bar">
         <div class="plan-summary" aria-hidden={!plan()}>
           <span>
-            <strong>{plan()?.rows.length ?? 0}</strong> sources
+            <strong>{count(plan()?.rows.length ?? 0)}</strong> {text('summarySources')}
           </span>
           <span>
-            <strong>{plan()?.changedCount ?? 0}</strong> changes
+            <strong>{count(plan()?.changedCount ?? 0)}</strong> {text('summaryChanges')}
           </span>
           <span class={plan()?.blockedCount ? 'blocked-count' : ''}>
-            <strong>{plan()?.blockedCount ?? 0}</strong> blocked
+            <strong>{count(plan()?.blockedCount ?? 0)}</strong> {text('summaryBlocked')}
           </span>
         </div>
         <div class="execution-lock">
-          <span>New plan execution remains locked. Ledger Recovery and Undo stay available.</span>
+          <span>{text('executionLockedDescription')}</span>
           <button class="button button-locked" type="button" disabled>
-            Execution unavailable
+            {text('executionUnavailable')}
           </button>
         </div>
       </footer>
@@ -1841,18 +1909,20 @@ export function App(props: AppProps) {
           >
             <div class="inspector-heading">
               <div>
-                <span class="inspector-kicker">Versioned plan document</span>
-                <h2 id="plan-inspector-heading">Plan {plan()?.planId}</h2>
+                <span class="inspector-kicker">{text('versionedPlanDocument')}</span>
+                <h2 id="plan-inspector-heading">
+                  {text('planNumber', { planId: plan()?.planId ?? 0 })}
+                </h2>
               </div>
               <button
                 class="button button-secondary button-compact"
                 type="button"
                 onClick={dismissPlanInspector}
               >
-                Close
+                {text('close')}
               </button>
             </div>
-            <p>Display projections and opaque IDs only. Native paths are never included.</p>
+            <p>{text('planProjectionDescription')}</p>
             <pre>{document()}</pre>
             <div class="inspector-actions">
               <button
@@ -1860,26 +1930,22 @@ export function App(props: AppProps) {
                 type="button"
                 disabled={!planningClient.nativeSelectionAvailable || busy()}
                 title={
-                  planningClient.nativeSelectionAvailable
-                    ? undefined
-                    : 'Export is available in the desktop app.'
+                  planningClient.nativeSelectionAvailable ? undefined : text('exportDesktopOnly')
                 }
                 onClick={() => void exportCurrentPlan()}
               >
-                Export JSON…
+                {text('exportJson')}
               </button>
               <button
                 class="button button-secondary"
                 type="button"
                 disabled={!planningClient.nativeSelectionAvailable || busy()}
                 title={
-                  planningClient.nativeSelectionAvailable
-                    ? undefined
-                    : 'CSV export is available in the desktop app.'
+                  planningClient.nativeSelectionAvailable ? undefined : text('csvExportDesktopOnly')
                 }
                 onClick={() => void exportCurrentPlanCsv()}
               >
-                Export CSV…
+                {text('exportCsv')}
               </button>
             </div>
           </dialog>

@@ -204,9 +204,50 @@ test('keeps the workbench inside narrow viewports', async ({ page }) => {
   }
 });
 
+test('persists Korean and keeps translated controls inside supported viewports', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.evaluate(() => localStorage.setItem('renamewright.locale', 'ko'));
+
+  for (const width of [320, 375, 414, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/');
+
+    await expect(page.locator('html')).toHaveAttribute('lang', 'ko');
+    await expect(page.getByRole('heading', { name: '이름 변경 규칙' })).toBeVisible();
+    await expect(page.getByRole('combobox', { name: '언어' })).toHaveValue('ko');
+    await page.getByRole('button', { name: '샘플 불러오기' }).click();
+    await expect(page.getByRole('columnheader', { name: '원본' })).toBeVisible();
+    await page.getByRole('textbox', { name: '접두사' }).fill('?');
+    await expect(page.getByRole('status')).toContainText('이름 3개가 차단되었습니다');
+
+    const layout = await page.evaluate(() => {
+      const clippedControls = [...document.querySelectorAll<HTMLElement>('button, select')]
+        .filter((element) => element.offsetParent !== null)
+        .filter((element) => element.scrollWidth > element.clientWidth + 1)
+        .map((element) => element.textContent?.trim() ?? element.tagName);
+      return {
+        client: document.documentElement.clientWidth,
+        scroll: document.documentElement.scrollWidth,
+        clippedControls,
+      };
+    });
+    expect(layout.scroll, `Korean overflow at ${width}px`).toBeLessThanOrEqual(layout.client);
+    expect(layout.clippedControls, `clipped Korean controls at ${width}px`).toEqual([]);
+  }
+
+  await page.getByRole('combobox', { name: '언어' }).selectOption('en');
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+  await expect(page.getByRole('heading', { name: 'Rename rules' })).toBeVisible();
+});
+
 test('preserves keyboard order and Windows accessibility preferences', async ({ page }) => {
   await page.goto('/');
 
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('combobox', { name: 'Language' })).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('button', { name: 'Remove Add prefix' })).toBeFocused();
   await page.keyboard.press('Tab');

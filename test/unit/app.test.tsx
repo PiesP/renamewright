@@ -2,6 +2,7 @@ import { cleanup, render, screen, within } from '@solidjs/testing-library';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App as RenamewrightApp } from '../../src/App';
+import { LOCALE_STORAGE_KEY, type LocaleStorage } from '../../src/i18n/catalog';
 import type {
   Plan,
   PlanningClient,
@@ -35,14 +36,22 @@ class TestPresetStorage implements PresetStorage {
 }
 
 const presetStorage = new TestPresetStorage();
+const localeStorage = new TestPresetStorage();
 
-function App(props: { client: PlanningClient }) {
-  return <RenamewrightApp client={props.client} presetStorage={presetStorage} />;
+function App(props: { client: PlanningClient; localeStorage?: LocaleStorage }) {
+  return (
+    <RenamewrightApp
+      client={props.client}
+      presetStorage={presetStorage}
+      localeStorage={props.localeStorage ?? localeStorage}
+    />
+  );
 }
 
 afterEach(() => {
   cleanup();
   presetStorage.clear();
+  localeStorage.clear();
   vi.useRealTimers();
 });
 
@@ -466,7 +475,7 @@ test('refreshes the ledger after an Undo command error', async () => {
   expect(await screen.findByText('Undo of plan 84')).toBeInTheDocument();
   expect(screen.getByText('Recovery required')).toBeInTheDocument();
   expect(screen.queryByText('Undo checks passed')).not.toBeInTheDocument();
-  expect(screen.getByRole('status')).toHaveTextContent('Undo stopped safely');
+  expect(screen.getByRole('status')).toHaveTextContent('Undo could not run.');
 });
 
 test('loads sample sources and previews a prefix rule', async () => {
@@ -485,6 +494,37 @@ test('loads sample sources and previews a prefix rule', async () => {
     screen.getByText((_, element) => element?.textContent === '3 changes')
   ).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
+});
+
+test('loads and persists Korean while localizing accessible workbench names', async () => {
+  localeStorage.setItem(LOCALE_STORAGE_KEY, 'ko');
+  const user = userEvent.setup();
+  render(() => <App client={fakeClient()} />);
+
+  expect(document.documentElement.lang).toBe('ko');
+  expect(screen.getByRole('heading', { name: '이름 변경 규칙' })).toBeInTheDocument();
+  expect(screen.getByRole('combobox', { name: '언어' })).toHaveValue('ko');
+  await user.click(screen.getByRole('button', { name: '샘플 불러오기' }));
+  expect(await screen.findByRole('columnheader', { name: '원본' })).toBeInTheDocument();
+  expect(screen.getByText('Windows에서 사용할 수 없는 문자')).toBeInTheDocument();
+});
+
+test('switches locale without reflecting an unknown backend error', async () => {
+  const client = fakeClient();
+  client.loadSample = async () => {
+    throw new Error('/home/private/Documents/secret.txt');
+  };
+  const user = userEvent.setup();
+  render(() => <App client={client} />);
+
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Language' }), 'ko');
+  expect(localeStorage.getItem(LOCALE_STORAGE_KEY)).toBe('ko');
+  await user.click(screen.getByRole('button', { name: '샘플 불러오기' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent(
+    '이름 변경 계획을 갱신할 수 없습니다.'
+  );
+  expect(screen.getByRole('status')).not.toHaveTextContent('/home/private');
 });
 
 test('adds, reorders, and disables rules without losing stable editing state', async () => {
@@ -762,7 +802,7 @@ test('does not mutate active rules when local preset data is malformed', async (
   render(() => <App client={fakeClient()} />);
 
   expect(await screen.findByRole('status')).toHaveTextContent(
-    'Stored presets are invalid and were not loaded.'
+    'The saved preset data is invalid and was not loaded.'
   );
   expect(screen.getByRole('status')).not.toHaveTextContent('/private/value');
   await user.click(screen.getByRole('button', { name: 'Load sample' }));
