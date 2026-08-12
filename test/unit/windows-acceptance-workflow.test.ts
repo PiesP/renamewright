@@ -80,6 +80,7 @@ test('proves upgrade, portable sharing, downgrade refusal, uninstall, and data r
   expect(lifecycle).toContain('[Version]$PreviousVersion -ge [Version]$CurrentVersion');
   expect(lifecycle).toContain('The lifecycle test requires clean current-user data roots.');
   expect(lifecycle).toContain('Start-And-ProbeApplication');
+  expect(lifecycle).toContain("-Arguments @('/S', '/UPDATE')");
   expect(lifecycle).toContain(
     "The installed package version was '$actual' instead of '$Expected'."
   );

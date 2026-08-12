@@ -40,10 +40,11 @@ function Resolve-PackageFile {
 function Invoke-SilentPackage {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
+        [string[]]$Arguments = @('/S'),
         [bool]$RequireSuccess = $true
     )
 
-    $process = Start-Process -FilePath $Path -ArgumentList '/S' -Wait -PassThru
+    $process = Start-Process -FilePath $Path -ArgumentList $Arguments -Wait -PassThru
     if ($RequireSuccess -and $process.ExitCode -ne 0) {
         throw "A silent package operation failed with exit code $($process.ExitCode)."
     }
@@ -216,7 +217,7 @@ try {
     Set-Content -LiteralPath $journalMarker -Value $journalMarkerValue -NoNewline -Encoding ascii
     Set-Content -LiteralPath $webViewMarker -Value $webViewMarkerValue -NoNewline -Encoding ascii
 
-    [void](Invoke-SilentPackage -Path $currentInstaller)
+    [void](Invoke-SilentPackage -Path $currentInstaller -Arguments @('/S', '/UPDATE'))
     $currentRecord = Get-InstallRecord
     Assert-Version -Record $currentRecord -Expected $CurrentVersion
     $currentExecutable = Get-InstalledExecutable -Record $currentRecord
