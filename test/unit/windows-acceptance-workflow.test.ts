@@ -17,6 +17,8 @@ test('keeps Windows acceptance manual, read-only, pinned, and source-bound', () 
   );
   expect(workflow).toContain('name: renamewright-windows-acceptance-$' + '{{ github.sha }}');
   expect(workflow).toContain('-SourceSha $env:GITHUB_SHA');
+  expect(workflow).toContain('-VerifiedPortableOutputPath $verifiedPortable');
+  expect(workflow).toContain('-PortableSourcePath $env:VERIFIED_PORTABLE_PATH');
   expect(workflow).toContain('if-no-files-found: error');
   expect(workflow).toContain('retention-days: 7');
 });
@@ -91,11 +93,16 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
   expect(lifecycle).toContain(
     'The portable artifact does not match the installed application payload.'
   );
+  expect(lifecycle).toContain('[string]$VerifiedPortableOutputPath');
+  expect(lifecycle).not.toContain('[string]$CurrentPortablePath');
+  expect(lifecycle).toContain(
+    'Copy-Item -LiteralPath $currentExecutable -Destination $verifiedPortable'
+  );
   expect(lifecycle).toContain(
     '(Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash.ToLowerInvariant()'
   );
   expect(lifecycle).toContain(
-    '(Get-FileHash -LiteralPath $currentPortable -Algorithm SHA256).Hash.ToLowerInvariant()'
+    '(Get-FileHash -LiteralPath $verifiedPortable -Algorithm SHA256).Hash.ToLowerInvariant()'
   );
   expect(lifecycle).toContain('$portableDigest -cne $installedDigest');
   expect(lifecycle).toContain('installedApplicationSha256 = $installedDigest');
@@ -128,6 +135,7 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
   );
   expect(packager).toContain('$portablePayloadDigest -cne $installedPayloadDigest');
   expect(packager).toContain('$packagedPortableDigest -cne $portablePayloadDigest');
+  expect(packager).toContain('[string]$PortableSourcePath');
   expect(packager).toContain(
     'The packaged portable artifact differs from the lifecycle-tested payload.'
   );

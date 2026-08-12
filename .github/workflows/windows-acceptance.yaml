@@ -87,15 +87,18 @@ jobs:
             throw 'Exactly one current installer is required for lifecycle validation.'
           }
           $evidence = Join-Path $env:RUNNER_TEMP 'windows-lifecycle-evidence.json'
+          $verifiedPortable = Join-Path $env:RUNNER_TEMP 'renamewright-verified-portable.exe'
           ./scripts/test-windows-package-lifecycle.ps1 `
             -CurrentInstallerPath $installers[0].FullName `
-            -CurrentPortablePath (Join-Path $PWD.Path 'target/release/renamewright-app.exe') `
+            -VerifiedPortableOutputPath $verifiedPortable `
             -PreviousInstallerPath $env:PREVIOUS_INSTALLER_PATH `
             -CurrentVersion ([string]$packageDocument.version) `
             -PreviousVersion '0.0.0' `
             -Identifier ([string]$tauriConfig.identifier) `
             -OutputPath $evidence
           "LIFECYCLE_EVIDENCE_PATH=$evidence" |
+            Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "VERIFIED_PORTABLE_PATH=$verifiedPortable" |
             Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
 
       - name: Install the verified Syft binary
@@ -119,6 +122,7 @@ jobs:
           ./scripts/prepare-windows-acceptance.ps1
           -RepositoryRoot $PWD.Path
           -OutputDirectory (Join-Path $PWD.Path 'acceptance')
+          -PortableSourcePath $env:VERIFIED_PORTABLE_PATH
           -SourceSha $env:GITHUB_SHA
           -SyftPath $env:SYFT_PATH
           -LifecycleEvidencePath $env:LIFECYCLE_EVIDENCE_PATH
