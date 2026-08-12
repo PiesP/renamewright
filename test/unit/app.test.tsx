@@ -693,6 +693,7 @@ test('saves, applies, and deletes local presets without clearing source override
   await user.clear(override);
   await user.type(override, 'manual.md');
   await user.click(screen.getByRole('button', { name: /^Save$/u }));
+  expect(await screen.findByText('manual.md')).toBeInTheDocument();
 
   await user.type(screen.getByRole('textbox', { name: 'Preset name' }), 'Reports');
   await user.click(screen.getByRole('button', { name: 'Save preset' }));
@@ -701,6 +702,7 @@ test('saves, applies, and deletes local presets without clearing source override
   await user.clear(prefix);
   await user.type(prefix, 'other-');
   expect(await screen.findByText('other-notes.txt')).toBeInTheDocument();
+  expect(screen.getByText('manual.md')).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: 'Apply' }));
   expect(await screen.findByText('saved-notes.txt')).toBeInTheDocument();
   expect(screen.getByText('manual.md')).toBeInTheDocument();
