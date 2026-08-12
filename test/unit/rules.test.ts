@@ -217,3 +217,138 @@ test('reports sequence validation and row-local overflow without source data', (
     diagnostic: 'sequenceOverflow',
   });
 });
+
+test('recomputes the extension boundary through ordered structure rules', () => {
+  const request: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    rules: [
+      { kind: 'extension', ruleId: 71, enabled: true, operation: 'remove', value: 'txt' },
+      {
+        kind: 'case',
+        ruleId: 73,
+        enabled: true,
+        target: 'extension',
+        mode: 'uppercase',
+      },
+      {
+        kind: 'extension',
+        ruleId: 79,
+        enabled: true,
+        operation: 'replace',
+        value: 'backup.zip',
+      },
+    ],
+  };
+
+  const result = applyBrowserRules('archive.tar.gz', request);
+
+  expect(result.proposedName).toBe('archive.backup.zip');
+  expect(result.trace.map(({ before, after }) => ({ before, after }))).toEqual([
+    { before: 'archive.tar.gz', after: 'archive.tar' },
+    { before: 'archive.tar', after: 'archive.TAR' },
+    { before: 'archive.TAR', after: 'archive.backup.zip' },
+  ]);
+});
+
+test('handles hidden files, trailing dots, case, and Unicode whitespace by selected part', () => {
+  const hidden: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    rules: [
+      {
+        kind: 'extension',
+        ruleId: 83,
+        enabled: true,
+        operation: 'replace',
+        value: 'txt',
+      },
+    ],
+  };
+  expect(applyBrowserRules('.env', hidden).proposedName).toBe('.env.txt');
+  expect(applyBrowserRules('report.', hidden).proposedName).toBe('report.txt');
+
+  const cleanup: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    rules: [
+      {
+        kind: 'whitespaceCleanup',
+        ruleId: 89,
+        enabled: true,
+        target: 'stem',
+        replacement: '-',
+      },
+      {
+        kind: 'case',
+        ruleId: 97,
+        enabled: true,
+        target: 'extension',
+        mode: 'lowercase',
+      },
+    ],
+  };
+  expect(applyBrowserRules('\u2003초안\t 보고서 \n.TXT', cleanup).proposedName).toBe(
+    '초안-보고서.txt'
+  );
+});
+
+test('normalizes Unicode only when an explicit normalization rule is enabled', () => {
+  const decomposed = 're\u0301sume\u0301.txt';
+  const disabled: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    rules: [
+      {
+        kind: 'unicodeNormalization',
+        ruleId: 101,
+        enabled: false,
+        target: 'stem',
+        form: 'nfc',
+      },
+    ],
+  };
+  expect(applyBrowserRules(decomposed, disabled).proposedName).toBe(decomposed);
+
+  const forms = [
+    { form: 'nfc' as const, input: decomposed, output: 'résumé.txt' },
+    { form: 'nfd' as const, input: 'é.txt', output: 'e\u0301.txt' },
+    { form: 'nfkc' as const, input: 'Ｆｉｌｅ.txt', output: 'File.txt' },
+    { form: 'nfkd' as const, input: 'ﬁle.txt', output: 'file.txt' },
+  ];
+  for (const { form, input, output } of forms) {
+    const request: RulePipelineRequest = {
+      schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+      rules: [
+        {
+          kind: 'unicodeNormalization',
+          ruleId: 103,
+          enabled: true,
+          target: 'stem',
+          form,
+        },
+      ],
+    };
+    expect(applyBrowserRules(input, request).proposedName).toBe(output);
+  }
+});
+
+test('rejects invalid extension replacement without reflecting its value', () => {
+  const request: RulePipelineRequest = {
+    schemaVersion: RULE_PIPELINE_SCHEMA_VERSION,
+    rules: [
+      {
+        kind: 'extension',
+        ruleId: 107,
+        enabled: false,
+        operation: 'replace',
+        value: '.sensitive-extension',
+      },
+    ],
+  };
+
+  try {
+    applyBrowserRules('/home/private.txt', request);
+    throw new Error('Expected invalid extension replacement.');
+  } catch (cause) {
+    expect(cause).toMatchObject({ code: 'invalidExtensionReplacement', ruleId: 107 });
+    expect((cause as Error).message).not.toContain('sensitive-extension');
+    expect((cause as Error).message).not.toContain('/home/private.txt');
+  }
+});

@@ -1,4 +1,4 @@
-export const RULE_PIPELINE_SCHEMA_VERSION = 2;
+export const RULE_PIPELINE_SCHEMA_VERSION = 3;
 export const MAX_RULES = 32;
 export const MAX_RULE_TEXT_BYTES = 4_096;
 export const MAX_SEQUENCE_PADDING = 20;
@@ -46,12 +46,42 @@ export interface SequenceRule extends RuleBase {
   separator: string;
 }
 
+export type FilenamePart = 'wholeName' | 'stem' | 'extension';
+
+export interface ExtensionRule extends RuleBase {
+  kind: 'extension';
+  operation: 'remove' | 'replace';
+  value: string;
+}
+
+export interface CaseRule extends RuleBase {
+  kind: 'case';
+  target: FilenamePart;
+  mode: 'lowercase' | 'uppercase';
+}
+
+export interface WhitespaceCleanupRule extends RuleBase {
+  kind: 'whitespaceCleanup';
+  target: FilenamePart;
+  replacement: string;
+}
+
+export interface UnicodeNormalizationRule extends RuleBase {
+  kind: 'unicodeNormalization';
+  target: FilenamePart;
+  form: 'nfc' | 'nfd' | 'nfkc' | 'nfkd';
+}
+
 export type RuleRequest =
   | PrefixRule
   | SuffixRule
   | LiteralReplaceRule
   | RegexReplaceRule
-  | SequenceRule;
+  | SequenceRule
+  | ExtensionRule
+  | CaseRule
+  | WhitespaceCleanupRule
+  | UnicodeNormalizationRule;
 export type RuleKind = RuleRequest['kind'];
 
 export interface RulePipelineRequest {
@@ -113,6 +143,14 @@ export function createRule(ruleId: number, kind: RuleKind): RuleRequest {
         placement: 'prefix',
         separator: '-',
       };
+    case 'extension':
+      return { kind, ruleId, enabled: true, operation: 'remove', value: 'txt' };
+    case 'case':
+      return { kind, ruleId, enabled: true, target: 'wholeName', mode: 'lowercase' };
+    case 'whitespaceCleanup':
+      return { kind, ruleId, enabled: true, target: 'wholeName', replacement: ' ' };
+    case 'unicodeNormalization':
+      return { kind, ruleId, enabled: true, target: 'wholeName', form: 'nfc' };
   }
 }
 
@@ -123,6 +161,10 @@ export function ruleLabel(kind: RuleKind): string {
     literalReplace: 'Replace text',
     regexReplace: 'Replace by pattern',
     sequence: 'Add sequence',
+    extension: 'Change extension',
+    case: 'Change case',
+    whitespaceCleanup: 'Clean whitespace',
+    unicodeNormalization: 'Normalize Unicode',
   };
   return labels[kind];
 }
@@ -145,6 +187,7 @@ export function planningError(cause: unknown): PlanningError {
     invalidSequenceStart: `${subject} needs a non-negative safe whole-number start.`,
     invalidSequenceStep: `${subject} needs a positive whole-number step.`,
     invalidSequencePadding: `${subject} needs padding from 1 through ${MAX_SEQUENCE_PADDING}.`,
+    invalidExtensionReplacement: `${subject} needs an extension without a leading dot.`,
     pickerUnavailable: 'The native file picker is unavailable.',
     sourceAdmissionFailed: 'One or more selected sources are no longer available.',
     stateUnavailable: 'The planning worker is unavailable.',
@@ -218,6 +261,39 @@ export function compileBrowserRulePipeline(
         });
         break;
       }
+      case 'extension':
+        compiledRules.push({
+          ruleId: rule.ruleId,
+          apply: (input) => applyExtension(input, rule.operation, rule.value),
+        });
+        break;
+      case 'case':
+        compiledRules.push({
+          ruleId: rule.ruleId,
+          apply: (input) =>
+            transformFilenamePart(input, rule.target, (text) =>
+              rule.mode === 'lowercase' ? text.toLowerCase() : text.toUpperCase()
+            ),
+        });
+        break;
+      case 'whitespaceCleanup':
+        compiledRules.push({
+          ruleId: rule.ruleId,
+          apply: (input) =>
+            transformFilenamePart(input, rule.target, (text) =>
+              cleanupWhitespace(text, rule.replacement)
+            ),
+        });
+        break;
+      case 'unicodeNormalization':
+        compiledRules.push({
+          ruleId: rule.ruleId,
+          apply: (input) =>
+            transformFilenamePart(input, rule.target, (text) =>
+              text.normalize(rule.form.toUpperCase() as 'NFC' | 'NFD' | 'NFKC' | 'NFKD')
+            ),
+        });
+        break;
     }
   }
   return (source) => {
@@ -302,6 +378,17 @@ function validateRequest(request: RulePipelineRequest): void {
         );
       }
     }
+    if (
+      rule.kind === 'extension' &&
+      rule.operation === 'replace' &&
+      (rule.value.length === 0 || rule.value.startsWith('.'))
+    ) {
+      throw new PlanningError(
+        'invalidExtensionReplacement',
+        `Rule ${rule.ruleId} needs an extension without a leading dot.`,
+        rule.ruleId
+      );
+    }
   }
 }
 
@@ -316,7 +403,56 @@ function ruleText(rule: RuleRequest): string[] {
       return [rule.pattern, rule.replacement];
     case 'sequence':
       return [rule.separator];
+    case 'extension':
+      return [rule.value];
+    case 'whitespaceCleanup':
+      return [rule.replacement];
+    case 'case':
+    case 'unicodeNormalization':
+      return [];
   }
+}
+
+function extensionBoundary(name: string): number | undefined {
+  const index = name.lastIndexOf('.');
+  return index > 0 ? index : undefined;
+}
+
+function applyExtension(
+  name: string,
+  operation: ExtensionRule['operation'],
+  value: string
+): string {
+  const boundary = extensionBoundary(name);
+  if (operation === 'remove') {
+    return boundary === undefined ? name : name.slice(0, boundary);
+  }
+  return `${boundary === undefined ? name : name.slice(0, boundary)}.${value}`;
+}
+
+function transformFilenamePart(
+  name: string,
+  target: FilenamePart,
+  transform: (text: string) => string
+): string {
+  if (target === 'wholeName') {
+    return transform(name);
+  }
+  const boundary = extensionBoundary(name);
+  if (target === 'stem') {
+    return boundary === undefined
+      ? transform(name)
+      : `${transform(name.slice(0, boundary))}${name.slice(boundary)}`;
+  }
+  return boundary === undefined
+    ? name
+    : `${name.slice(0, boundary + 1)}${transform(name.slice(boundary + 1))}`;
+}
+
+function cleanupWhitespace(text: string, replacement: string): string {
+  return text
+    .replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '')
+    .replace(/\p{White_Space}+/gu, replacement);
 }
 
 function allocateSequence(

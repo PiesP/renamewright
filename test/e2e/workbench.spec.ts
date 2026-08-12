@@ -15,7 +15,7 @@ test('previews a safe prefix and blocks invalid Windows names', async ({ page })
   await expect(page.getByText('2026-Quarterly review.pdf')).toBeVisible();
   await expect(page.getByText('3 changes')).toBeVisible();
   await page.getByRole('button', { name: 'Inspect JSON' }).click();
-  await expect(page.getByRole('dialog')).toContainText('"schemaVersion": 3');
+  await expect(page.getByRole('dialog')).toContainText('"schemaVersion": 4');
   await expect(page.getByRole('dialog')).not.toContainText('/home/');
   await page.getByRole('button', { name: 'Close' }).click();
 
@@ -70,6 +70,44 @@ test('allocates sequence numbers before preview rows are rendered', async ({ pag
   await expect(sequenceEditor).toContainText(
     'Number allocation is fixed before preview rows are rendered.'
   );
+});
+
+test('previews filename structure rules and keeps invalid extensions blocked', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Load sample' }).click();
+  await page.getByRole('textbox', { name: 'Prefix' }).fill('  Final   ');
+
+  await page.getByRole('combobox', { name: 'New rule' }).selectOption('extension');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+  const extensionEditor = page.locator('.rule-editor').filter({ hasText: 'Change extension' });
+  await extensionEditor.getByRole('combobox', { name: 'Operation' }).selectOption('replace');
+  await extensionEditor.getByRole('textbox', { name: 'New extension (without dot)' }).fill('md');
+
+  await page.getByRole('combobox', { name: 'New rule' }).selectOption('whitespaceCleanup');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+  const whitespaceEditor = page.locator('.rule-editor').filter({ hasText: 'Clean whitespace' });
+  await whitespaceEditor.getByRole('textbox', { name: 'Collapse runs to' }).fill('-');
+  await expect(page.getByText('Final-Quarterly-review.md')).toBeVisible();
+
+  await page.getByRole('combobox', { name: 'New rule' }).selectOption('case');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+  const caseEditor = page.locator('.rule-editor').filter({ hasText: 'Change case' });
+  await caseEditor.getByRole('combobox', { name: 'Apply to' }).selectOption('extension');
+  await caseEditor.getByRole('combobox', { name: 'Case' }).selectOption('uppercase');
+  await expect(page.getByText('Final-Quarterly-review.MD')).toBeVisible();
+
+  await page.getByRole('combobox', { name: 'New rule' }).selectOption('unicodeNormalization');
+  await page.getByRole('button', { name: 'Add rule' }).click();
+  const normalizationEditor = page.locator('.rule-editor').filter({ hasText: 'Normalize Unicode' });
+  await expect(
+    normalizationEditor.getByRole('combobox', { name: 'Normalization form' })
+  ).toHaveValue('nfc');
+
+  await extensionEditor
+    .getByRole('textbox', { name: 'New extension (without dot)' })
+    .fill('.private');
+  await expect(extensionEditor).toContainText('Rule 2 needs an extension without a leading dot.');
+  await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
 });
 
 test('keeps the workbench inside narrow viewports', async ({ page }) => {
