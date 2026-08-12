@@ -116,7 +116,7 @@ $requiredLifecycleChecks = @(
     'previousVersionInstalled',
     'upgradeOverInstall',
     'currentUserInstallLocationVerified',
-    'portableArtifactMatchesInstalledBinary',
+    'portableArtifactVersionVerified',
     'sharedDataRootContractVerified',
     'downgradeRefused',
     'installedBinaryPreserved',
