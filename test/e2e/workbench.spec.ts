@@ -204,6 +204,46 @@ test('keeps the workbench inside narrow viewports', async ({ page }) => {
   }
 });
 
+test('preserves keyboard order and Windows accessibility preferences', async ({ page }) => {
+  await page.goto('/');
+
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'Remove Add prefix' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('checkbox', { name: 'Enabled' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('textbox', { name: 'Prefix' })).toBeFocused();
+
+  await page.setViewportSize({ width: 320, height: 900 });
+  for (const control of [
+    page.getByRole('button', { name: 'Remove Add prefix' }),
+    page.getByRole('button', { name: 'Add rule' }),
+  ]) {
+    const box = await control.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box?.width).toBeGreaterThanOrEqual(44);
+    expect(box?.height).toBeGreaterThanOrEqual(44);
+  }
+
+  await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
+  const removeButton = page.getByRole('button', { name: 'Remove Add prefix' });
+  await removeButton.focus();
+  const accessibilityStyles = await removeButton.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      outlineStyle: style.outlineStyle,
+      outlineWidth: Number.parseFloat(style.outlineWidth),
+      transitionDuration: Number.parseFloat(style.transitionDuration),
+    };
+  });
+  expect(accessibilityStyles.outlineStyle).not.toBe('none');
+  expect(accessibilityStyles.outlineWidth).toBeGreaterThanOrEqual(3);
+  expect(accessibilityStyles.transitionDuration).toBeLessThanOrEqual(0.001);
+
+  const disabledButton = page.getByRole('button', { name: 'Execution unavailable' });
+  await expect(disabledButton).toHaveCSS('opacity', '1');
+});
+
 test('renders the path-free startup ledger at supported narrow widths', async ({ page }) => {
   await page.addInitScript(() => {
     window.__TAURI_INTERNALS__ = {
