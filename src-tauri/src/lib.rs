@@ -7,10 +7,10 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
-    DiagnosticCode, ExecutionDirection, MAX_RULE_TEXT_BYTES, MAX_RULES, MAX_SEQUENCE_PADDING,
-    NameStatus, PROTOCOL_VERSION, PlanId, RenamePlan, RenameRule, RulePipeline,
-    RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope, TargetPolicy,
-    build_plan_with_rule_pipeline_and_environment,
+    CaseMode, DiagnosticCode, ExecutionDirection, FilenamePart, MAX_RULE_TEXT_BYTES, MAX_RULES,
+    MAX_SEQUENCE_PADDING, NameStatus, PROTOCOL_VERSION, PlanId, RenamePlan, RenameRule,
+    RulePipeline, RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope,
+    TargetPolicy, UnicodeNormalizationForm, build_plan_with_rule_pipeline_and_environment,
 };
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
@@ -115,7 +115,7 @@ impl StoredPlan {
     }
 }
 
-const RULE_PIPELINE_SCHEMA_VERSION: u16 = 2;
+const RULE_PIPELINE_SCHEMA_VERSION: u16 = 3;
 const MAX_SEQUENCE_INPUT: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -137,6 +137,37 @@ enum SequenceOrderDto {
 enum SequencePlacementDto {
     Prefix,
     Suffix,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum FilenamePartDto {
+    WholeName,
+    Stem,
+    Extension,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ExtensionOperationDto {
+    Remove,
+    Replace,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum CaseModeDto {
+    Lowercase,
+    Uppercase,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum UnicodeNormalizationFormDto {
+    Nfc,
+    Nfd,
+    Nfkc,
+    Nfkd,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -186,6 +217,30 @@ enum RuleRequestDto {
         placement: SequencePlacementDto,
         separator: String,
     },
+    Extension {
+        rule_id: u64,
+        enabled: bool,
+        operation: ExtensionOperationDto,
+        value: String,
+    },
+    Case {
+        rule_id: u64,
+        enabled: bool,
+        target: FilenamePartDto,
+        mode: CaseModeDto,
+    },
+    WhitespaceCleanup {
+        rule_id: u64,
+        enabled: bool,
+        target: FilenamePartDto,
+        replacement: String,
+    },
+    UnicodeNormalization {
+        rule_id: u64,
+        enabled: bool,
+        target: FilenamePartDto,
+        form: UnicodeNormalizationFormDto,
+    },
 }
 
 impl RuleRequestDto {
@@ -195,7 +250,11 @@ impl RuleRequestDto {
             | Self::Suffix { rule_id, .. }
             | Self::LiteralReplace { rule_id, .. }
             | Self::RegexReplace { rule_id, .. }
-            | Self::Sequence { rule_id, .. } => *rule_id,
+            | Self::Sequence { rule_id, .. }
+            | Self::Extension { rule_id, .. }
+            | Self::Case { rule_id, .. }
+            | Self::WhitespaceCleanup { rule_id, .. }
+            | Self::UnicodeNormalization { rule_id, .. } => *rule_id,
         }
     }
 
@@ -205,7 +264,11 @@ impl RuleRequestDto {
             | Self::Suffix { enabled, .. }
             | Self::LiteralReplace { enabled, .. }
             | Self::RegexReplace { enabled, .. }
-            | Self::Sequence { enabled, .. } => *enabled,
+            | Self::Sequence { enabled, .. }
+            | Self::Extension { enabled, .. }
+            | Self::Case { enabled, .. }
+            | Self::WhitespaceCleanup { enabled, .. }
+            | Self::UnicodeNormalization { enabled, .. } => *enabled,
         }
     }
 
@@ -225,6 +288,9 @@ impl RuleRequestDto {
                 ..
             } => pattern.len() > MAX_RULE_TEXT_BYTES || replacement.len() > MAX_RULE_TEXT_BYTES,
             Self::Sequence { separator, .. } => separator.len() > MAX_RULE_TEXT_BYTES,
+            Self::Extension { value, .. } => value.len() > MAX_RULE_TEXT_BYTES,
+            Self::WhitespaceCleanup { replacement, .. } => replacement.len() > MAX_RULE_TEXT_BYTES,
+            Self::Case { .. } | Self::UnicodeNormalization { .. } => false,
         }
     }
 
@@ -240,6 +306,19 @@ impl RuleRequestDto {
                 if *padding == 0 || *padding > MAX_SEQUENCE_PADDING as u64 =>
             {
                 Some(RuleRequestErrorKind::InvalidSequencePadding)
+            }
+            _ => None,
+        }
+    }
+
+    fn structural_error(&self) -> Option<RuleRequestErrorKind> {
+        match self {
+            Self::Extension {
+                operation: ExtensionOperationDto::Replace,
+                value,
+                ..
+            } if value.is_empty() || value.starts_with('.') => {
+                Some(RuleRequestErrorKind::InvalidExtensionReplacement)
             }
             _ => None,
         }
@@ -286,7 +365,42 @@ impl RuleRequestDto {
                 },
                 separator,
             ),
+            Self::Extension {
+                operation, value, ..
+            } => match operation {
+                ExtensionOperationDto::Remove => RenameRule::remove_extension(),
+                ExtensionOperationDto::Replace => RenameRule::replace_extension(value),
+            },
+            Self::Case { target, mode, .. } => RenameRule::change_case(
+                filename_part(*target),
+                match mode {
+                    CaseModeDto::Lowercase => CaseMode::Lowercase,
+                    CaseModeDto::Uppercase => CaseMode::Uppercase,
+                },
+            ),
+            Self::WhitespaceCleanup {
+                target,
+                replacement,
+                ..
+            } => RenameRule::cleanup_whitespace(filename_part(*target), replacement),
+            Self::UnicodeNormalization { target, form, .. } => RenameRule::normalize_unicode(
+                filename_part(*target),
+                match form {
+                    UnicodeNormalizationFormDto::Nfc => UnicodeNormalizationForm::Nfc,
+                    UnicodeNormalizationFormDto::Nfd => UnicodeNormalizationForm::Nfd,
+                    UnicodeNormalizationFormDto::Nfkc => UnicodeNormalizationForm::Nfkc,
+                    UnicodeNormalizationFormDto::Nfkd => UnicodeNormalizationForm::Nfkd,
+                },
+            ),
         }
+    }
+}
+
+const fn filename_part(part: FilenamePartDto) -> FilenamePart {
+    match part {
+        FilenamePartDto::WholeName => FilenamePart::WholeName,
+        FilenamePartDto::Stem => FilenamePart::Stem,
+        FilenamePartDto::Extension => FilenamePart::Extension,
     }
 }
 
@@ -302,6 +416,7 @@ enum RuleRequestErrorKind {
     InvalidSequenceStart,
     InvalidSequenceStep,
     InvalidSequencePadding,
+    InvalidExtensionReplacement,
 }
 
 impl RuleRequestErrorKind {
@@ -317,6 +432,7 @@ impl RuleRequestErrorKind {
             Self::InvalidSequenceStart => "invalidSequenceStart",
             Self::InvalidSequenceStep => "invalidSequenceStep",
             Self::InvalidSequencePadding => "invalidSequencePadding",
+            Self::InvalidExtensionReplacement => "invalidExtensionReplacement",
         }
     }
 }
@@ -1003,6 +1119,12 @@ fn compile_rule_request(
                 kind,
             });
         }
+        if let Some(kind) = rule.structural_error() {
+            return Err(RuleRequestError {
+                rule_id: Some(rule.rule_id()),
+                kind,
+            });
+        }
     }
 
     let active = request
@@ -1032,6 +1154,9 @@ fn compile_rule_request(
                 }
                 RuleValidationErrorKind::InvalidSequencePadding => {
                     RuleRequestErrorKind::InvalidSequencePadding
+                }
+                RuleValidationErrorKind::InvalidExtensionReplacement => {
+                    RuleRequestErrorKind::InvalidExtensionReplacement
                 }
             };
             RuleRequestError { rule_id, kind }
@@ -1538,7 +1663,7 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     fn from(stored: &'a StoredPlan) -> Self {
         let plan = &stored.plan;
         Self {
-            schema_version: 3,
+            schema_version: 4,
             protocol_version: PROTOCOL_VERSION,
             rule_schema_version: stored.rule_request.schema_version,
             product: "Renamewright",
@@ -1751,9 +1876,10 @@ mod tests {
     };
 
     use super::{
-        AppState, LedgerEntryDto, RULE_PIPELINE_SCHEMA_VERSION, RulePipelineRequestDto,
-        RuleRequestDto, RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto,
-        SequenceScopeDto, StoredPlan, admit_dropped_sources, compile_rule_request,
+        AppState, CaseModeDto, ExtensionOperationDto, FilenamePartDto, LedgerEntryDto,
+        RULE_PIPELINE_SCHEMA_VERSION, RulePipelineRequestDto, RuleRequestDto, RuleRequestErrorKind,
+        SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, StoredPlan,
+        UnicodeNormalizationFormDto, admit_dropped_sources, compile_rule_request,
         export_write_error, plan_document_json, write_new_document,
     };
     #[cfg(target_os = "linux")]
@@ -1790,7 +1916,7 @@ mod tests {
         let source = SourceSnapshot::new(
             SourceId::new(7),
             ParentId::new(3),
-            OsString::from("report.txt"),
+            OsString::from("re\u{301}port.TXT"),
         );
         let request = RulePipelineRequestDto {
             schema_version: RULE_PIPELINE_SCHEMA_VERSION,
@@ -1798,15 +1924,34 @@ mod tests {
                 RuleRequestDto::Prefix {
                     rule_id: 7,
                     enabled: true,
-                    value: "final-".to_owned(),
+                    value: "FINAL ".to_owned(),
                 },
-                RuleRequestDto::Suffix {
+                RuleRequestDto::Extension {
                     rule_id: 9,
                     enabled: true,
-                    value: ".bak".to_owned(),
+                    operation: ExtensionOperationDto::Replace,
+                    value: "Md".to_owned(),
+                },
+                RuleRequestDto::Case {
+                    rule_id: 13,
+                    enabled: true,
+                    target: FilenamePartDto::WholeName,
+                    mode: CaseModeDto::Lowercase,
+                },
+                RuleRequestDto::WhitespaceCleanup {
+                    rule_id: 17,
+                    enabled: true,
+                    target: FilenamePartDto::WholeName,
+                    replacement: "_".to_owned(),
+                },
+                RuleRequestDto::UnicodeNormalization {
+                    rule_id: 19,
+                    enabled: true,
+                    target: FilenamePartDto::WholeName,
+                    form: UnicodeNormalizationFormDto::Nfc,
                 },
                 RuleRequestDto::Sequence {
-                    rule_id: 13,
+                    rule_id: 23,
                     enabled: true,
                     scope: SequenceScopeDto::AllSources,
                     order: SequenceOrderDto::SourceOrder,
@@ -1835,23 +1980,26 @@ mod tests {
         let document = plan_document_json(11, &state)?;
         let value: serde_json::Value = serde_json::from_str(&document)?;
 
-        assert_eq!(value["schemaVersion"], 3);
-        assert_eq!(value["protocolVersion"], 3);
-        assert_eq!(value["ruleSchemaVersion"], 2);
+        assert_eq!(value["schemaVersion"], 4);
+        assert_eq!(value["protocolVersion"], 4);
+        assert_eq!(value["ruleSchemaVersion"], 3);
         assert_eq!(value["planId"], 11);
         assert_eq!(value["rules"][0]["ruleId"], 7);
-        assert_eq!(value["rules"][1]["kind"], "suffix");
+        assert_eq!(value["rules"][1]["kind"], "extension");
+        assert_eq!(value["rules"][1]["operation"], "replace");
+        assert_eq!(value["rules"][2]["target"], "wholeName");
+        assert_eq!(value["rules"][2]["mode"], "lowercase");
+        assert_eq!(value["rules"][3]["replacement"], "_");
+        assert_eq!(value["rules"][4]["form"], "nfc");
         assert_eq!(value["rows"][0]["sourceId"], 7);
-        assert_eq!(value["rules"][2]["scope"], "allSources");
-        assert_eq!(value["rules"][2]["order"], "sourceOrder");
-        assert_eq!(value["rules"][2]["padding"], 3);
-        assert_eq!(
-            value["rows"][0]["proposedDisplay"],
-            "final-report.txt.bak-003"
-        );
+        assert_eq!(value["rules"][5]["scope"], "allSources");
+        assert_eq!(value["rules"][5]["order"], "sourceOrder");
+        assert_eq!(value["rules"][5]["padding"], 3);
+        assert_eq!(value["rows"][0]["proposedDisplay"], "final_réport.md-003");
         assert_eq!(value["rows"][0]["trace"][0]["ruleId"], 7);
         assert_eq!(value["rows"][0]["trace"][1]["ruleId"], 9);
         assert_eq!(value["rows"][0]["trace"][2]["ruleId"], 13);
+        assert_eq!(value["rows"][0]["trace"][5]["ruleId"], 23);
         assert!(!document.contains('/'));
         Ok(())
     }
@@ -1932,6 +2080,15 @@ mod tests {
                 separator: "-".to_owned(),
             }],
         };
+        let invalid_extension = RulePipelineRequestDto {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: vec![RuleRequestDto::Extension {
+                rule_id: 103,
+                enabled: false,
+                operation: ExtensionOperationDto::Replace,
+                value: ".sensitive-extension".to_owned(),
+            }],
+        };
 
         let regex_error = compile_rule_request(&invalid_regex).err();
         let duplicate_error = compile_rule_request(&duplicate).err();
@@ -1939,6 +2096,7 @@ mod tests {
         let sequence_error = compile_rule_request(&invalid_sequence).err();
         let padding_error = compile_rule_request(&invalid_padding).err();
         let start_error = compile_rule_request(&invalid_start).err();
+        let extension_error = compile_rule_request(&invalid_extension).err();
 
         assert_eq!(
             regex_error.map(|error| (error.rule_id, error.kind)),
@@ -1963,6 +2121,15 @@ mod tests {
         assert_eq!(
             start_error.map(|error| (error.rule_id, error.kind)),
             Some((Some(101), RuleRequestErrorKind::InvalidSequenceStart))
+        );
+        assert_eq!(
+            extension_error.map(|error| (error.rule_id, error.kind)),
+            Some((Some(103), RuleRequestErrorKind::InvalidExtensionReplacement))
+        );
+        assert!(
+            !extension_error
+                .map_or(String::new(), |error| error.to_string())
+                .contains("sensitive-extension")
         );
         assert!(
             !regex_error
