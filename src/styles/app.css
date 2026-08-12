@@ -794,6 +794,44 @@ select:focus-visible {
   border-block-end: var(--rule-thin) solid var(--color-rule);
 }
 
+.diagnostic-filter-controls {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-2);
+  padding-block-start: var(--space-2);
+  border-block-start: var(--rule-thin) solid var(--color-rule);
+}
+
+.diagnostic-filter-controls label {
+  display: grid;
+  flex: 1 1 12rem;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--color-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.diagnostic-filter-controls input,
+.diagnostic-filter-controls select {
+  width: 100%;
+  min-height: var(--control-height);
+  padding-inline: var(--space-3);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-raised);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .filter-group {
   display: flex;
   flex-wrap: wrap;
@@ -843,6 +881,21 @@ select:focus-visible {
 
 .virtual-table {
   overflow: hidden;
+}
+
+.filter-empty-state {
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+}
+
+.filter-empty-state strong {
+  display: block;
+}
+
+.filter-empty-state p {
+  margin: var(--space-2) auto var(--space-4);
+  color: var(--color-muted);
+  font-size: 0.875rem;
 }
 
 .virtual-viewport table {
@@ -1257,6 +1310,12 @@ select:focus-visible {
     min-height: var(--control-height);
   }
 
+  .diagnostic-filter-controls,
+  .diagnostic-filter-controls label,
+  .diagnostic-filter-controls .button {
+    width: 100%;
+  }
+
   .rule-editor .rule-toggle {
     min-height: var(--control-height);
   }
@@ -1402,6 +1461,8 @@ select:focus-visible {
   input:focus-visible,
   select:focus-visible,
   .input-shell:focus-within,
+  .diagnostic-filter-controls input:focus-visible,
+  .diagnostic-filter-controls select:focus-visible,
   .ledger-heading h2:focus-visible {
     outline: 3px solid Highlight;
     outline-offset: 2px;
@@ -1410,6 +1471,8 @@ select:focus-visible {
   .button,
   .filter-button,
   .input-shell,
+  .diagnostic-filter-controls input,
+  .diagnostic-filter-controls select,
   .ledger-inspection,
   .ledger-panel li,
   .plan-inspector,
