@@ -7,9 +7,6 @@ param(
     [string]$OutputDirectory,
 
     [Parameter(Mandatory = $true)]
-    [string]$PortableSourcePath,
-
-    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-fA-F]{40}$')]
     [string]$SourceSha,
 
@@ -49,11 +46,12 @@ if ([string]$tauriConfig.bundle.windows.nsis.installMode -cne 'currentUser') {
     throw "The Windows installer must use the explicit current-user install mode."
 }
 
-$portableSource = (Resolve-Path -LiteralPath $PortableSourcePath -ErrorAction Stop).Path
+$releaseDirectory = Join-Path $root 'target/release'
+$portableSource = Join-Path $releaseDirectory 'renamewright-app.exe'
 if (-not (Test-Path -LiteralPath $portableSource -PathType Leaf)) {
-    throw "The lifecycle-verified portable executable is unavailable."
+    throw "The independently built Windows application executable is unavailable."
 }
-$nsisDirectory = Join-Path $root 'target/release/bundle/nsis'
+$nsisDirectory = Join-Path $releaseDirectory 'bundle/nsis'
 if (-not (Test-Path -LiteralPath $nsisDirectory -PathType Container)) {
     throw "The NSIS bundle directory was not produced."
 }
