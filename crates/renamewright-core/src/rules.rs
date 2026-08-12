@@ -12,6 +12,7 @@ use unicode_normalization::UnicodeNormalization;
 
 pub const MAX_RULES: usize = 32;
 pub const MAX_RULE_TEXT_BYTES: usize = 4_096;
+pub const MAX_RULE_OUTPUT_BYTES: usize = 4_096;
 pub const MAX_SEQUENCE_PADDING: u8 = 20;
 const MAX_COMPILED_REGEX_BYTES: usize = 1_048_576;
 
@@ -405,10 +406,13 @@ impl RulePipeline {
         name: &OsStr,
         sequence_value: Option<u64>,
     ) -> Result<OsString, RuleApplicationError> {
+        if name.len() > MAX_RULE_OUTPUT_BYTES {
+            return Err(RuleApplicationError::OutputTooLong);
+        }
         let Some(rule) = self.compiled.get(index) else {
             return Ok(name.to_os_string());
         };
-        match rule {
+        let proposed = match rule {
             CompiledRule::Prefix(value) => {
                 let mut proposed = OsString::from(value);
                 proposed.push(name);
@@ -424,12 +428,12 @@ impl RulePipeline {
                 replacement,
             } => name
                 .to_str()
-                .map(|text| OsString::from(text.replace(search, replacement)))
-                .ok_or(RuleApplicationError::UnsupportedEncoding),
+                .ok_or(RuleApplicationError::UnsupportedEncoding)
+                .and_then(|text| replace_literal_bounded(text, search, replacement)),
             CompiledRule::RegexReplace { regex, replacement } => name
                 .to_str()
-                .map(|text| OsString::from(regex.replace_all(text, replacement).as_ref()))
-                .ok_or(RuleApplicationError::UnsupportedEncoding),
+                .ok_or(RuleApplicationError::UnsupportedEncoding)
+                .and_then(|text| replace_regex_bounded(text, regex, replacement)),
             CompiledRule::Sequence {
                 padding,
                 placement,
@@ -483,6 +487,11 @@ impl RulePipeline {
             } => apply_unicode_part(name, *target, |text| {
                 apply_character_class(text, *operation, matcher)
             }),
+        }?;
+        if proposed.len() > MAX_RULE_OUTPUT_BYTES {
+            Err(RuleApplicationError::OutputTooLong)
+        } else {
+            Ok(proposed)
         }
     }
 }
@@ -491,6 +500,56 @@ impl RulePipeline {
 pub(crate) enum RuleApplicationError {
     UnsupportedEncoding,
     SequenceOverflow,
+    OutputTooLong,
+}
+
+fn append_bounded(output: &mut String, value: &str) -> Result<(), RuleApplicationError> {
+    let Some(next_len) = output.len().checked_add(value.len()) else {
+        return Err(RuleApplicationError::OutputTooLong);
+    };
+    if next_len > MAX_RULE_OUTPUT_BYTES {
+        return Err(RuleApplicationError::OutputTooLong);
+    }
+    output.push_str(value);
+    Ok(())
+}
+
+fn replace_literal_bounded(
+    input: &str,
+    search: &str,
+    replacement: &str,
+) -> Result<OsString, RuleApplicationError> {
+    let mut output = String::with_capacity(input.len());
+    let mut consumed = 0;
+    for (offset, matched) in input.match_indices(search) {
+        append_bounded(&mut output, &input[consumed..offset])?;
+        append_bounded(&mut output, replacement)?;
+        consumed = offset + matched.len();
+    }
+    append_bounded(&mut output, &input[consumed..])?;
+    Ok(output.into())
+}
+
+fn replace_regex_bounded(
+    input: &str,
+    regex: &Regex,
+    replacement: &str,
+) -> Result<OsString, RuleApplicationError> {
+    let mut output = String::with_capacity(input.len());
+    let mut consumed = 0;
+    for captures in regex.captures_iter(input) {
+        let Some(matched) = captures.get(0) else {
+            continue;
+        };
+        append_bounded(&mut output, &input[consumed..matched.start()])?;
+        captures.expand(replacement, &mut output);
+        if output.len() > MAX_RULE_OUTPUT_BYTES {
+            return Err(RuleApplicationError::OutputTooLong);
+        }
+        consumed = matched.end();
+    }
+    append_bounded(&mut output, &input[consumed..])?;
+    Ok(output.into())
 }
 
 fn compile_rule(index: usize, rule: &RenameRule) -> Result<CompiledRule, RuleValidationError> {

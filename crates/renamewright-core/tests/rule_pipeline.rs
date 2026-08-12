@@ -2,10 +2,11 @@ use std::error::Error;
 use std::ffi::OsString;
 
 use renamewright_core::{
-    CaseMode, CharacterClass, CharacterClassOperation, DiagnosticCode, FilenamePart, MAX_RULES,
-    ParentId, PlanId, RangeOperation, RangeOrigin, RenameRule, RulePipeline,
-    RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope, SourceId,
-    SourceSnapshot, TargetPolicy, UnicodeNormalizationForm, build_plan_with_rule_pipeline,
+    CaseMode, CharacterClass, CharacterClassOperation, DiagnosticCode, FilenamePart,
+    MAX_RULE_OUTPUT_BYTES, MAX_RULES, ParentId, PlanId, RangeOperation, RangeOrigin, RenameRule,
+    RulePipeline, RuleValidationErrorKind, SequenceOrder, SequencePlacement, SequenceScope,
+    SourceId, SourceSnapshot, TargetPolicy, UnicodeNormalizationForm,
+    build_plan_with_rule_pipeline,
 };
 
 fn source(name: &str) -> SourceSnapshot {
@@ -82,6 +83,53 @@ fn regex_replacement_expands_numbered_and_named_captures() -> Result<(), Box<dyn
     )?;
 
     assert_eq!(proposed, "report.txt-2026-08");
+    Ok(())
+}
+
+#[test]
+fn expanding_replacements_stop_before_oversized_trace() -> Result<(), Box<dyn Error>> {
+    for rule in [
+        RenameRule::regex_replace("", "x".repeat(MAX_RULE_OUTPUT_BYTES)),
+        RenameRule::literal_replace("a", "x".repeat(MAX_RULE_OUTPUT_BYTES / 4)),
+    ] {
+        let pipeline = RulePipeline::compile(vec![rule])?;
+        let plan = build_plan_with_rule_pipeline(
+            PlanId::new(2),
+            1,
+            &[source("aaaaaaaa")],
+            &pipeline,
+            TargetPolicy::windows(),
+        );
+        let row = &plan.rows()[0];
+
+        assert_eq!(row.proposed_display(), "aaaaaaaa");
+        assert!(row.trace().is_empty());
+        assert!(
+            row.diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DiagnosticCode::NameTooLong)
+        );
+    }
+
+    let pipeline = RulePipeline::compile(vec![
+        RenameRule::regex_replace("", "x".repeat(MAX_RULE_OUTPUT_BYTES / 4)),
+        RenameRule::regex_replace("", "x".repeat(MAX_RULE_OUTPUT_BYTES / 4)),
+    ])?;
+    let plan = build_plan_with_rule_pipeline(
+        PlanId::new(3),
+        1,
+        &[source("a")],
+        &pipeline,
+        TargetPolicy::windows(),
+    );
+    let row = &plan.rows()[0];
+    assert_eq!(row.proposed_name().len(), MAX_RULE_OUTPUT_BYTES / 2 + 1);
+    assert_eq!(row.trace().len(), 1);
+    assert!(
+        row.diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::NameTooLong)
+    );
     Ok(())
 }
 
