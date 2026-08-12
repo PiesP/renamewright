@@ -4,6 +4,7 @@ import workflow from '../../.github/workflows/windows-acceptance.yaml?raw';
 import cargoPolicy from '../../deny.toml?raw';
 import packager from '../../scripts/prepare-windows-acceptance.ps1?raw';
 import lifecycle from '../../scripts/test-windows-package-lifecycle.ps1?raw';
+import installerHooks from '../../src-tauri/installer-hooks.nsh?raw';
 import tauriConfigText from '../../src-tauri/tauri.conf.json?raw';
 
 test('keeps Windows acceptance manual, read-only, pinned, and source-bound', () => {
@@ -45,11 +46,17 @@ test('rejects stale packaging output and records immutable checksums and limitat
 
 test('makes current-user data retention and downgrade refusal explicit package policy', () => {
   const config = JSON.parse(tauriConfigText) as {
-    bundle: { windows: { allowDowngrades: boolean; nsis: { installMode: string } } };
+    bundle: {
+      windows: {
+        allowDowngrades: boolean;
+        nsis: { installMode: string; installerHooks: string };
+      };
+    };
   };
 
   expect(config.bundle.windows.allowDowngrades).toBe(false);
   expect(config.bundle.windows.nsis.installMode).toBe('currentUser');
+  expect(config.bundle.windows.nsis.installerHooks).toBe('installer-hooks.nsh');
   expect(packager).toContain(
     'Installed and portable executables use the same current-user data roots.'
   );
@@ -90,12 +97,18 @@ test('proves upgrade, portable payload, downgrade refusal, uninstall, and data r
     "The installed package version was '$actual' instead of '$Expected'."
   );
   expect(lifecycle).toContain('The refused downgrade changed the installed executable.');
+  expect(lifecycle).toContain('The refused downgrade reported a successful package operation.');
   expect(lifecycle).toContain('The uninstaller did not remove the application directory.');
   expect(lifecycle).toContain('journalDataRetained = $true');
   expect(lifecycle).toContain('webviewDataRetained = $true');
   expect(lifecycle).toContain('sharedDataRootContractVerified = $true');
   expect(packager).toContain("$lifecycleEvidenceName = 'windows-lifecycle-evidence.json'");
   expect(packager).toContain('$lifecycleEvidence.checks.$check -ne $true');
+  expect(installerHooks).toContain('!macro NSIS_HOOK_PREINSTALL');
+  expect(installerHooks).toContain(`nsis_tauri_utils::SemverCompare "\${VERSION}" $R8`);
+  expect(installerHooks).toContain(`\${If} $R9 = -1`);
+  expect(installerHooks).toContain('SetErrorLevel 2');
+  expect(installerHooks).toContain('Quit');
 });
 
 test('verifies release-evidence tools before enforcing policy or generating an SBOM', () => {

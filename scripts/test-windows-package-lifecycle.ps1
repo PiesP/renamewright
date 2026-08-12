@@ -234,6 +234,9 @@ try {
 
     $installedDigestBeforeDowngrade = (Get-FileHash -LiteralPath $currentExecutable -Algorithm SHA256).Hash
     $downgradeExitCode = Invoke-SilentPackage -Path $previousInstaller -RequireSuccess $false
+    if ($downgradeExitCode -eq 0) {
+        throw 'The refused downgrade reported a successful package operation.'
+    }
     $afterDowngradeRecord = Get-InstallRecord
     Assert-Version -Record $afterDowngradeRecord -Expected $CurrentVersion
     $afterDowngradeExecutable = Get-InstalledExecutable -Record $afterDowngradeRecord
