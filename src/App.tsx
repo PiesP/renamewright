@@ -13,6 +13,16 @@ import {
   type UndoInspection,
 } from './planning/client';
 import {
+  addPreset,
+  deletePreset,
+  emptyPresetDocument,
+  MAX_PRESETS,
+  type PresetDocument,
+  type PresetStorage,
+  readPresetDocument,
+  writePresetDocument,
+} from './planning/presets';
+import {
   createRule,
   type FilenamePart,
   MAX_RULES,
@@ -28,6 +38,7 @@ import { VirtualPlanTable } from './planning/VirtualPlanTable';
 
 interface AppProps {
   client?: PlanningClient;
+  presetStorage?: PresetStorage;
 }
 
 interface RuleTextInputProps {
@@ -120,6 +131,8 @@ export function App(props: AppProps) {
   const planningClient = props.client ?? createPlanningClient();
   const [rules, setRules] = createSignal<RuleRequest[]>([createRule(1, 'prefix')]);
   const [overrides, setOverrides] = createSignal<SourceOverride[]>([]);
+  const [presetDocument, setPresetDocument] = createSignal<PresetDocument>(emptyPresetDocument());
+  const [presetName, setPresetName] = createSignal('');
   const [newRuleKind, setNewRuleKind] = createSignal<RuleKind>('suffix');
   const [ruleError, setRuleError] = createSignal<{
     code: string;
@@ -208,14 +221,18 @@ export function App(props: AppProps) {
     }
   };
 
-  const schedulePreview = () => {
+  const schedulePreview = (successNotice?: string) => {
     if (plan()) {
       if (previewTimer !== undefined) {
         window.clearTimeout(previewTimer);
       }
       previewTimer = window.setTimeout(() => {
         previewTimer = undefined;
-        void run(() => planningClient.previewRules(currentRuleRequest()));
+        void run(() => planningClient.previewRules(currentRuleRequest())).then(() => {
+          if (successNotice && !error()) {
+            setNotice(successNotice);
+          }
+        });
       }, 120);
     }
   };
@@ -239,6 +256,52 @@ export function App(props: AppProps) {
     }
     setRules((current) => [...current, createRule(nextRuleId++, newRuleKind())]);
     schedulePreview();
+  };
+
+  const savePreset = () => {
+    setError('');
+    setNotice('');
+    try {
+      const next = addPreset(presetDocument(), presetName(), rules());
+      writePresetDocument(props.presetStorage ?? window.localStorage, next);
+      setPresetDocument(next);
+      setPresetName('');
+      setNotice('Local rule preset saved.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The local preset could not be saved.');
+    }
+  };
+
+  const applyPreset = (presetId: number) => {
+    const preset = presetDocument().presets.find((candidate) => candidate.presetId === presetId);
+    if (!preset) {
+      return;
+    }
+    const nextRules = structuredClone(preset.rules);
+    setRules(nextRules);
+    nextRuleId = nextRules.reduce((maximum, rule) => Math.max(maximum, rule.ruleId), 0) + 1;
+    setRuleError(undefined);
+    setError('');
+    setNotice('');
+    const appliedNotice = `Preset “${preset.name}” applied. Source overrides were preserved.`;
+    if (plan()) {
+      schedulePreview(appliedNotice);
+    } else {
+      setNotice(appliedNotice);
+    }
+  };
+
+  const removePreset = (presetId: number) => {
+    setError('');
+    setNotice('');
+    try {
+      const next = deletePreset(presetDocument(), presetId);
+      writePresetDocument(props.presetStorage ?? window.localStorage, next);
+      setPresetDocument(next);
+      setNotice('Local rule preset deleted. The current rules were not changed.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The local preset could not be deleted.');
+    }
   };
 
   const removeRule = (ruleId: number) => {
@@ -302,6 +365,24 @@ export function App(props: AppProps) {
       setNotice(exported ? 'Plan JSON exported.' : 'Plan export cancelled.');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The plan document could not be exported.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportCurrentPlanCsv = async () => {
+    const current = plan();
+    if (!current) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const exported = await planningClient.exportPlanCsv(current.planId);
+      setNotice(exported ? 'Plan CSV exported.' : 'Plan CSV export cancelled.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The plan CSV could not be exported.');
     } finally {
       setBusy(false);
     }
@@ -470,6 +551,15 @@ export function App(props: AppProps) {
   };
 
   onMount(() => {
+    try {
+      const loaded = readPresetDocument(props.presetStorage ?? window.localStorage);
+      setPresetDocument(loaded.document);
+      if (loaded.migrated) {
+        setNotice('Local rule presets were updated to the current format.');
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Local presets could not be loaded.');
+    }
     void planningClient
       .listLedger()
       .then(setLedger)
@@ -1344,6 +1434,76 @@ export function App(props: AppProps) {
             </div>
             <p class="field-help">Rules run from top to bottom. Up to {MAX_RULES} are allowed.</p>
           </div>
+          <section class="preset-panel" aria-labelledby="preset-heading">
+            <div class="preset-heading">
+              <div>
+                <h2 id="preset-heading">Local presets</h2>
+                <span>
+                  {presetDocument().presets.length}/{MAX_PRESETS}
+                </span>
+              </div>
+              <p>Shared rules only. Source overrides stay with the current plan.</p>
+            </div>
+            <form
+              class="preset-save"
+              onSubmit={(event) => {
+                event.preventDefault();
+                savePreset();
+              }}
+            >
+              <label for="preset-name">Preset name</label>
+              <div>
+                <input
+                  id="preset-name"
+                  type="text"
+                  value={presetName()}
+                  autocomplete="off"
+                  onInput={(event) => setPresetName(event.currentTarget.value)}
+                />
+                <button
+                  class="button button-secondary"
+                  type="submit"
+                  disabled={presetDocument().presets.length >= MAX_PRESETS}
+                >
+                  Save preset
+                </button>
+              </div>
+            </form>
+            <Show
+              when={presetDocument().presets.length > 0}
+              fallback={<p class="preset-empty">No local presets saved.</p>}
+            >
+              <ul aria-label="Saved local presets">
+                <For each={presetDocument().presets}>
+                  {(preset) => (
+                    <li>
+                      <div>
+                        <strong>{preset.name}</strong>
+                        <span>{preset.rules.length} rules</span>
+                      </div>
+                      <div class="preset-actions">
+                        <button
+                          class="button button-secondary button-compact"
+                          type="button"
+                          onClick={() => applyPreset(preset.presetId)}
+                        >
+                          Apply
+                        </button>
+                        <button
+                          class="button button-secondary button-compact preset-delete"
+                          type="button"
+                          aria-label={`Delete preset ${preset.name}`}
+                          onClick={() => removePreset(preset.presetId)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
+          </section>
           <div class="scope-note">
             <strong>Current scope</strong>
             <p>
@@ -1707,6 +1867,19 @@ export function App(props: AppProps) {
                 onClick={() => void exportCurrentPlan()}
               >
                 Export JSON…
+              </button>
+              <button
+                class="button button-secondary"
+                type="button"
+                disabled={!planningClient.nativeSelectionAvailable || busy()}
+                title={
+                  planningClient.nativeSelectionAvailable
+                    ? undefined
+                    : 'CSV export is available in the desktop app.'
+                }
+                onClick={() => void exportCurrentPlanCsv()}
+              >
+                Export CSV…
               </button>
             </div>
           </dialog>
