@@ -1,5 +1,5 @@
-/* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V4 · genre: modern-minimal · macrostructure: Workbench · theme: Cobalt · anchor: cobalt blue · nav: desktop source bar · footer: persistent review bar · contrast: pass (40–41) · slop: pass (42–49) · mobile: pass (34, 49–57) */
-/* Hallmark · component: Rename Ledger Undo · genre: modern-minimal · theme: Cobalt
+/* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V4 · genre: modern-minimal · macrostructure: Workbench · variation: flat transaction activity + compound diagnostics · theme: Cobalt · anchor: cobalt blue · nav: desktop source bar · footer: persistent review bar · contrast: pass (40–41) · slop: pass (1–58) · mobile: pass (34, 49–57) */
+/* Hallmark · component: Diagnostic Explorer + Transaction Activity · genre: modern-minimal · theme: Cobalt
  * states: default · hover · focus · active · disabled · loading · error · success
  * contrast: pass (40–41)
  */
@@ -214,10 +214,15 @@ select:focus-visible {
 
 .workbench-grid {
   display: grid;
+  grid-template-areas:
+    "rules"
+    "activity"
+    "preview";
   min-width: 0;
 }
 
 .rule-rail {
+  grid-area: rules;
   padding: var(--space-6) var(--space-4);
   border-block-end: var(--rule-thin) solid var(--color-rule);
   background: var(--color-paper-raised);
@@ -572,9 +577,11 @@ select:focus-visible {
 }
 
 .ledger-panel {
-  margin-block-start: var(--space-5);
-  padding-block-start: var(--space-5);
-  border-block-start: var(--rule-thin) solid var(--color-rule);
+  grid-area: activity;
+  min-width: 0;
+  padding: var(--space-6) var(--space-4);
+  border-block-end: var(--rule-thin) solid var(--color-rule);
+  background: var(--color-paper-soft);
 }
 
 .ledger-heading,
@@ -587,7 +594,7 @@ select:focus-visible {
 
 .ledger-heading h2 {
   margin: 0;
-  font-size: 1rem;
+  font-size: clamp(1.125rem, 2vw, 1.375rem);
 }
 
 .ledger-heading h2:focus-visible {
@@ -603,6 +610,17 @@ select:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.ledger-heading .transaction-kicker {
+  display: block;
+  margin-block-end: var(--space-1);
+  color: var(--color-accent);
+  font-family: var(--font-body);
+  font-size: 0.6875rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .ledger-panel > p {
   margin: var(--space-2) 0 var(--space-3);
   color: var(--color-muted);
@@ -610,9 +628,17 @@ select:focus-visible {
   line-height: 1.5;
 }
 
+.ledger-panel > .transaction-safety-boundary {
+  max-width: 72ch;
+  margin-block-start: calc(var(--space-2) * -1);
+  padding-inline-start: var(--space-3);
+  border-inline-start: 2px solid var(--color-accent);
+  color: var(--color-ink-soft);
+}
+
 .ledger-panel ul {
   display: grid;
-  gap: var(--space-2);
+  gap: 0;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -621,9 +647,12 @@ select:focus-visible {
 .ledger-panel li {
   align-items: flex-start;
   flex-wrap: wrap;
-  border: var(--rule-thin) solid var(--color-rule);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3);
+  padding: var(--space-3) 0;
+  border-block-start: var(--rule-thin) solid var(--color-rule);
+}
+
+.ledger-panel li:last-child {
+  border-block-end: var(--rule-thin) solid var(--color-rule);
 }
 
 .ledger-entry-summary {
@@ -647,6 +676,14 @@ select:focus-visible {
   align-items: flex-end;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+.ledger-entry-description {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
 }
 
 .ledger-entry-actions > span[data-recovery="true"] {
@@ -682,12 +719,13 @@ select:focus-visible {
   color: var(--color-ink);
 }
 
-.ledger-inspection strong,
+.ledger-inspection h3,
 .ledger-inspection span {
   display: block;
 }
 
-.ledger-inspection strong {
+.ledger-inspection h3 {
+  margin: 0;
   font-size: 0.875rem;
 }
 
@@ -735,6 +773,7 @@ select:focus-visible {
 }
 
 .preview-pane {
+  grid-area: preview;
   min-width: 0;
   padding: var(--space-6) var(--space-4) var(--space-12);
 }
@@ -794,6 +833,44 @@ select:focus-visible {
   border-block-end: var(--rule-thin) solid var(--color-rule);
 }
 
+.diagnostic-filter-controls {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-2);
+  padding-block-start: var(--space-2);
+  border-block-start: var(--rule-thin) solid var(--color-rule);
+}
+
+.diagnostic-filter-controls label {
+  display: grid;
+  flex: 1 1 12rem;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--color-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.diagnostic-filter-controls input,
+.diagnostic-filter-controls select {
+  width: 100%;
+  min-height: var(--control-height);
+  padding-inline: var(--space-3);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-raised);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .filter-group {
   display: flex;
   flex-wrap: wrap;
@@ -843,6 +920,21 @@ select:focus-visible {
 
 .virtual-table {
   overflow: hidden;
+}
+
+.filter-empty-state {
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+}
+
+.filter-empty-state strong {
+  display: block;
+}
+
+.filter-empty-state p {
+  margin: var(--space-2) auto var(--space-4);
+  color: var(--color-muted);
+  font-size: 0.875rem;
 }
 
 .virtual-viewport table {
@@ -1209,7 +1301,14 @@ select:focus-visible {
   }
 
   .workbench-grid {
+    grid-template-areas:
+      "rules activity"
+      "rules preview";
     grid-template-columns: minmax(15rem, 18rem) minmax(0, 1fr);
+  }
+
+  .ledger-panel {
+    padding-inline: var(--space-6);
   }
 
   .rule-rail {
@@ -1225,7 +1324,8 @@ select:focus-visible {
   }
 
   .rule-rail,
-  .preview-pane {
+  .preview-pane,
+  .ledger-panel {
     padding-inline: var(--space-8);
   }
 }
@@ -1255,6 +1355,12 @@ select:focus-visible {
   .table-action {
     min-width: var(--control-height);
     min-height: var(--control-height);
+  }
+
+  .diagnostic-filter-controls,
+  .diagnostic-filter-controls label,
+  .diagnostic-filter-controls .button {
+    width: 100%;
   }
 
   .rule-editor .rule-toggle {
@@ -1402,6 +1508,8 @@ select:focus-visible {
   input:focus-visible,
   select:focus-visible,
   .input-shell:focus-within,
+  .diagnostic-filter-controls input:focus-visible,
+  .diagnostic-filter-controls select:focus-visible,
   .ledger-heading h2:focus-visible {
     outline: 3px solid Highlight;
     outline-offset: 2px;
@@ -1410,6 +1518,8 @@ select:focus-visible {
   .button,
   .filter-button,
   .input-shell,
+  .diagnostic-filter-controls input,
+  .diagnostic-filter-controls select,
   .ledger-inspection,
   .ledger-panel li,
   .plan-inspector,

@@ -5,5 +5,12 @@
     "theme": "Cobalt",
     "enrichment": "none",
     "brief": "Read-only desktop workbench for reviewing deterministic batch rename plans"
+  },
+  {
+    "date": "2026-08-12",
+    "macrostructure": "Workbench",
+    "theme": "Cobalt",
+    "enrichment": "none",
+    "brief": "In-place diagnostic exploration and transaction recovery workflow"
   }
 ]

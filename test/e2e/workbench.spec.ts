@@ -157,7 +157,7 @@ test('keeps an inline override across shared rule changes and resets it safely',
     .fill('bad?.txt');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByText('1 blocked')).toBeVisible();
-  await expect(page.getByText('Illegal Windows character')).toBeVisible();
+  await expect(page.getByText('Illegal Windows character', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Execution unavailable' })).toBeDisabled();
 
   await page.getByRole('button', { name: 'Reset override for Quarterly review.pdf' }).click();
@@ -349,11 +349,12 @@ test('renders the path-free startup ledger at supported narrow widths', async ({
     await page.setViewportSize({ width, height: 900 });
     await page.goto('/');
 
-    await expect(page.getByRole('heading', { name: 'Rename Ledger' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Transaction activity' })).toBeVisible();
+    await expect(page.getByText('Rename Ledger')).toBeVisible();
     await expect(page.getByText('Plan 67')).toBeVisible();
     await expect(page.getByText('Inspection required')).toBeVisible();
     await page.getByRole('button', { name: 'Inspect plan 67 recovery' }).click();
-    const inspection = page.getByRole('status').filter({ hasText: 'Observation ready to record' });
+    const inspection = page.getByRole('region', { name: 'Observation ready to record' });
     await expect(inspection).toBeVisible();
     const inspectionBox = await inspection.boundingBox();
     const reviewBarBox = await page.locator('.review-bar').boundingBox();
@@ -431,8 +432,7 @@ test('keeps forward recovery cancellation above the mobile review bar', async ({
   await expect(page.getByRole('button', { name: 'Cancellation requested' })).toBeDisabled();
 
   const inspectionBox = await page
-    .getByRole('status')
-    .filter({ hasText: 'Identity checks passed' })
+    .getByRole('region', { name: 'Identity checks passed' })
     .boundingBox();
   const reviewBarBox = await page.locator('.review-bar').boundingBox();
   expect(inspectionBox).not.toBeNull();
@@ -484,7 +484,7 @@ test('keeps the path-free Undo inspection usable at supported widths', async ({ 
     await page.setViewportSize({ width, height: 900 });
     await page.goto('/');
     await page.getByRole('button', { name: 'Inspect plan 80 Undo' }).click();
-    const inspection = page.getByRole('status').filter({ hasText: 'Undo checks passed' });
+    const inspection = page.getByRole('region', { name: 'Undo checks passed' });
     await expect(inspection).toBeVisible();
     const undoButton = page.getByRole('button', { name: 'Undo rename' });
     await expect(undoButton).toBeVisible();
@@ -624,5 +624,17 @@ test('keeps a 10,000-source native preview responsive and windowed', async ({ pa
   await expect(page.getByText('Showing 10 of 10000')).toBeVisible();
   expect(Date.now() - filterStarted).toBeLessThan(1_000);
   expect(await page.getByRole('row').count()).toBe(11);
+
+  await page.getByRole('combobox', { name: 'Diagnostic' }).selectOption('occupiedDestination');
+  await page.getByRole('searchbox', { name: 'Affected source' }).fill('09000');
+  await expect(page.getByText('Showing 1 of 10000')).toBeVisible();
+  await expect(page.getByText('source-09000.txt', { exact: true })).toBeVisible();
+  expect(await page.getByRole('row').count()).toBe(2);
+
+  await page.getByRole('searchbox', { name: 'Affected source' }).fill('missing');
+  await expect(page.getByText('No sources match these filters.')).toBeVisible();
+  await page.locator('.filter-empty-state').getByRole('button', { name: 'Clear filters' }).click();
+  await expect(page.getByText('Showing 10000 of 10000')).toBeVisible();
+  expect(await page.getByRole('row').count()).toBeLessThan(30);
   expect(consoleErrors).toEqual([]);
 });

@@ -134,8 +134,11 @@ const english = {
   currentScopeDescription:
     'New plan execution remains locked. Recovery and Undo require fresh identity checks and native confirmation.',
   renameLedger: 'Rename Ledger',
+  transactionActivity: 'Transaction activity',
   ledgerDescription:
     'Inspect interrupted work or a completed rename before any native-confirmed action.',
+  transactionSafetyBoundary:
+    'Inspection is read-only. Mutation requires native confirmation, fresh identity validation, and no-replace journal execution.',
   renameJournalStatus: 'Rename journal status',
   undoOfPlan: 'Undo of plan {planId}',
   ledgerNumber: 'Ledger {ledgerId}',
@@ -163,6 +166,15 @@ const english = {
   ledgerTooLarge: 'Journal too large',
   ledgerDiscoveryLimitExceeded: 'Discovery limit reached',
   ledgerUnreadable: 'Journal unreadable',
+  ledgerTerminalCompletedDescription:
+    'Terminal outcome recorded: the rename transaction completed.',
+  ledgerTerminalRolledBackDescription:
+    'Terminal outcome recorded: every completed step was rolled back.',
+  ledgerInterruptedDescription:
+    'This transaction has no terminal record. Inspect it before choosing a recovery action.',
+  ledgerReconciliationDescription:
+    'The prepared step must be observed and recorded before recovery can continue.',
+  ledgerUnavailableDescription: 'This journal cannot offer a native action in its current state.',
   identityChecksPassed: 'Identity checks passed',
   observationReady: 'Observation ready to record',
   recoveryBlocked: 'Recovery is blocked',
@@ -236,6 +248,13 @@ const english = {
   filterChanged: 'Changed',
   filterBlocked: 'Blocked',
   filterUnchanged: 'Unchanged',
+  filterDiagnostic: 'Diagnostic',
+  filterAllDiagnostics: 'All diagnostics',
+  filterAffectedSource: 'Affected source',
+  filterAffectedSourcePlaceholder: 'report.pdf',
+  clearPlanFilters: 'Clear filters',
+  noFilteredRows: 'No sources match these filters.',
+  noFilteredRowsDescription: 'Change or clear the filters to return to the rename plan.',
   showingRows: 'Showing {visible} of {total}',
   scrollablePlan: 'Scrollable rename plan',
   columnSource: 'Source',
@@ -484,7 +503,10 @@ const korean = {
   currentScopeDescription:
     '새 계획 실행은 잠겨 있습니다. 복구와 실행 취소에는 최신 ID 검사와 네이티브 확인이 필요합니다.',
   renameLedger: '이름 변경 원장',
+  transactionActivity: '트랜잭션 활동',
   ledgerDescription: '중단된 작업이나 완료된 이름 변경을 네이티브 작업 전에 검토하세요.',
+  transactionSafetyBoundary:
+    '검토는 읽기 전용입니다. 변경에는 네이티브 확인, 최신 ID 검증, 덮어쓰지 않는 저널 실행이 필요합니다.',
   renameJournalStatus: '이름 변경 저널 상태',
   undoOfPlan: '계획 {planId} 실행 취소',
   ledgerNumber: '원장 {ledgerId}',
@@ -512,6 +534,13 @@ const korean = {
   ledgerTooLarge: '저널 크기 초과',
   ledgerDiscoveryLimitExceeded: '검색 한도 도달',
   ledgerUnreadable: '저널을 읽을 수 없음',
+  ledgerTerminalCompletedDescription: '종료 결과 기록됨: 이름 변경 트랜잭션이 완료되었습니다.',
+  ledgerTerminalRolledBackDescription: '종료 결과 기록됨: 완료된 모든 단계를 롤백했습니다.',
+  ledgerInterruptedDescription:
+    '이 트랜잭션에는 종료 기록이 없습니다. 복구 작업을 선택하기 전에 검토하세요.',
+  ledgerReconciliationDescription:
+    '복구를 계속하기 전에 준비 단계를 관찰하고 결과를 기록해야 합니다.',
+  ledgerUnavailableDescription: '현재 상태의 저널에는 네이티브 작업을 제공할 수 없습니다.',
   identityChecksPassed: 'ID 검사 통과',
   observationReady: '관찰 결과 기록 준비됨',
   recoveryBlocked: '복구가 차단됨',
@@ -580,6 +609,13 @@ const korean = {
   filterChanged: '변경됨',
   filterBlocked: '차단됨',
   filterUnchanged: '변경 없음',
+  filterDiagnostic: '진단',
+  filterAllDiagnostics: '모든 진단',
+  filterAffectedSource: '영향받는 원본',
+  filterAffectedSourcePlaceholder: '보고서.pdf',
+  clearPlanFilters: '필터 초기화',
+  noFilteredRows: '필터와 일치하는 원본이 없습니다.',
+  noFilteredRowsDescription: '필터를 변경하거나 초기화하여 이름 변경 계획으로 돌아가세요.',
   showingRows: '전체 {total}개 중 {visible}개 표시',
   scrollablePlan: '스크롤 가능한 이름 변경 계획',
   columnSource: '원본',

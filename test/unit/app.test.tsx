@@ -178,12 +178,27 @@ test('runs a path-free startup ledger action only after inspection', async () =>
 
   render(() => <App client={client} />);
 
-  expect(await screen.findByRole('heading', { name: 'Rename Ledger' })).toBeInTheDocument();
+  const transactionHeading = await screen.findByRole('heading', { name: 'Transaction activity' });
+  expect(transactionHeading).toBeInTheDocument();
+  expect(screen.getByText('Rename Ledger')).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      'Inspection is read-only. Mutation requires native confirmation, fresh identity validation, and no-replace journal execution.'
+    )
+  ).toBeInTheDocument();
+  expect(document.querySelector('.rule-rail')?.contains(transactionHeading)).toBe(false);
   expect(screen.getByText('Plan 67')).toBeInTheDocument();
   expect(screen.getByText('4 sources')).toBeInTheDocument();
   expect(screen.getByText('Inspection required')).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      'The prepared step must be observed and recorded before recovery can continue.'
+    )
+  ).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: 'Inspect plan 67 recovery' }));
-  expect(await screen.findByText('Observation ready to record')).toBeInTheDocument();
+  expect(
+    await screen.findByRole('region', { name: 'Observation ready to record' })
+  ).toBeInTheDocument();
   expect(screen.getByText(/prepared rename was not applied/iu)).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: 'Record observation' }));
   expect(applyRecoveryAction).toHaveBeenCalledWith('reconcile', inspection);
@@ -310,6 +325,9 @@ test('requests cancellation only while forward recovery is active', async () => 
   });
   expect(await screen.findByText('Rolled back')).toBeInTheDocument();
   expect(
+    screen.getByText('Terminal outcome recorded: every completed step was rolled back.')
+  ).toBeInTheDocument();
+  expect(
     screen.getByText('The interrupted rename transaction was rolled back.', {
       selector: '.live-status',
     })
@@ -378,7 +396,10 @@ test('runs Undo only from a fresh path-free inspection', async () => {
   render(() => <App client={client} />);
 
   await user.click(await screen.findByRole('button', { name: 'Inspect plan 80 Undo' }));
-  expect(await screen.findByText('Undo checks passed')).toBeInTheDocument();
+  expect(await screen.findByRole('region', { name: 'Undo checks passed' })).toBeInTheDocument();
+  expect(
+    screen.getByText('Terminal outcome recorded: the rename transaction completed.')
+  ).toBeInTheDocument();
   expect(screen.getByText('Plan 80 · 3 sources')).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: 'Undo rename' }));
 
@@ -419,7 +440,7 @@ test('explains why a fresh Undo inspection is blocked', async () => {
   render(() => <App client={client} />);
 
   await user.click(await screen.findByRole('button', { name: 'Inspect plan 82 Undo' }));
-  expect(await screen.findByText('Undo is blocked')).toBeInTheDocument();
+  expect(await screen.findByRole('region', { name: 'Undo is blocked' })).toBeInTheDocument();
   expect(screen.getByText(/original name is occupied/iu)).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Undo rename' })).not.toBeInTheDocument();
 });

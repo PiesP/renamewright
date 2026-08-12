@@ -1,15 +1,19 @@
 {
-  "date": "2026-08-11",
+  "date": "2026-08-12",
   "framework": "Solid 1.9 with Vite 8 in a Tauri 2 shell",
-  "fontStack": "none",
-  "palette": "none",
-  "motion": "motion-cut; no animation library",
-  "spacing": "none",
-  "preserve": ["Solid and Tauri application structure"],
+  "fontStack": "Space Grotesk Variable, Inter Variable, and JetBrains Mono Variable from local font packages",
+  "palette": "Cobalt OKLCH tokens in tokens.css",
+  "motion": "motion-cut; tokenized press and short state transitions; no animation library",
+  "spacing": "4pt token scale in tokens.css",
+  "preserve": [
+    "Solid and Tauri application structure",
+    "Workbench macrostructure and Cobalt theme",
+    "source bar, rule rail, preview pane, and review lock",
+    "Rust-owned native paths and opaque frontend identifiers"
+  ],
   "introduce": [
-    "Workbench macrostructure",
-    "Cobalt design tokens",
-    "accessible interaction states",
-    "slop-test gates"
+    "compound diagnostic exploration",
+    "separate transaction activity hierarchy",
+    "screen-reader recovery and Undo state announcements"
   ]
 }
