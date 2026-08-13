@@ -138,6 +138,9 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('[Environment]::UserInteractive');
   expect(interactive).toContain('Where-Object SessionId -eq $currentSessionId');
   expect(interactive).toContain('Windows UI Automation');
+  expect(interactive).toContain("'read_only_workbench=true'");
+  expect(interactive).toContain("'rule_actions_named=true'");
+  expect(interactive).toContain('inspectionProbeExposedReadOnlyWorkbench = $true');
   expect(interactive).toContain("$composedPrefix -cne '정리_한글'");
   expect(interactive).toContain("-Title 'Add files to Renamewright'");
   expect(interactive).toContain("-Name 'Prefix text'");
@@ -174,6 +177,7 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('GetDpiForWindow');
   expect(interactive).toContain('SetForegroundWindow');
   expect(interactive).toContain('Save-WindowScreenshot');
+  expect(interactive).toContain('PrintWindow');
   expect(interactive).toContain('GetWindowRect');
   expect(interactive).toContain('SetThreadDpiAwarenessContext');
   expect(interactive).toContain('PerMonitorAwareV2');
@@ -223,6 +227,7 @@ test('merges only intentional source-bound Windows acceptance configurations', (
   expect(matrixMerger).toContain('visual review did not bind both captured screenshots');
   expect(matrixMerger).toContain('$explorerDragDropRequired -and');
   expect(matrixMerger).toContain("'addFolderDisabled'");
+  expect(matrixMerger).toContain("'inspectionProbeExposedReadOnlyWorkbench'");
   expect(matrixMerger).not.toContain("'nativeFolderDialogOpened'");
   expect(matrixMerger).toContain('sources · [0-9]+ changed · [0-9]+ blocked');
   expect(matrixMerger).toContain('Assert-Screenshot');
