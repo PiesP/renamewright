@@ -9,7 +9,7 @@ test('builds default and automation native spike executables independently on Wi
   const automationBuild = workflow.indexOf('--features automation');
   const probeCopy = workflow.indexOf("'target/release/inspection-probe.exe'");
   const packageStep = workflow.indexOf('Prepare the source-bound native spike artifact');
-  const runtimeStep = workflow.indexOf('Exercise the Windows native spike runtime');
+  const runtimeStep = workflow.indexOf('Attempt the Windows native spike runtime');
   const uploadStep = workflow.indexOf('Upload the source-bound native spike artifact');
 
   expect(workflow).toContain('cargo test `\n            --package renamewright-native-spike');
@@ -68,6 +68,14 @@ test('exercises the exact Windows executables before uploading runtime evidence'
   expect(runtime).toContain("'default-process.stdout.txt'");
   expect(runtime).toContain("'default-process.stderr.txt'");
   expect(runtime).toContain('Get-ProcessFailureDetail');
+  expect(runtime).toContain('Get-TrimmedFileText -Path $OutputPath');
+  expect(runtime).toContain('Get-TrimmedFileText -Path $ErrorPath');
+  expect(runtime).toContain('[switch]$AllowHostedRendererUnavailable');
+  expect(runtime).toContain('hosted-runner-opengl-below-2');
+  expect(runtime).toContain('expectedRendererFailure = $true');
+  expect(runtime).toContain('egui_glow requires opengl 2.0+');
+  expect(workflow).toContain('-AllowHostedRendererUnavailable');
+  expect(workflow).not.toContain('continue-on-error');
   expect(runtime).toContain('-RedirectStandardOutput $defaultOutputPath');
   expect(runtime).toContain('-RedirectStandardError $defaultErrorPath');
   expect(runtime).toContain('-RedirectStandardOutput $automationOutputPath');

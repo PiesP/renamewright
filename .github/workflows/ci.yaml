@@ -263,7 +263,7 @@ jobs:
           -OutputDirectory 'native-spike-acceptance'
           -SourceSha $env:GITHUB_SHA
 
-      - name: Exercise the Windows native spike runtime
+      - name: Attempt the Windows native spike runtime
         shell: pwsh
         run: >-
           ./scripts/test-windows-native-spike-runtime.ps1
@@ -272,6 +272,7 @@ jobs:
           -InspectionProbePath 'target/native-spike-input/automation/inspection-probe.exe'
           -ArtifactDirectory 'native-spike-acceptance'
           -SourceSha $env:GITHUB_SHA
+          -AllowHostedRendererUnavailable
 
       - name: Upload the source-bound native spike artifact
         if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
