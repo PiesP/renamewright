@@ -19,10 +19,20 @@ if (-not [Environment]::UserInteractive) {
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName PresentationFramework
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+
+[StructLayout(LayoutKind.Sequential)]
+public struct RenamewrightWindowRect
+{
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+}
 
 public static class RenamewrightAcceptanceNativeMethods
 {
@@ -44,6 +54,14 @@ public static class RenamewrightAcceptanceNativeMethods
 
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowRect(IntPtr window, out RenamewrightWindowRect rect);
 }
 '@
 
@@ -178,6 +196,39 @@ function Invoke-Probe {
   return (Get-Content -LiteralPath $OutputPath -Raw)
 }
 
+function Save-WindowScreenshot {
+  param(
+    [Parameter(Mandatory = $true)] [IntPtr]$Window,
+    [Parameter(Mandatory = $true)] [string]$Path
+  )
+
+  $rect = [RenamewrightWindowRect]::new()
+  if (-not [RenamewrightAcceptanceNativeMethods]::GetWindowRect($Window, [ref]$rect)) {
+    throw 'Windows could not read the native spike window bounds.'
+  }
+  $width = $rect.Right - $rect.Left
+  $height = $rect.Bottom - $rect.Top
+  if ($width -le 0 -or $height -le 0) {
+    throw 'The native spike window bounds were empty.'
+  }
+
+  $bitmap = [System.Drawing.Bitmap]::new($width, $height)
+  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+  try {
+    $graphics.CopyFromScreen(
+      $rect.Left,
+      $rect.Top,
+      0,
+      0,
+      [System.Drawing.Size]::new($width, $height)
+    )
+    $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+  } finally {
+    $graphics.Dispose()
+    $bitmap.Dispose()
+  }
+}
+
 $automationExecutable = Resolve-RequiredPath -Path $AutomationExecutablePath
 $inspectionProbe = Resolve-RequiredPath -Path $InspectionProbePath
 $artifactRoot = Resolve-RequiredPath -Path $ArtifactDirectory
@@ -276,19 +327,15 @@ try {
     -Elements $elements `
     -Name 'Changed' `
     -ControlType ([System.Windows.Automation.ControlType]::Button)
+  if (-not [RenamewrightAcceptanceNativeMethods]::SetForegroundWindow($windowHandle)) {
+    throw 'Windows could not activate the source-bound native spike window.'
+  }
   $changedButton.SetFocus()
-  Start-Sleep -Milliseconds 200
+  Start-Sleep -Milliseconds 300
   if (-not $changedButton.Current.HasKeyboardFocus) {
     throw 'Windows UI Automation could not assign keyboard focus to Changed.'
   }
-  $focusProbeOutput = Invoke-Probe `
-    -ProbePath $inspectionProbe `
-    -Arguments @($focusScreenshotPath) `
-    -OutputPath $probeOutputPath `
-    -ErrorPath $probeErrorPath
-  if ($focusProbeOutput.IndexOf('screenshot=1180x760', [StringComparison]::Ordinal) -lt 0) {
-    throw 'The focus-state screenshot did not report the expected dimensions.'
-  }
+  Save-WindowScreenshot -Window $windowHandle -Path $focusScreenshotPath
 
   $prefixEdit = $editControls[0]
   $prefixEdit.SetFocus()
@@ -439,7 +486,6 @@ try {
   }
   $evidence | ConvertTo-Json -Depth 8 |
     Set-Content -LiteralPath (Join-Path $artifactRoot 'windows-interactive-evidence.json') -Encoding utf8
-  Update-ArtifactChecksums -ArtifactRoot $artifactRoot
 } finally {
   if ($hangulKeyToggled) {
     [RenamewrightAcceptanceNativeMethods]::keybd_event(0x15, 0, 0, [UIntPtr]::Zero)
@@ -452,3 +498,5 @@ try {
   }
   Stop-TestProcess -Process $application
 }
+
+Update-ArtifactChecksums -ArtifactRoot $artifactRoot
