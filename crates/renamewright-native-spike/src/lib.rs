@@ -81,6 +81,7 @@ pub mod automation {
     pub const MAX_AUTOMATION_TEXT_BYTES: usize = 4 * 1024;
     pub const MAX_AUTOMATION_EVENTS: usize = 256;
     pub const MAX_AUTOMATION_REQUESTS_PER_CONNECTION: usize = 128;
+    pub const MAX_AUTOMATION_SOURCES: usize = 10_000;
     const MAX_AUTOMATION_RELATIVE_PATH_BYTES: usize = 4 * 1024;
     const MAX_AUTOMATION_CONNECTION_DURATION: Duration = Duration::from_secs(120);
     const AUTOMATION_IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -153,6 +154,10 @@ pub mod automation {
         source_query: Option<String>,
         #[serde(default)]
         filter: Option<AutomationFilter>,
+        #[serde(default)]
+        sources: Vec<String>,
+        #[serde(skip)]
+        resolved_sources: Vec<PathBuf>,
     }
 
     impl AutomationFixture {
@@ -168,6 +173,10 @@ pub mod automation {
                     .source_query
                     .as_ref()
                     .is_some_and(|value| value.len() > MAX_AUTOMATION_TEXT_BYTES)
+                || fixture.sources.len() > MAX_AUTOMATION_SOURCES
+                || fixture.sources.iter().any(|source| {
+                    source.is_empty() || source.len() > MAX_AUTOMATION_RELATIVE_PATH_BYTES
+                })
             {
                 return Err(AutomationRootError::new(
                     AutomationRootErrorKind::InvalidFixture,
@@ -189,6 +198,11 @@ pub mod automation {
         #[must_use]
         pub const fn filter(&self) -> Option<AutomationFilter> {
             self.filter
+        }
+
+        #[must_use]
+        pub fn sources(&self) -> &[PathBuf] {
+            &self.resolved_sources
         }
     }
 
@@ -316,7 +330,25 @@ pub mod automation {
             &self,
             relative: &Path,
         ) -> Result<AutomationFixture, AutomationRootError> {
-            AutomationFixture::parse(&self.read_fixture(relative)?)
+            let mut fixture = AutomationFixture::parse(&self.read_fixture(relative)?)?;
+            let mut resolved_sources = Vec::with_capacity(fixture.sources.len());
+            for relative_source in &fixture.sources {
+                let relative_source = Path::new(relative_source);
+                validate_relative_path(relative_source)?;
+                let candidate = self.fixture_root.join(relative_source);
+                verify_existing_path(&self.fixture_root, &candidate)?;
+                let metadata = fs::metadata(&candidate).map_err(|_| {
+                    AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+                })?;
+                if !metadata.is_file() {
+                    return Err(AutomationRootError::new(
+                        AutomationRootErrorKind::FixtureUnavailable,
+                    ));
+                }
+                resolved_sources.push(candidate);
+            }
+            fixture.resolved_sources = resolved_sources;
+            Ok(fixture)
         }
     }
 
@@ -1451,7 +1483,15 @@ impl NativeSpikeApp {
                     automation::AutomationFilter::Blocked => PlanFilter::Blocked,
                 };
             }
-            app.status = "Automation fixture loaded".to_owned();
+            if fixture.sources().is_empty() {
+                app.status = "Automation fixture loaded".to_owned();
+            } else {
+                app.admit_sources(fixture.sources().to_vec());
+                app.status = format!(
+                    "Automation fixture loaded · {} sources",
+                    fixture.sources().len()
+                );
+            }
         }
         app._automation_root = Some(automation_root);
         app
@@ -2621,6 +2661,30 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_input_edits_and_traverses_the_selected_rule() -> Result<(), Box<dyn Error>> {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), NativeSpikeApp::new(false));
+
+        let prefix = harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, semantics::PREFIX_LABEL);
+        prefix.click();
+        harness.run_ok();
+        assert!(harness.get_by_label(semantics::PREFIX_LABEL).is_focused());
+        harness.event(egui::Event::Text("한글".to_owned()));
+        harness.run_ok();
+        harness.key_press(egui::Key::Tab);
+        harness.run_ok();
+
+        let Some(RuleRequestDto::Prefix { value, .. }) = harness.state().rules.first() else {
+            return Err("the selected prefix rule was missing".into());
+        };
+        assert!(value.contains("한글"));
+        assert!(harness.get_by_label(semantics::PRESET_NAME).is_focused());
+        Ok(())
+    }
+
+    #[test]
     fn native_presets_persist_and_restore_ordered_rules() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let preset_path = directory.path().join("presets.json");
@@ -2728,6 +2792,33 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_fixture_admits_only_confined_real_sources() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let fixtures = directory.path().join("fixtures");
+        fs::create_dir(&fixtures)?;
+        fs::write(fixtures.join("report.txt"), b"report")?;
+        fs::write(
+            fixtures.join("session.json"),
+            br#"{"schemaVersion":1,"prefix":"final-","sources":["report.txt"]}"#,
+        )?;
+        let root = AutomationRoot::open(directory.path())?;
+        let fixture = root.load_fixture(Path::new("session.json"))?;
+        assert_eq!(fixture.sources().len(), 1);
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                NativeSpikeApp::new_automated(NativePalette::default(), root, Some(&fixture)),
+            );
+        harness.get_by_label("report.txt");
+        harness.get_by_label("final-report.txt");
+        harness.get_by_label("Automation fixture loaded · 1 sources");
+        Ok(())
+    }
+
     #[cfg(all(feature = "automation", unix))]
     #[test]
     fn automation_fixture_rejects_symlink_escape() -> Result<(), Box<dyn Error>> {
@@ -2738,10 +2829,18 @@ mod tests {
         fs::write(outside.path().join("secret.json"), b"secret")?;
         fs::create_dir(directory.path().join("fixtures"))?;
         symlink(outside.path(), directory.path().join("fixtures/escape"))?;
+        fs::write(
+            directory.path().join("fixtures/session.json"),
+            br#"{"schemaVersion":1,"sources":["escape/secret.json"]}"#,
+        )?;
         let root = AutomationRoot::open(directory.path())?;
 
         let Err(error) = root.read_fixture(Path::new("escape/secret.json")) else {
             return Err("a symlink escaped the automation root".into());
+        };
+        assert_eq!(error.kind(), AutomationRootErrorKind::ReparsePointRejected);
+        let Err(error) = root.load_fixture(Path::new("session.json")) else {
+            return Err("a symlinked source escaped the automation root".into());
         };
         assert_eq!(error.kind(), AutomationRootErrorKind::ReparsePointRejected);
         Ok(())
