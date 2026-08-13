@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import workflow from '../../.github/workflows/ci.yaml?raw';
+import visualReviewer from '../../scripts/confirm-windows-native-spike-visual-evidence.ps1?raw';
 import matrixMerger from '../../scripts/merge-windows-native-spike-interactive-evidence.ps1?raw';
 import packager from '../../scripts/prepare-windows-native-spike.ps1?raw';
 import interactive from '../../scripts/test-windows-native-spike-interactive.ps1?raw';
@@ -127,7 +128,9 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain("'Windows high contrast palette active'");
   expect(interactive).toContain('$highContrastPaletteActive -ne [bool]$highContrastObserved');
   expect(interactive).toContain('highContrastPaletteMatchesSystem = $true');
-  expect(interactive).toContain('visualReviewConfirmed = [bool]$ConfirmVisualReview');
+  expect(interactive).toContain('schemaVersion = 2');
+  expect(interactive).toContain("capturedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')");
+  expect(interactive).toContain('visualReviewConfirmed = $false');
   expect(interactive).toContain('Wait-ForExplorerDropStatus');
   expect(interactive).toContain('$RequireExplorerDragDrop');
   expect(interactive).toContain('disposable files or folders');
@@ -151,13 +154,34 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('GetWindowRect');
   expect(interactive).toContain("status = 'partial'");
   expect(interactive).toContain('nativeDragDropExercised = $false');
-  expect(interactive).toContain('focusVisibilityReview = (-not [bool]$ConfirmVisualReview)');
+  expect(interactive).toContain('focusVisibilityReview = $true');
+  expect(interactive).not.toContain('ConfirmVisualReview');
   expect(interactive).toContain('Update-ArtifactChecksums');
   expect(interactive).not.toContain('Invoke-Expression');
   expect(interactive).not.toContain('DownloadString');
 });
 
+test('confirms visual review only after binding both captured screenshots', () => {
+  expect(visualReviewer).toContain('[switch]$ConfirmReadableContrast');
+  expect(visualReviewer).toContain('[switch]$ConfirmVisibleKeyboardFocus');
+  expect(visualReviewer).toContain('[switch]$ConfirmUnclippedLayout');
+  expect(visualReviewer).toContain("schemaVersion' -Context $evidenceFileName) -ne 2");
+  expect(visualReviewer).toContain("capturedAtUtc' -Context $evidenceFileName");
+  expect(visualReviewer).toContain('$confirmedAt -le $capturedAt');
+  expect(visualReviewer).toContain('Assert-ChecksumCoveredFile');
+  expect(visualReviewer).toContain('Assert-Screenshot');
+  expect(visualReviewer).toContain('visualReviewConfirmed = $true');
+  expect(visualReviewer).toContain('focusVisibilityReview = $false');
+  expect(visualReviewer).toContain('focusScreenshotSha256 = $focusScreenshotSha256');
+  expect(visualReviewer).toContain('performanceScreenshotSha256 = $performanceScreenshotSha256');
+  expect(visualReviewer).toContain('Update-ArtifactChecksums');
+  expect(visualReviewer).not.toContain('Start-Process');
+  expect(visualReviewer).not.toContain('Set-ItemProperty');
+  expect(visualReviewer).not.toContain('Invoke-Expression');
+});
+
 test('merges only intentional source-bound Windows acceptance configurations', () => {
+  expect(matrixMerger).toContain("schemaVersion' -Context $context) -ne 2");
   expect(matrixMerger).toContain('$requiredDpiPercent = @(100, 125, 150, 200, 250)');
   expect(matrixMerger).toContain("'windows-interactive-evidence*.json'");
   expect(matrixMerger).toContain('$expectedDpiPercent -eq $dpiPercent');
@@ -165,6 +189,11 @@ test('merges only intentional source-bound Windows acceptance configurations', (
   expect(matrixMerger).toContain('$highContrastObserved -and');
   expect(matrixMerger).toContain('$highContrastPaletteActive');
   expect(matrixMerger).toContain("'visualReviewConfirmed'");
+  expect(matrixMerger).toContain('$confirmedAt -le $capturedAt');
+  expect(matrixMerger).toContain(
+    "@('readableContrast', 'visibleKeyboardFocus', 'unclippedLayout')"
+  );
+  expect(matrixMerger).toContain('visual review did not bind both captured screenshots');
   expect(matrixMerger).toContain('$explorerDragDropRequired -and');
   expect(matrixMerger).toContain("native shell$'");
   expect(matrixMerger).toContain('Assert-Screenshot');
