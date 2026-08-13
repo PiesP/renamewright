@@ -13,7 +13,9 @@ param(
   [string]$ArtifactDirectory,
 
   [Parameter(Mandatory = $true)]
-  [string]$SourceSha
+  [string]$SourceSha,
+
+  [switch]$AllowHostedRendererUnavailable
 )
 
 Set-StrictMode -Version Latest
@@ -39,6 +41,19 @@ function Stop-TestProcess {
   }
 }
 
+function Get-TrimmedFileText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  $content = Get-Content -LiteralPath $Path -Raw
+  if ($null -eq $content) {
+    return ''
+  }
+  return $content.Trim()
+}
+
 function Get-ProcessFailureDetail {
   param(
     [Parameter(Mandatory = $true)]
@@ -55,17 +70,33 @@ function Get-ProcessFailureDetail {
   )
 
   $standardOutput = if (Test-Path -LiteralPath $OutputPath) {
-    (Get-Content -LiteralPath $OutputPath -Raw).Trim()
+    Get-TrimmedFileText -Path $OutputPath
   } else {
     '<missing>'
   }
   $standardError = if (Test-Path -LiteralPath $ErrorPath) {
-    (Get-Content -LiteralPath $ErrorPath -Raw).Trim()
+    Get-TrimmedFileText -Path $ErrorPath
   } else {
     '<missing>'
   }
 
   return "$Label exited during startup with code $ExitCode. stdout: $standardOutput stderr: $standardError"
+}
+
+function Update-ArtifactChecksums {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ArtifactRoot
+  )
+
+  $checksumFiles = Get-ChildItem -LiteralPath $ArtifactRoot -File |
+    Where-Object Name -ne 'SHA256SUMS' |
+    Sort-Object Name
+  $checksumLines = foreach ($file in $checksumFiles) {
+    $digest = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$digest  $($file.Name)"
+  }
+  $checksumLines | Set-Content -LiteralPath (Join-Path $ArtifactRoot 'SHA256SUMS') -Encoding ascii
 }
 
 function Test-InspectionListener {
@@ -125,6 +156,8 @@ $automationErrorPath = Join-Path $artifactRoot 'automation-process.stderr.txt'
 
 $defaultProcess = $null
 $automationProcess = $null
+$hostedRendererUnavailable = $false
+$defaultExitCode = $null
 $defaultStartup = [System.Diagnostics.Stopwatch]::StartNew()
 try {
   $defaultProcess = Start-Process `
@@ -135,19 +168,61 @@ try {
   Start-Sleep -Seconds 3
   $defaultProcess.Refresh()
   if ($defaultProcess.HasExited) {
-    throw (Get-ProcessFailureDetail `
-      -Label 'The default native spike' `
-      -ExitCode $defaultProcess.ExitCode `
-      -OutputPath $defaultOutputPath `
-      -ErrorPath $defaultErrorPath)
+    $defaultExitCode = $defaultProcess.ExitCode
+    $defaultError = Get-TrimmedFileText -Path $defaultErrorPath
+    $knownHostedRendererFailure = 'Error: OpenGL(PainterError("egui_glow requires opengl 2.0+. "))'
+    if (
+      $AllowHostedRendererUnavailable -and
+      [string]::Equals(
+        $defaultError,
+        $knownHostedRendererFailure,
+        [System.StringComparison]::Ordinal
+      )
+    ) {
+      $defaultStartup.Stop()
+      $hostedRendererUnavailable = $true
+    } else {
+      throw (Get-ProcessFailureDetail `
+        -Label 'The default native spike' `
+        -ExitCode $defaultExitCode `
+        -OutputPath $defaultOutputPath `
+        -ErrorPath $defaultErrorPath)
+    }
   }
-  $defaultStartup.Stop()
-  if (Test-InspectionListener) {
-    throw 'The default native spike exposed the custom inspection listener.'
+  if (-not $hostedRendererUnavailable) {
+    $defaultStartup.Stop()
+    if (Test-InspectionListener) {
+      throw 'The default native spike exposed the custom inspection listener.'
+    }
+    $defaultWorkingSet = $defaultProcess.WorkingSet64
   }
-  $defaultWorkingSet = $defaultProcess.WorkingSet64
 } finally {
   Stop-TestProcess -Process $defaultProcess
+}
+
+if ($hostedRendererUnavailable) {
+  $unavailableEvidence = [ordered]@{
+    schemaVersion = 1
+    sourceSha = $SourceSha
+    host = 'windows-2025'
+    status = 'unavailable'
+    reason = 'hosted-runner-opengl-below-2'
+    checks = [ordered]@{
+      defaultStarted = $false
+      automationStartedExplicitly = $false
+      expectedRendererFailure = $true
+    }
+    diagnostics = [ordered]@{
+      defaultExitCode = $defaultExitCode
+      observationMilliseconds = $defaultStartup.ElapsedMilliseconds
+    }
+  }
+  $evidencePath = Join-Path $artifactRoot 'windows-runtime-evidence.json'
+  $unavailableEvidence | ConvertTo-Json -Depth 6 |
+    Set-Content -LiteralPath $evidencePath -Encoding utf8
+  Update-ArtifactChecksums -ArtifactRoot $artifactRoot
+  Write-Warning 'The GitHub-hosted Windows runner exposes only an OpenGL version below 2.0; runtime acceptance remains unavailable and must run on an interactive Windows host.'
+  exit 0
 }
 
 $screenshotPath = Join-Path $artifactRoot 'windows-runtime-screenshot.png'
@@ -260,11 +335,4 @@ $runtimeEvidence = [ordered]@{
 $evidencePath = Join-Path $artifactRoot 'windows-runtime-evidence.json'
 $runtimeEvidence | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $evidencePath -Encoding utf8
 
-$checksumFiles = Get-ChildItem -LiteralPath $artifactRoot -File |
-  Where-Object Name -ne 'SHA256SUMS' |
-  Sort-Object Name
-$checksumLines = foreach ($file in $checksumFiles) {
-  $digest = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-  "$digest  $($file.Name)"
-}
-$checksumLines | Set-Content -LiteralPath (Join-Path $artifactRoot 'SHA256SUMS') -Encoding ascii
+Update-ArtifactChecksums -ArtifactRoot $artifactRoot
