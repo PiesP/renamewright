@@ -301,7 +301,8 @@ pub enum RuleRequestDto {
 }
 
 impl RuleRequestDto {
-    const fn rule_id(&self) -> u64 {
+    #[must_use]
+    pub const fn rule_id(&self) -> u64 {
         match self {
             Self::Prefix { rule_id, .. }
             | Self::Suffix { rule_id, .. }
@@ -317,7 +318,8 @@ impl RuleRequestDto {
         }
     }
 
-    const fn enabled(&self) -> bool {
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
         match self {
             Self::Prefix { enabled, .. }
             | Self::Suffix { enabled, .. }
@@ -506,6 +508,47 @@ impl RuleRequestDto {
                 },
             ),
         }
+    }
+}
+
+impl SourceOverrideDto {
+    #[must_use]
+    pub fn new(source_id: u64, value: impl Into<String>) -> Self {
+        Self {
+            source_id,
+            value: value.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn source_id(&self) -> u64 {
+        self.source_id
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl RulePipelineRequestDto {
+    #[must_use]
+    pub fn new(rules: Vec<RuleRequestDto>, overrides: Vec<SourceOverrideDto>) -> Self {
+        Self {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules,
+            overrides,
+        }
+    }
+
+    #[must_use]
+    pub fn rules(&self) -> &[RuleRequestDto] {
+        &self.rules
+    }
+
+    #[must_use]
+    pub fn overrides(&self) -> &[SourceOverrideDto] {
+        &self.overrides
     }
 }
 
@@ -2187,6 +2230,33 @@ mod tests {
         assert!(!row.override_applied());
         assert!(row.source_id() > 0);
         Ok(())
+    }
+
+    #[test]
+    fn native_rule_request_boundary_retains_order_and_source_overrides() {
+        let request = RulePipelineRequestDto::new(
+            vec![
+                RuleRequestDto::Prefix {
+                    rule_id: 4,
+                    enabled: true,
+                    value: "draft-".to_owned(),
+                },
+                RuleRequestDto::Suffix {
+                    rule_id: 9,
+                    enabled: false,
+                    value: "-review".to_owned(),
+                },
+            ],
+            vec![SourceOverrideDto::new(12, "manual.txt")],
+        );
+
+        assert_eq!(request.rules().len(), 2);
+        assert_eq!(request.rules()[0].rule_id(), 4);
+        assert!(request.rules()[0].enabled());
+        assert_eq!(request.rules()[1].rule_id(), 9);
+        assert!(!request.rules()[1].enabled());
+        assert_eq!(request.overrides()[0].source_id(), 12);
+        assert_eq!(request.overrides()[0].value(), "manual.txt");
     }
 
     #[test]
