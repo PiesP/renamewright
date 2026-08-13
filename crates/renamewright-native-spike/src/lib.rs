@@ -1608,6 +1608,7 @@ impl NativeSpikeApp {
         )
     }
 
+    #[cfg(any(test, feature = "automation"))]
     fn set_prefix(&mut self, prefix: &str) {
         if let Some(RuleRequestDto::Prefix { value, .. }) = self.rules.first_mut() {
             prefix.clone_into(value);
