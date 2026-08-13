@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fs;
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Event, Modifiers, MouseWheelUnit, PointerButton, TouchPhase};
 use egui_inspection::{Request, Response, read_message, write_message};
@@ -108,9 +108,14 @@ fn exercise_performance(
             },
         ],
     )?;
-    let scrolled_tree = tree(stream)?;
+    let mut scrolled_tree = tree(stream)?;
+    let mut scroll_last_visible = contains_text(&scrolled_tree, "IMG_09999.jpg");
+    while !scroll_last_visible && scroll_started.elapsed() < Duration::from_millis(900) {
+        std::thread::sleep(Duration::from_millis(10));
+        scrolled_tree = tree(stream)?;
+        scroll_last_visible = contains_text(&scrolled_tree, "IMG_09999.jpg");
+    }
     let scroll_milliseconds = scroll_started.elapsed().as_millis();
-    let scroll_last_visible = contains_text(&scrolled_tree, "IMG_09999.jpg");
 
     let filter_point = rightmost_role_center(&scrolled_tree, egui::accesskit::Role::TextInput)?;
     let filter_started = Instant::now();
