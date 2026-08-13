@@ -178,8 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     automation_launch.fixture.as_ref(),
                 )));
             }
-            Ok(Box::new(NativeSpikeApp::new_with_storage(
-                false,
+            Ok(Box::new(NativeSpikeApp::new_product(
                 palette,
                 native_preset_path(),
             )))

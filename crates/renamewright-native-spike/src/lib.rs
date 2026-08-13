@@ -57,6 +57,7 @@ pub mod semantics {
     pub const SAVE_PRESET: &str = "Save preset";
     pub const APPLY_PRESET: &str = "Apply preset";
     pub const DELETE_PRESET: &str = "Delete preset";
+    pub const NO_SOURCES: &str = "No sources selected";
     pub const AUTOMATION_BANNER: &str = "AUTOMATION TEST MODE";
     pub const HIGH_CONTRAST_ACTIVE: &str = "Windows high contrast palette active";
 }
@@ -1392,6 +1393,7 @@ pub struct NativeSpikeApp {
     locale: Locale,
     override_editor: Option<OverrideEditor>,
     inspection: Option<InspectionDocument>,
+    synthetic_fixture: bool,
     preset_path: Option<PathBuf>,
     presets: PresetDocumentDto,
     preset_name: String,
@@ -1419,6 +1421,20 @@ impl NativeSpikeApp {
         _automation_mode: bool,
         palette: NativePalette,
         preset_path: Option<PathBuf>,
+    ) -> Self {
+        Self::new_configured(_automation_mode, palette, preset_path, true)
+    }
+
+    #[must_use]
+    pub fn new_product(palette: NativePalette, preset_path: Option<PathBuf>) -> Self {
+        Self::new_configured(false, palette, preset_path, false)
+    }
+
+    fn new_configured(
+        _automation_mode: bool,
+        palette: NativePalette,
+        preset_path: Option<PathBuf>,
+        synthetic_fixture: bool,
     ) -> Self {
         let (presets, preset_status) = preset_path.as_ref().map_or_else(
             || (PresetDocumentDto::default(), None),
@@ -1448,10 +1464,17 @@ impl NativeSpikeApp {
             locale: Locale::English,
             override_editor: None,
             inspection: None,
+            synthetic_fixture,
             preset_path,
             presets,
             preset_name: String::new(),
-            status: preset_status.unwrap_or_else(|| format!("{SAMPLE_COUNT} sample entries ready")),
+            status: preset_status.unwrap_or_else(|| {
+                if synthetic_fixture {
+                    format!("{SAMPLE_COUNT} sample entries ready")
+                } else {
+                    semantics::NO_SOURCES.to_owned()
+                }
+            }),
             palette,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
@@ -1521,6 +1544,9 @@ impl NativeSpikeApp {
                 .is_none_or(|code| row.diagnostics().contains(&code));
             return matches_filter && matches_query && matches_diagnostic;
         }
+        if !self.synthetic_fixture {
+            return false;
+        }
 
         let blocked = Self::row_is_blocked(index);
         let matches_filter = match self.filter {
@@ -1535,10 +1561,16 @@ impl NativeSpikeApp {
     }
 
     fn visible_indices(&self) -> Vec<usize> {
-        let row_count = self
-            .plan
-            .as_ref()
-            .map_or(SAMPLE_COUNT, |plan| plan.rows().len());
+        let row_count = self.plan.as_ref().map_or_else(
+            || {
+                if self.synthetic_fixture {
+                    SAMPLE_COUNT
+                } else {
+                    0
+                }
+            },
+            |plan| plan.rows().len(),
+        );
         (0..row_count)
             .filter(|index| self.row_is_visible(*index))
             .collect()
@@ -2651,6 +2683,20 @@ mod tests {
         assert!(harness.query_by_label("IMG_00000.jpg").is_some());
         assert!(harness.query_by_label("IMG_09999.jpg").is_none());
         assert!(harness.query_all_by(|_| true).count() < 500);
+    }
+
+    #[test]
+    fn production_workbench_starts_empty_without_synthetic_sources() {
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                NativeSpikeApp::new_product(NativePalette::default(), None),
+            );
+
+        harness.get_by_label(semantics::NO_SOURCES);
+        harness.get_by_label("0 shown");
+        assert!(harness.query_by_label("IMG_00000.jpg").is_none());
     }
 
     #[test]
