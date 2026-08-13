@@ -40,11 +40,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             accesskit,
         } => {
             let node_count = accesskit.as_ref().map_or(0, |tree| tree.nodes.len());
-            let has_label = |expected: &str| {
+            let has_text = |expected: &str| {
                 accesskit.as_ref().is_some_and(|tree| {
-                    tree.nodes
-                        .iter()
-                        .any(|(_, node)| node.label() == Some(expected))
+                    tree.nodes.iter().any(|(_, node)| {
+                        node.label() == Some(expected) || node.value() == Some(expected)
+                    })
                 })
             };
             let apply_disabled = accesskit.as_ref().is_some_and(|tree| {
@@ -55,8 +55,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!(
                 "tree_step={step} pixels_per_point={pixels_per_point} nodes={node_count} \
                  automation_banner={} hangul_sample={} apply_disabled={apply_disabled}",
-                has_label("AUTOMATION TEST MODE"),
-                has_label("한글 IME 입력 확인"),
+                has_text("AUTOMATION TEST MODE"),
+                has_text("한글 IME 입력 확인"),
             );
         }
         response => return Err(format!("unexpected tree response: {response:?}").into()),
