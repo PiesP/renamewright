@@ -18,15 +18,15 @@ fn install_korean_font(ctx: &egui::Context) -> Option<String> {
         let Ok(bytes) = fs::read(candidate) else {
             continue;
         };
-        let mut fonts = FontDefinitions::default();
+        let mut fonts = FontDefinitions::empty();
         fonts.font_data.insert(
             "system-korean".to_owned(),
             FontData::from_owned(bytes).into(),
         );
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            if let Some(names) = fonts.families.get_mut(&family) {
-                names.insert(0, "system-korean".to_owned());
-            }
+            fonts
+                .families
+                .insert(family, vec!["system-korean".to_owned()]);
         }
         ctx.set_fonts(fonts);
         return Path::new(candidate)
@@ -38,7 +38,7 @@ fn install_korean_font(ctx: &egui::Context) -> Option<String> {
 
 #[cfg(feature = "automation")]
 fn automation_requested() -> bool {
-    std::env::args_os().any(|argument| argument == "--automation")
+    std::env::args().any(|argument| argument == "--automation")
 }
 
 #[cfg(not(feature = "automation"))]
