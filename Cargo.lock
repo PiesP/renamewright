@@ -4110,6 +4110,7 @@ dependencies = [
  "egui_kittest",
  "kittest",
  "pico-args",
+ "renamewright-windows-native",
  "rfd",
 ]
 

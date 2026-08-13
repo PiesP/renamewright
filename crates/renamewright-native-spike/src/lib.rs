@@ -21,6 +21,81 @@ const ACCENT_SOFT: Color32 = Color32::from_rgb(222, 230, 255);
 const BLOCKED: Color32 = Color32::from_rgb(166, 45, 48);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativePalette {
+    paper: Color32,
+    paper_raised: Color32,
+    paper_soft: Color32,
+    ink: Color32,
+    ink_soft: Color32,
+    rule: Color32,
+    accent: Color32,
+    accent_fill: Color32,
+    accent_soft: Color32,
+    accent_text: Color32,
+    blocked: Color32,
+    disabled: Color32,
+    high_contrast: bool,
+}
+
+impl Default for NativePalette {
+    fn default() -> Self {
+        Self {
+            paper: PAPER,
+            paper_raised: PAPER_RAISED,
+            paper_soft: PAPER_SOFT,
+            ink: INK,
+            ink_soft: INK_SOFT,
+            rule: RULE,
+            accent: ACCENT,
+            accent_fill: ACCENT,
+            accent_soft: ACCENT_SOFT,
+            accent_text: Color32::WHITE,
+            blocked: BLOCKED,
+            disabled: INK_SOFT,
+            high_contrast: false,
+        }
+    }
+}
+
+impl NativePalette {
+    #[must_use]
+    pub fn high_contrast(
+        window: [u8; 3],
+        window_text: [u8; 3],
+        highlight: [u8; 3],
+        highlight_text: [u8; 3],
+        gray_text: [u8; 3],
+    ) -> Self {
+        let window = Color32::from_rgb(window[0], window[1], window[2]);
+        let window_text = Color32::from_rgb(window_text[0], window_text[1], window_text[2]);
+        let highlight = Color32::from_rgb(highlight[0], highlight[1], highlight[2]);
+        let highlight_text =
+            Color32::from_rgb(highlight_text[0], highlight_text[1], highlight_text[2]);
+        let gray_text = Color32::from_rgb(gray_text[0], gray_text[1], gray_text[2]);
+        Self {
+            paper: window,
+            paper_raised: window,
+            paper_soft: window,
+            ink: window_text,
+            ink_soft: window_text,
+            rule: window_text,
+            accent: window_text,
+            accent_fill: highlight,
+            accent_soft: highlight,
+            accent_text: highlight_text,
+            blocked: window_text,
+            disabled: gray_text,
+            high_contrast: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_high_contrast(self) -> bool {
+        self.high_contrast
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlanFilter {
     All,
     Changed,
@@ -46,6 +121,7 @@ pub struct NativeSpikeApp {
     filter: PlanFilter,
     selected_rule: usize,
     status: String,
+    palette: NativePalette,
     #[cfg(feature = "automation")]
     automation_mode: bool,
 }
@@ -53,12 +129,18 @@ pub struct NativeSpikeApp {
 impl NativeSpikeApp {
     #[must_use]
     pub fn new(_automation_mode: bool) -> Self {
+        Self::new_with_palette(_automation_mode, NativePalette::default())
+    }
+
+    #[must_use]
+    pub fn new_with_palette(_automation_mode: bool, palette: NativePalette) -> Self {
         Self {
             prefix: "정리_".to_owned(),
             source_query: String::new(),
             filter: PlanFilter::All,
             selected_rule: 0,
             status: format!("{SAMPLE_COUNT} sample entries ready"),
+            palette,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
         }
@@ -89,8 +171,8 @@ impl NativeSpikeApp {
 
     fn show_source_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Renamewright").color(INK));
-            ui.label(RichText::new("Plan every rename.").color(INK_SOFT));
+            ui.heading(RichText::new("Renamewright").color(self.palette.ink));
+            ui.label(RichText::new("Plan every rename.").color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Add folder").clicked() {
                     self.status = match rfd::FileDialog::new()
@@ -117,8 +199,8 @@ impl NativeSpikeApp {
     }
 
     fn show_rule_rail(&mut self, ui: &mut egui::Ui) {
-        ui.heading(RichText::new("Rules").color(INK));
-        ui.label(RichText::new("Applied in order").color(INK_SOFT));
+        ui.heading(RichText::new("Rules").color(self.palette.ink));
+        ui.label(RichText::new("Applied in order").color(self.palette.ink_soft));
         ui.add_space(8.0);
 
         for (index, label) in ["Prefix", "Sequence", "Extension"].iter().enumerate() {
@@ -131,20 +213,26 @@ impl NativeSpikeApp {
         ui.add_space(16.0);
         ui.separator();
         ui.add_space(12.0);
-        ui.label(RichText::new("Prefix text").strong().color(INK));
+        ui.label(
+            RichText::new("Prefix text")
+                .strong()
+                .color(self.palette.ink),
+        );
         ui.add(
             egui::TextEdit::singleline(&mut self.prefix)
                 .id_salt("rule.prefix.value")
                 .hint_text("Prefix"),
         );
-        ui.label(RichText::new("한글 IME 입력 확인").color(INK_SOFT));
+        ui.label(RichText::new("한글 IME 입력 확인").color(self.palette.ink_soft));
     }
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
         let visible = self.visible_indices();
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Preview").color(INK));
-            ui.label(RichText::new(format!("{} shown", visible.len())).color(INK_SOFT));
+            ui.heading(RichText::new("Preview").color(self.palette.ink));
+            ui.label(
+                RichText::new(format!("{} shown", visible.len())).color(self.palette.ink_soft),
+            );
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -166,20 +254,22 @@ impl NativeSpikeApp {
         ui.add_space(8.0);
 
         egui::Frame::new()
-            .fill(PAPER_RAISED)
-            .stroke(Stroke::new(1.0, RULE))
+            .fill(self.palette.paper_raised)
+            .stroke(Stroke::new(1.0, self.palette.rule))
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [210.0, 20.0],
-                        egui::Label::new(RichText::new("Source").strong().color(INK)),
+                        egui::Label::new(RichText::new("Source").strong().color(self.palette.ink)),
                     );
                     ui.add_sized(
                         [250.0, 20.0],
-                        egui::Label::new(RichText::new("Proposed").strong().color(INK)),
+                        egui::Label::new(
+                            RichText::new("Proposed").strong().color(self.palette.ink),
+                        ),
                     );
-                    ui.label(RichText::new("Status").strong().color(INK));
+                    ui.label(RichText::new("Status").strong().color(self.palette.ink));
                 });
                 ui.separator();
                 ScrollArea::vertical()
@@ -196,7 +286,11 @@ impl NativeSpikeApp {
                                     ui.add_sized([210.0, 20.0], egui::Label::new(source));
                                     ui.add_sized([250.0, 20.0], egui::Label::new(proposed));
                                     let status = if blocked { "Blocked" } else { "Changed" };
-                                    let color = if blocked { BLOCKED } else { ACCENT };
+                                    let color = if blocked {
+                                        self.palette.blocked
+                                    } else {
+                                        self.palette.accent
+                                    };
                                     ui.label(RichText::new(status).color(color).strong());
                                 });
                             });
@@ -207,11 +301,20 @@ impl NativeSpikeApp {
 
     fn show_review_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(&self.status).color(INK_SOFT));
+            ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_enabled(false, egui::Button::new("Apply"))
+                let apply_text = if self.palette.high_contrast {
+                    RichText::new("Apply").color(self.palette.disabled)
+                } else {
+                    RichText::new("Apply")
+                };
+                ui.add_enabled(false, egui::Button::new(apply_text))
                     .on_disabled_hover_text("The native spike never mutates the filesystem");
-                ui.label(RichText::new("Apply locked").color(BLOCKED).strong());
+                ui.label(
+                    RichText::new("Apply locked")
+                        .color(self.palette.blocked)
+                        .strong(),
+                );
             });
         });
     }
@@ -225,12 +328,39 @@ impl NativeSpikeApp {
         #[cfg(feature = "automation")]
         if self.automation_mode {
             egui::Panel::top("automation-banner")
-                .frame(egui::Frame::new().fill(BLOCKED).inner_margin(6.0))
+                .frame(
+                    egui::Frame::new()
+                        .fill(if self.palette.high_contrast {
+                            self.palette.accent_fill
+                        } else {
+                            self.palette.blocked
+                        })
+                        .inner_margin(6.0),
+                )
                 .show(ui, |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.label(
                             RichText::new("AUTOMATION TEST MODE")
-                                .color(Color32::WHITE)
+                                .color(self.palette.accent_text)
+                                .strong(),
+                        );
+                    });
+                });
+        }
+
+        if self.palette.high_contrast {
+            egui::Panel::top("high-contrast-status")
+                .frame(
+                    egui::Frame::new()
+                        .fill(self.palette.paper_raised)
+                        .stroke(Stroke::new(2.0, self.palette.rule))
+                        .inner_margin(6.0),
+                )
+                .show(ui, |ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            RichText::new("Windows high contrast palette active")
+                                .color(self.palette.ink)
                                 .strong(),
                         );
                     });
@@ -238,27 +368,39 @@ impl NativeSpikeApp {
         }
 
         egui::Panel::top("source-bar")
-            .frame(egui::Frame::new().fill(PAPER_RAISED).inner_margin(12.0))
+            .frame(
+                egui::Frame::new()
+                    .fill(self.palette.paper_raised)
+                    .inner_margin(12.0),
+            )
             .show(ui, |ui| self.show_source_bar(ui));
 
         egui::Panel::left("rule-rail")
             .resizable(true)
             .default_size(220.0)
             .min_size(180.0)
-            .frame(egui::Frame::new().fill(PAPER_SOFT).inner_margin(12.0))
+            .frame(
+                egui::Frame::new()
+                    .fill(self.palette.paper_soft)
+                    .inner_margin(12.0),
+            )
             .show(ui, |ui| self.show_rule_rail(ui));
 
         egui::Panel::bottom("review-bar")
             .frame(
                 egui::Frame::new()
-                    .fill(PAPER_RAISED)
-                    .stroke(Stroke::new(1.0, RULE))
+                    .fill(self.palette.paper_raised)
+                    .stroke(Stroke::new(1.0, self.palette.rule))
                     .inner_margin(12.0),
             )
             .show(ui, |ui| self.show_review_bar(ui));
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(PAPER).inner_margin(12.0))
+            .frame(
+                egui::Frame::new()
+                    .fill(self.palette.paper)
+                    .inner_margin(12.0),
+            )
             .show(ui, |ui| self.show_preview(ui));
     }
 }
@@ -269,24 +411,81 @@ impl eframe::App for NativeSpikeApp {
     }
 }
 
-pub fn install_theme(ctx: &egui::Context) {
-    ctx.set_theme(egui::Theme::Light);
-    let mut style = (*ctx.style_of(egui::Theme::Light)).clone();
-    style.visuals = egui::Visuals::light();
-    style.visuals.panel_fill = PAPER;
-    style.visuals.window_fill = PAPER_RAISED;
-    style.visuals.selection.bg_fill = ACCENT_SOFT;
-    style.visuals.selection.stroke = Stroke::new(1.0, ACCENT);
-    style.visuals.widgets.inactive.fg_stroke.color = INK;
-    style.visuals.widgets.hovered.bg_fill = ACCENT_SOFT;
-    style.visuals.widgets.hovered.fg_stroke.color = INK;
-    style.visuals.widgets.active.bg_fill = ACCENT;
-    style.visuals.widgets.active.fg_stroke.color = Color32::WHITE;
+pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
+    if !palette.high_contrast {
+        ctx.set_theme(egui::Theme::Light);
+        let mut style = (*ctx.style_of(egui::Theme::Light)).clone();
+        style.visuals = egui::Visuals::light();
+        style.visuals.panel_fill = palette.paper;
+        style.visuals.window_fill = palette.paper_raised;
+        style.visuals.selection.bg_fill = palette.accent_soft;
+        style.visuals.selection.stroke = Stroke::new(1.0, palette.accent);
+        style.visuals.widgets.inactive.fg_stroke.color = palette.ink;
+        style.visuals.widgets.hovered.bg_fill = palette.accent_soft;
+        style.visuals.widgets.hovered.fg_stroke.color = palette.ink;
+        style.visuals.widgets.active.bg_fill = palette.accent_fill;
+        style.visuals.widgets.active.fg_stroke.color = palette.accent_text;
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            FontId::new(22.0, FontFamily::Proportional),
+        );
+        ctx.set_style_of(egui::Theme::Light, style);
+        return;
+    }
+
+    let theme = if u16::from(palette.paper.r())
+        + u16::from(palette.paper.g())
+        + u16::from(palette.paper.b())
+        < 384
+    {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    };
+    ctx.set_theme(theme);
+    let mut style = (*ctx.style_of(theme)).clone();
+    style.visuals = if theme == egui::Theme::Dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    style.visuals.dark_mode = theme == egui::Theme::Dark;
+    style.visuals.override_text_color = None;
+    style.visuals.weak_text_color = Some(palette.ink_soft);
+    style.visuals.panel_fill = palette.paper;
+    style.visuals.window_fill = palette.paper_raised;
+    style.visuals.window_stroke = Stroke::new(1.0, palette.rule);
+    style.visuals.faint_bg_color = palette.paper;
+    style.visuals.extreme_bg_color = palette.paper_raised;
+    style.visuals.text_edit_bg_color = Some(palette.paper_raised);
+    style.visuals.selection.bg_fill = palette.accent_soft;
+    style.visuals.selection.stroke = Stroke::new(1.0, palette.accent_text);
+    style.visuals.hyperlink_color = palette.accent;
+    style.visuals.warn_fg_color = palette.blocked;
+    style.visuals.error_fg_color = palette.blocked;
+    style.visuals.widgets.noninteractive.bg_fill = palette.paper;
+    style.visuals.widgets.noninteractive.weak_bg_fill = palette.paper;
+    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.rule);
+    style.visuals.widgets.noninteractive.fg_stroke.color = palette.ink;
+    style.visuals.widgets.inactive.bg_fill = palette.paper_raised;
+    style.visuals.widgets.inactive.weak_bg_fill = palette.paper_raised;
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.rule);
+    style.visuals.widgets.inactive.fg_stroke.color = palette.ink;
+    style.visuals.widgets.hovered.bg_fill = palette.accent_soft;
+    style.visuals.widgets.hovered.weak_bg_fill = palette.accent_soft;
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(2.0, palette.accent_text);
+    style.visuals.widgets.hovered.fg_stroke.color = palette.accent_text;
+    style.visuals.widgets.active.bg_fill = palette.accent_fill;
+    style.visuals.widgets.active.weak_bg_fill = palette.accent_fill;
+    style.visuals.widgets.active.bg_stroke = Stroke::new(2.0, palette.accent_text);
+    style.visuals.widgets.active.fg_stroke.color = palette.accent_text;
+    style.visuals.widgets.open = style.visuals.widgets.active;
+    style.visuals.disabled_alpha = 1.0;
     style.text_styles.insert(
         egui::TextStyle::Heading,
         FontId::new(22.0, FontFamily::Proportional),
     );
-    ctx.set_style_of(egui::Theme::Light, style);
+    ctx.set_style_of(theme, style);
 }
 
 #[cfg(test)]
@@ -295,7 +494,7 @@ mod tests {
     use egui_kittest::Harness;
     use kittest::{NodeT as _, Queryable as _};
 
-    use super::NativeSpikeApp;
+    use super::{NativePalette, NativeSpikeApp, install_theme};
 
     #[test]
     fn accesskit_exposes_primary_workbench_controls() {
@@ -320,6 +519,55 @@ mod tests {
         harness.get_by_label("Blocked").click();
         harness.run_ok();
         harness.get_by_label("10 shown");
+    }
+
+    #[test]
+    fn high_contrast_palette_is_visible_and_accessible() {
+        let palette = NativePalette::high_contrast(
+            [0, 0, 0],
+            [255, 255, 255],
+            [255, 255, 0],
+            [0, 0, 0],
+            [0, 255, 0],
+        );
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                NativeSpikeApp::new_with_palette(false, palette),
+            );
+
+        assert!(palette.is_high_contrast());
+        harness.get_by_label("Windows high contrast palette active");
+        let apply = harness.get_by_label("Apply");
+        assert!(apply.accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn high_contrast_theme_uses_supplied_system_colors_without_fading_disabled_controls() {
+        let context = egui::Context::default();
+        let palette = NativePalette::high_contrast(
+            [0, 0, 0],
+            [255, 255, 255],
+            [255, 255, 0],
+            [0, 0, 0],
+            [0, 255, 0],
+        );
+        install_theme(&context, palette);
+
+        let style = context.style_of(egui::Theme::Dark);
+        assert!(style.visuals.dark_mode);
+        assert_eq!(style.visuals.panel_fill, egui::Color32::BLACK);
+        assert_eq!(
+            style.visuals.widgets.noninteractive.fg_stroke.color,
+            egui::Color32::WHITE
+        );
+        assert_eq!(
+            style.visuals.selection.bg_fill,
+            egui::Color32::from_rgb(255, 255, 0)
+        );
+        assert_eq!(style.visuals.selection.stroke.color, egui::Color32::BLACK);
+        assert_eq!(style.visuals.disabled_alpha, 1.0);
     }
 
     #[cfg(feature = "automation")]

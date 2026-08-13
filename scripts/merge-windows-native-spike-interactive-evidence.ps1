@@ -24,7 +24,9 @@ $requiredRunChecks = @(
   'nativeFolderDialogOpened',
   'observedDpiSupported',
   'tenThousandEntryScrollWithinBudget',
-  'tenThousandEntryFilterWithinBudget'
+  'tenThousandEntryFilterWithinBudget',
+  'visualReviewConfirmed',
+  'highContrastPaletteMatchesSystem'
 )
 
 function Resolve-RequiredPath {
@@ -162,7 +164,15 @@ foreach ($file in $evidenceFiles) {
   $highContrastRequired = [bool](
     Get-RequiredProperty -Object $evidence.intent -Name 'requireHighContrast' -Context $context
   )
-  if ($highContrastRequired -and $highContrastObserved -and $highContrastExercised) {
+  $highContrastPaletteActive = [bool](
+    Get-RequiredProperty -Object $evidence.checks -Name 'highContrastPaletteActive' -Context $context
+  )
+  if (
+    $highContrastRequired -and
+    $highContrastObserved -and
+    $highContrastExercised -and
+    $highContrastPaletteActive
+  ) {
     $highContrastComplete = $true
   }
 
@@ -212,6 +222,7 @@ foreach ($file in $evidenceFiles) {
     dpiPercent = $dpiPercent
     expectedDpiPercent = $expectedDpiPercent
     highContrast = $highContrastObserved
+    highContrastPaletteActive = $highContrastPaletteActive
     explorerDragDrop = $explorerDragDropExercised
     focusScreenshotFile = $focusScreenshotFile
     focusScreenshotSha256 = $focusScreenshotSha256
