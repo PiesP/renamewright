@@ -202,5 +202,76 @@ jobs:
       - name: Test the complete Rust workspace
         run: cargo test --workspace --all-targets --locked
 
+      - name: Validate the native spike feature matrix
+        run: |
+          cargo clippy `
+            --package renamewright-native-spike `
+            --all-targets `
+            --all-features `
+            --locked `
+            -- -D warnings
+          cargo test `
+            --package renamewright-native-spike `
+            --all-targets `
+            --all-features `
+            --locked
+
+      - name: Build isolated native spike executables
+        shell: pwsh
+        run: |
+          $inputRoot = Join-Path $PWD.Path 'target/native-spike-input'
+          $defaultRoot = Join-Path $inputRoot 'default'
+          $automationRoot = Join-Path $inputRoot 'automation'
+          New-Item -ItemType Directory -Path $defaultRoot, $automationRoot | Out-Null
+
+          cargo build `
+            --package renamewright-native-spike `
+            --release `
+            --bin renamewright-native-spike `
+            --locked
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The default native spike build failed.'
+          }
+          Copy-Item `
+            -LiteralPath 'target/release/renamewright-native-spike.exe' `
+            -Destination (Join-Path $defaultRoot 'renamewright-native-spike.exe')
+
+          cargo build `
+            --package renamewright-native-spike `
+            --release `
+            --bins `
+            --features automation `
+            --locked
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The automation native spike build failed.'
+          }
+          Copy-Item `
+            -LiteralPath 'target/release/renamewright-native-spike.exe' `
+            -Destination (Join-Path $automationRoot 'renamewright-native-spike.exe')
+          Copy-Item `
+            -LiteralPath 'target/release/inspection-probe.exe' `
+            -Destination (Join-Path $automationRoot 'inspection-probe.exe')
+
+      - name: Prepare the source-bound native spike artifact
+        shell: pwsh
+        run: >-
+          ./scripts/prepare-windows-native-spike.ps1
+          -RepositoryRoot $PWD.Path
+          -DefaultExecutablePath 'target/native-spike-input/default/renamewright-native-spike.exe'
+          -AutomationExecutablePath 'target/native-spike-input/automation/renamewright-native-spike.exe'
+          -InspectionProbePath 'target/native-spike-input/automation/inspection-probe.exe'
+          -OutputDirectory 'native-spike-acceptance'
+          -SourceSha $env:GITHUB_SHA
+
+      - name: Upload the source-bound native spike artifact
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: renamewright-native-spike-windows-${{ github.sha }}
+          path: native-spike-acceptance/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
       - name: Build the Windows desktop application
         run: pnpm tauri build --no-bundle
