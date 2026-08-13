@@ -302,6 +302,11 @@ if ($null -eq $explorerInSession) {
 }
 
 $temporaryDirectory = [System.IO.Path]::GetTempPath()
+$automationRoot = Join-Path `
+  $temporaryDirectory `
+  ("renamewright-automation-" + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $automationRoot | Out-Null
+$automationArguments = "--automation --automation-root `"$automationRoot`""
 $artifactSuffix = if ($EvidenceLabel -ceq 'current') { '' } else { "-$EvidenceLabel" }
 $processOutputPath = Join-Path $artifactRoot "interactive-process$artifactSuffix.stdout.txt"
 $processErrorPath = Join-Path $artifactRoot "interactive-process$artifactSuffix.stderr.txt"
@@ -318,7 +323,7 @@ $hangulKeyToggled = $false
 try {
   $application = Start-Process `
     -FilePath $automationExecutable `
-    -ArgumentList @('--automation') `
+    -ArgumentList $automationArguments `
     -RedirectStandardOutput $processOutputPath `
     -RedirectStandardError $processErrorPath `
     -PassThru
@@ -538,6 +543,7 @@ try {
       sourceBoundArtifact = $true
       explorerInSameSession = $true
       automationModeExplicit = $true
+      isolatedAutomationRoot = $true
       windowsUiAutomationExposed = $true
       requiredControlNamesExposed = $true
       applyDisabled = $true
@@ -605,6 +611,9 @@ try {
     ) | Out-Null
   }
   Stop-TestProcess -Process $application
+  if (Test-Path -LiteralPath $automationRoot) {
+    Remove-Item -LiteralPath $automationRoot -Recurse -Force
+  }
 }
 
 Update-ArtifactChecksums -ArtifactRoot $artifactRoot

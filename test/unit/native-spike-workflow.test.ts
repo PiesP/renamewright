@@ -45,8 +45,11 @@ test('keeps production and automation binary evidence separate and path-free', (
   expect(packager).toContain('$actualSha -cne $SourceSha');
   expect(packager).toContain('The native spike acceptance output directory already exists.');
   expect(packager).toContain("'AUTOMATION TEST MODE'");
+  expect(packager).toContain("'--automation-root'");
+  expect(packager).toContain("'--automation-fixture'");
   expect(packager).toContain("'127.0.0.1:45719'");
   expect(packager).toContain('defaultExcludesAutomationMarkers = $true');
+  expect(packager).toContain('automationRequiresExplicitRoot = $true');
   expect(packager).toContain("target = 'x86_64-pc-windows-msvc'");
   expect(packager).toContain("productionArtifact = 'renamewright-native-spike.exe'");
   expect(packager).toContain("automationArtifact = 'renamewright-native-spike-automation.exe'");
@@ -55,7 +58,9 @@ test('keeps production and automation binary evidence separate and path-free', (
 });
 
 test('exercises the exact Windows executables before uploading runtime evidence', () => {
-  expect(runtime).toContain("-ArgumentList @('--automation')");
+  expect(runtime).toContain('$automationArguments = "--automation --automation-root');
+  expect(runtime).toContain('-ArgumentList $automationArguments');
+  expect(runtime).toContain('isolatedAutomationRoot = $true');
   expect(runtime).toContain("-ArgumentList @('--exercise-performance', $ScreenshotPath)");
   expect(runtime).toContain("ConnectAsync('127.0.0.1', 45719)");
   expect(runtime).toContain('The default native spike exposed the custom inspection listener.');
@@ -115,7 +120,9 @@ test('exercises the exact Windows executables before uploading runtime evidence'
 
 test('keeps interactive Windows acceptance source-bound, scoped, and honest about gaps', () => {
   expect(interactive).toContain('manifest.sourceSha -cne $SourceSha');
-  expect(interactive).toContain("-ArgumentList @('--automation')");
+  expect(interactive).toContain('$automationArguments = "--automation --automation-root');
+  expect(interactive).toContain('-ArgumentList $automationArguments');
+  expect(interactive).toContain('isolatedAutomationRoot = $true');
   expect(interactive).toContain('[Environment]::UserInteractive');
   expect(interactive).toContain('Where-Object SessionId -eq $currentSessionId');
   expect(interactive).toContain('Windows UI Automation');

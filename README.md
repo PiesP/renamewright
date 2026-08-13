@@ -45,6 +45,11 @@ pnpm tauri dev
 `pnpm verify` runs frontend formatting, linting, strict types, coverage and build
 checks plus Rustfmt, Clippy, and all Rust workspace tests. `pnpm verify:full`
 additionally exercises the rendered flow and responsive layouts in Chromium.
+The native inspection build is a separate test artifact and starts only when
+compiled with `--features automation` and launched with both `--automation` and
+`--automation-root <absolute-disposable-directory>`. An optional
+`--automation-fixture <relative-json-path>` resolves only below that root's
+bounded `fixtures` directory.
 
 ## Product commitments
 

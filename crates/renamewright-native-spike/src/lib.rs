@@ -33,6 +33,354 @@ pub mod semantics {
     pub const HIGH_CONTRAST_ACTIVE: &str = "Windows high contrast palette active";
 }
 
+#[cfg(feature = "automation")]
+pub mod automation {
+    use std::fmt::{Display, Formatter};
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{Read as _, Write as _};
+    use std::path::{Component, Path, PathBuf};
+
+    use serde::Deserialize;
+
+    pub const MAX_AUTOMATION_FIXTURE_BYTES: u64 = 256 * 1024;
+    pub const MAX_AUTOMATION_TEXT_BYTES: usize = 4 * 1024;
+    const MAX_AUTOMATION_RELATIVE_PATH_BYTES: usize = 4 * 1024;
+    const LOCK_FILE_NAME: &str = ".renamewright-automation.lock";
+    const FIXTURE_DIRECTORY_NAME: &str = "fixtures";
+    const STATE_DIRECTORY_NAME: &str = "state";
+    const JOURNAL_DIRECTORY_NAME: &str = "journals";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AutomationRootErrorKind {
+        RootMustBeAbsolute,
+        RootUnavailable,
+        RootNotDirectory,
+        ReparsePointRejected,
+        ConcurrentSession,
+        InvalidRelativePath,
+        RelativePathTooLong,
+        FixtureUnavailable,
+        FixtureTooLarge,
+        InvalidFixture,
+        FixtureEscapedRoot,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct AutomationRootError {
+        kind: AutomationRootErrorKind,
+    }
+
+    impl AutomationRootError {
+        const fn new(kind: AutomationRootErrorKind) -> Self {
+            Self { kind }
+        }
+
+        #[must_use]
+        pub const fn kind(self) -> AutomationRootErrorKind {
+            self.kind
+        }
+    }
+
+    impl Display for AutomationRootError {
+        fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "the automation root was rejected ({:?})",
+                self.kind
+            )
+        }
+    }
+
+    impl std::error::Error for AutomationRootError {}
+
+    #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "camelCase")]
+    pub enum AutomationFilter {
+        All,
+        Changed,
+        Blocked,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct AutomationFixture {
+        schema_version: u16,
+        #[serde(default)]
+        prefix: Option<String>,
+        #[serde(default)]
+        source_query: Option<String>,
+        #[serde(default)]
+        filter: Option<AutomationFilter>,
+    }
+
+    impl AutomationFixture {
+        pub fn parse(bytes: &[u8]) -> Result<Self, AutomationRootError> {
+            let fixture: Self = serde_json::from_slice(bytes)
+                .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::InvalidFixture))?;
+            if fixture.schema_version != 1
+                || fixture
+                    .prefix
+                    .as_ref()
+                    .is_some_and(|value| value.len() > MAX_AUTOMATION_TEXT_BYTES)
+                || fixture
+                    .source_query
+                    .as_ref()
+                    .is_some_and(|value| value.len() > MAX_AUTOMATION_TEXT_BYTES)
+            {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::InvalidFixture,
+                ));
+            }
+            Ok(fixture)
+        }
+
+        #[must_use]
+        pub fn prefix(&self) -> Option<&str> {
+            self.prefix.as_deref()
+        }
+
+        #[must_use]
+        pub fn source_query(&self) -> Option<&str> {
+            self.source_query.as_deref()
+        }
+
+        #[must_use]
+        pub const fn filter(&self) -> Option<AutomationFilter> {
+            self.filter
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct AutomationRoot {
+        canonical_root: PathBuf,
+        fixture_root: PathBuf,
+        state_root: PathBuf,
+        journal_root: PathBuf,
+        lock_path: PathBuf,
+        _lock: File,
+    }
+
+    impl AutomationRoot {
+        pub fn open(root: &Path) -> Result<Self, AutomationRootError> {
+            if !root.is_absolute() {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::RootMustBeAbsolute,
+                ));
+            }
+            let metadata = fs::symlink_metadata(root)
+                .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
+            if !metadata.is_dir() {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::RootNotDirectory,
+                ));
+            }
+            if metadata_is_reparse_point(&metadata) {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::ReparsePointRejected,
+                ));
+            }
+            let canonical_root = fs::canonicalize(root)
+                .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
+            let lock_path = canonical_root.join(LOCK_FILE_NAME);
+            let mut lock = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+                .map_err(|_| {
+                    AutomationRootError::new(AutomationRootErrorKind::ConcurrentSession)
+                })?;
+            if writeln!(lock, "{}", std::process::id()).is_err() || lock.sync_all().is_err() {
+                let _ = fs::remove_file(&lock_path);
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::RootUnavailable,
+                ));
+            }
+
+            let result = Self::prepare(canonical_root, lock_path, lock);
+            if result.is_err() {
+                let _ = fs::remove_file(root.join(LOCK_FILE_NAME));
+            }
+            result
+        }
+
+        fn prepare(
+            canonical_root: PathBuf,
+            lock_path: PathBuf,
+            lock: File,
+        ) -> Result<Self, AutomationRootError> {
+            let fixture_root = prepare_child_directory(&canonical_root, FIXTURE_DIRECTORY_NAME)?;
+            let state_root = prepare_child_directory(&canonical_root, STATE_DIRECTORY_NAME)?;
+            let journal_root = prepare_child_directory(&canonical_root, JOURNAL_DIRECTORY_NAME)?;
+            Ok(Self {
+                canonical_root,
+                fixture_root,
+                state_root,
+                journal_root,
+                lock_path,
+                _lock: lock,
+            })
+        }
+
+        #[must_use]
+        pub fn root(&self) -> &Path {
+            &self.canonical_root
+        }
+
+        #[must_use]
+        pub fn state_root(&self) -> &Path {
+            &self.state_root
+        }
+
+        #[must_use]
+        pub fn journal_root(&self) -> &Path {
+            &self.journal_root
+        }
+
+        pub fn read_fixture(&self, relative: &Path) -> Result<Vec<u8>, AutomationRootError> {
+            validate_relative_path(relative)?;
+            let candidate = self.fixture_root.join(relative);
+            verify_existing_path(&self.fixture_root, &candidate)?;
+            let metadata = fs::metadata(&candidate).map_err(|_| {
+                AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+            })?;
+            if !metadata.is_file() {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::FixtureUnavailable,
+                ));
+            }
+            if metadata.len() > MAX_AUTOMATION_FIXTURE_BYTES {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::FixtureTooLarge,
+                ));
+            }
+            let file = File::open(&candidate).map_err(|_| {
+                AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+            })?;
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            file.take(MAX_AUTOMATION_FIXTURE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| {
+                    AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+                })?;
+            if bytes.len() as u64 > MAX_AUTOMATION_FIXTURE_BYTES {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::FixtureTooLarge,
+                ));
+            }
+            Ok(bytes)
+        }
+
+        pub fn load_fixture(
+            &self,
+            relative: &Path,
+        ) -> Result<AutomationFixture, AutomationRootError> {
+            AutomationFixture::parse(&self.read_fixture(relative)?)
+        }
+    }
+
+    impl Drop for AutomationRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.lock_path);
+        }
+    }
+
+    fn validate_relative_path(path: &Path) -> Result<(), AutomationRootError> {
+        if path.as_os_str().as_encoded_bytes().len() > MAX_AUTOMATION_RELATIVE_PATH_BYTES {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::RelativePathTooLong,
+            ));
+        }
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::InvalidRelativePath,
+            ));
+        }
+        Ok(())
+    }
+
+    fn prepare_child_directory(root: &Path, name: &str) -> Result<PathBuf, AutomationRootError> {
+        let path = root.join(name);
+        match fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::RootUnavailable,
+                ));
+            }
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
+        if !metadata.is_dir() {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::RootNotDirectory,
+            ));
+        }
+        if metadata_is_reparse_point(&metadata) {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::ReparsePointRejected,
+            ));
+        }
+        let canonical = fs::canonicalize(&path)
+            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
+        if !canonical.starts_with(root) {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::FixtureEscapedRoot,
+            ));
+        }
+        Ok(canonical)
+    }
+
+    fn verify_existing_path(root: &Path, candidate: &Path) -> Result<(), AutomationRootError> {
+        let relative = candidate
+            .strip_prefix(root)
+            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::FixtureEscapedRoot))?;
+        let mut current = root.to_path_buf();
+        for component in relative.components() {
+            let Component::Normal(component) = component else {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::InvalidRelativePath,
+                ));
+            };
+            current.push(component);
+            let metadata = fs::symlink_metadata(&current).map_err(|_| {
+                AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+            })?;
+            if metadata_is_reparse_point(&metadata) {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::ReparsePointRejected,
+                ));
+            }
+        }
+        let canonical = fs::canonicalize(candidate)
+            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable))?;
+        if !canonical.starts_with(root) {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::FixtureEscapedRoot,
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+        use std::os::windows::fs::MetadataExt as _;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+
+    #[cfg(not(windows))]
+    fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+        metadata.file_type().is_symlink()
+    }
+}
+
 const PAPER: Color32 = Color32::from_rgb(247, 248, 252);
 const PAPER_RAISED: Color32 = Color32::from_rgb(253, 253, 254);
 const PAPER_SOFT: Color32 = Color32::from_rgb(234, 238, 248);
@@ -147,6 +495,8 @@ pub struct NativeSpikeApp {
     palette: NativePalette,
     #[cfg(feature = "automation")]
     automation_mode: bool,
+    #[cfg(feature = "automation")]
+    _automation_root: Option<automation::AutomationRoot>,
 }
 
 impl NativeSpikeApp {
@@ -166,7 +516,37 @@ impl NativeSpikeApp {
             palette,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
+            #[cfg(feature = "automation")]
+            _automation_root: None,
         }
+    }
+
+    #[cfg(feature = "automation")]
+    #[must_use]
+    pub fn new_automated(
+        palette: NativePalette,
+        automation_root: automation::AutomationRoot,
+        fixture: Option<&automation::AutomationFixture>,
+    ) -> Self {
+        let mut app = Self::new_with_palette(true, palette);
+        if let Some(fixture) = fixture {
+            if let Some(prefix) = fixture.prefix() {
+                app.prefix = prefix.to_owned();
+            }
+            if let Some(source_query) = fixture.source_query() {
+                app.source_query = source_query.to_owned();
+            }
+            if let Some(filter) = fixture.filter() {
+                app.filter = match filter {
+                    automation::AutomationFilter::All => PlanFilter::All,
+                    automation::AutomationFilter::Changed => PlanFilter::Changed,
+                    automation::AutomationFilter::Blocked => PlanFilter::Blocked,
+                };
+            }
+            app.status = "Automation fixture loaded".to_owned();
+        }
+        app._automation_root = Some(automation_root);
+        app
     }
 
     fn row_is_blocked(index: usize) -> bool {
@@ -523,10 +903,21 @@ pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "automation")]
+    use std::error::Error;
+    #[cfg(feature = "automation")]
+    use std::fs;
+    #[cfg(feature = "automation")]
+    use std::path::Path;
+
     use eframe::egui;
     use egui_kittest::Harness;
     use kittest::{NodeT as _, Queryable as _};
 
+    #[cfg(feature = "automation")]
+    use super::automation::{
+        AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
+    };
     use super::{NativePalette, NativeSpikeApp, install_theme, semantics};
 
     #[test]
@@ -644,5 +1035,99 @@ mod tests {
         assert!(harness.query_by_label("IMG_00000.jpg").is_some());
         assert!(harness.query_by_label("IMG_09999.jpg").is_none());
         assert!(harness.query_all_by(|_| true).count() < 500);
+    }
+
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_root_is_exclusive_and_prepares_isolated_state() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = AutomationRoot::open(directory.path())?;
+
+        assert_eq!(root.root(), fs::canonicalize(directory.path())?);
+        assert!(root.state_root().is_dir());
+        assert!(root.journal_root().is_dir());
+        let Err(error) = AutomationRoot::open(directory.path()) else {
+            return Err("a concurrent automation session acquired the same root".into());
+        };
+        assert_eq!(error.kind(), AutomationRootErrorKind::ConcurrentSession);
+        Ok(())
+    }
+
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_fixture_reads_are_relative_and_bounded() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let fixture_directory = directory.path().join("fixtures").join("nested");
+        fs::create_dir_all(&fixture_directory)?;
+        let fixture_json = br#"{"schemaVersion":1,"prefix":"fixture_","filter":"blocked"}"#;
+        fs::write(fixture_directory.join("fixture.json"), fixture_json)?;
+        let oversized = fixture_directory.join("oversized.json");
+        fs::File::create(&oversized)?.set_len(MAX_AUTOMATION_FIXTURE_BYTES + 1)?;
+        let root = AutomationRoot::open(directory.path())?;
+
+        assert_eq!(
+            root.read_fixture(Path::new("nested/fixture.json"))?,
+            fixture_json
+        );
+        let fixture = root.load_fixture(Path::new("nested/fixture.json"))?;
+        assert_eq!(fixture.prefix(), Some("fixture_"));
+        assert_eq!(
+            fixture.filter(),
+            Some(super::automation::AutomationFilter::Blocked)
+        );
+        for rejected in [Path::new("../fixture.json"), directory.path()] {
+            let Err(error) = root.read_fixture(rejected) else {
+                return Err("an invalid automation fixture path was accepted".into());
+            };
+            assert_eq!(error.kind(), AutomationRootErrorKind::InvalidRelativePath);
+        }
+        let Err(error) = root.read_fixture(Path::new("nested/oversized.json")) else {
+            return Err("an oversized automation fixture was accepted".into());
+        };
+        assert_eq!(error.kind(), AutomationRootErrorKind::FixtureTooLarge);
+        Ok(())
+    }
+
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_fixture_initializes_a_deterministic_ui_state() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::create_dir(directory.path().join("fixtures"))?;
+        fs::write(
+            directory.path().join("fixtures/session.json"),
+            br#"{"schemaVersion":1,"prefix":"fixture_","filter":"blocked"}"#,
+        )?;
+        let root = AutomationRoot::open(directory.path())?;
+        let fixture = root.load_fixture(Path::new("session.json"))?;
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                NativeSpikeApp::new_automated(NativePalette::default(), root, Some(&fixture)),
+            );
+
+        harness.get_by_label("Automation fixture loaded");
+        harness.get_by_label("10 shown");
+        harness.get_by_label("fixture_IMG_00997.jpg");
+        Ok(())
+    }
+
+    #[cfg(all(feature = "automation", unix))]
+    #[test]
+    fn automation_fixture_rejects_symlink_escape() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        fs::write(outside.path().join("secret.json"), b"secret")?;
+        fs::create_dir(directory.path().join("fixtures"))?;
+        symlink(outside.path(), directory.path().join("fixtures/escape"))?;
+        let root = AutomationRoot::open(directory.path())?;
+
+        let Err(error) = root.read_fixture(Path::new("escape/secret.json")) else {
+            return Err("a symlink escaped the automation root".into());
+        };
+        assert_eq!(error.kind(), AutomationRootErrorKind::ReparsePointRejected);
+        Ok(())
     }
 }
