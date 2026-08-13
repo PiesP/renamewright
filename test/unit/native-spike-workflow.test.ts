@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import workflow from '../../.github/workflows/ci.yaml?raw';
+import matrixMerger from '../../scripts/merge-windows-native-spike-interactive-evidence.ps1?raw';
 import packager from '../../scripts/prepare-windows-native-spike.ps1?raw';
 import interactive from '../../scripts/test-windows-native-spike-interactive.ps1?raw';
 import runtime from '../../scripts/test-windows-native-spike-runtime.ps1?raw';
@@ -150,4 +151,19 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('Update-ArtifactChecksums');
   expect(interactive).not.toContain('Invoke-Expression');
   expect(interactive).not.toContain('DownloadString');
+});
+
+test('merges only intentional source-bound Windows acceptance configurations', () => {
+  expect(matrixMerger).toContain('$requiredDpiPercent = @(100, 125, 150, 200, 250)');
+  expect(matrixMerger).toContain("'windows-interactive-evidence*.json'");
+  expect(matrixMerger).toContain('$expectedDpiPercent -eq $dpiPercent');
+  expect(matrixMerger).toContain('$highContrastRequired -and $highContrastObserved');
+  expect(matrixMerger).toContain('$explorerDragDropRequired -and');
+  expect(matrixMerger).toContain("native shell$'");
+  expect(matrixMerger).toContain('Assert-Screenshot');
+  expect(matrixMerger).toContain('checksumsVerified = $true');
+  expect(matrixMerger).toContain("status = if ($complete) { 'complete' } else { 'partial' }");
+  expect(matrixMerger).toContain('$RequireComplete -and -not $complete');
+  expect(matrixMerger).not.toContain('Set-ItemProperty');
+  expect(matrixMerger).not.toContain('Start-Process');
 });
