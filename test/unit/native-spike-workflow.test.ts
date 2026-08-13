@@ -25,7 +25,8 @@ test('builds default and automation native spike executables independently on Wi
 
 test('uploads a source-bound artifact only for durable workflow runs', () => {
   expect(workflow).toContain(
-    'if: $' + "{{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}"
+    'if: $' +
+      "{{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}"
   );
   expect(workflow).toContain(
     'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1'
@@ -64,4 +65,11 @@ test('exercises the exact Windows executables before uploading runtime evidence'
   expect(runtime).toContain('automationWorkingSetBytes');
   expect(runtime).toContain("'windows-runtime-evidence.json'");
   expect(runtime).toContain("Where-Object Name -ne 'SHA256SUMS'");
+  expect(runtime).toContain("'default-process.stdout.txt'");
+  expect(runtime).toContain("'default-process.stderr.txt'");
+  expect(runtime).toContain('Get-ProcessFailureDetail');
+  expect(runtime).toContain('-RedirectStandardOutput $defaultOutputPath');
+  expect(runtime).toContain('-RedirectStandardError $defaultErrorPath');
+  expect(runtime).toContain('-RedirectStandardOutput $automationOutputPath');
+  expect(runtime).toContain('-RedirectStandardError $automationErrorPath');
 });
