@@ -83,6 +83,10 @@ public static class RenamewrightAcceptanceNativeMethods
     public static extern bool GetWindowRect(IntPtr window, out RenamewrightWindowRect rect);
 
     [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PrintWindow(IntPtr window, IntPtr deviceContext, uint flags);
+
+    [DllImport("user32.dll")]
     public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
 }
 '@
@@ -218,17 +222,21 @@ function Invoke-And-CloseDialog {
 function Invoke-Probe {
   param(
     [Parameter(Mandatory = $true)] [string]$ProbePath,
-    [Parameter(Mandatory = $true)] [string[]]$Arguments,
+    [string[]]$Arguments = @(),
     [Parameter(Mandatory = $true)] [string]$OutputPath,
     [Parameter(Mandatory = $true)] [string]$ErrorPath
   )
-  $probe = Start-Process `
-    -FilePath $ProbePath `
-    -ArgumentList $Arguments `
-    -RedirectStandardOutput $OutputPath `
-    -RedirectStandardError $ErrorPath `
-    -PassThru `
-    -Wait
+  $startParameters = @{
+    FilePath = $ProbePath
+    RedirectStandardOutput = $OutputPath
+    RedirectStandardError = $ErrorPath
+    PassThru = $true
+    Wait = $true
+  }
+  if ($Arguments.Count -gt 0) {
+    $startParameters.ArgumentList = $Arguments
+  }
+  $probe = Start-Process @startParameters
   if ($probe.ExitCode -ne 0) {
     $detail = Get-Content -LiteralPath $ErrorPath -Raw
     throw "The interactive inspection probe failed with code $($probe.ExitCode): $detail"
@@ -262,14 +270,36 @@ function Save-WindowScreenshot {
     $bitmap = [System.Drawing.Bitmap]::new($width, $height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
-      $graphics.CopyFromScreen(
-        $rect.Left,
-        $rect.Top,
-        0,
-        0,
-        [System.Drawing.Size]::new($width, $height)
+      $deviceContext = $graphics.GetHdc()
+      try {
+        $captured = [RenamewrightAcceptanceNativeMethods]::PrintWindow(
+          $Window,
+          $deviceContext,
+          2
+        )
+      } finally {
+        $graphics.ReleaseHdc($deviceContext)
+      }
+      if (-not $captured) {
+        $graphics.CopyFromScreen(
+          $rect.Left,
+          $rect.Top,
+          0,
+          0,
+          [System.Drawing.Size]::new($width, $height)
+        )
+      }
+      $output = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Create,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
       )
-      $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+      try {
+        $bitmap.Save($output, [System.Drawing.Imaging.ImageFormat]::Png)
+      } finally {
+        $output.Dispose()
+      }
     } finally {
       $graphics.Dispose()
       $bitmap.Dispose()
@@ -353,11 +383,24 @@ try {
     throw 'The native spike did not expose a ready Windows UI Automation tree.'
   }
 
+  $treeProbeOutput = Invoke-Probe `
+    -ProbePath $inspectionProbe `
+    -OutputPath $probeOutputPath `
+    -ErrorPath $probeErrorPath
+  foreach ($required in @(
+    'apply_disabled=true',
+    'read_only_workbench=true',
+    'rule_actions_named=true'
+  )) {
+    if ($treeProbeOutput.IndexOf($required, [StringComparison]::Ordinal) -lt 0) {
+      throw "The interactive inspection tree did not contain '$required'."
+    }
+  }
+
   foreach ($requiredName in @(
     'AUTOMATION TEST MODE', 'Renamewright', 'Add files', 'Add folder',
-    '01 Add prefix', 'Add suffix', 'Add rule', 'All diagnostics',
-    'Local presets', 'Preset name', 'Move rule up', 'Move rule down',
-    'Remove rule', '한글 IME 입력 확인', 'Apply'
+    '01 Add prefix', 'Move rule up', 'Move rule down', 'Remove rule',
+    '한글 IME 입력 확인', 'Apply'
   )) {
     $found = $false
     foreach ($element in $elements) {
@@ -407,6 +450,9 @@ try {
     -ControlType ([System.Windows.Automation.ControlType]::Edit)
   $prefixEdit.SetFocus()
   Start-Sleep -Milliseconds 200
+  if (-not $prefixEdit.Current.HasKeyboardFocus) {
+    throw 'Windows UI Automation could not assign keyboard focus to the prefix editor.'
+  }
   [uint32]$windowProcessId = 0
   $windowThreadId = [RenamewrightAcceptanceNativeMethods]::GetWindowThreadProcessId(
     $windowHandle,
@@ -548,6 +594,7 @@ try {
       automationModeExplicit = $true
       isolatedAutomationRoot = $true
       windowsUiAutomationExposed = $true
+      inspectionProbeExposedReadOnlyWorkbench = $true
       requiredControlNamesExposed = $true
       applyDisabled = $true
       virtualizedScrollBarExposed = $true

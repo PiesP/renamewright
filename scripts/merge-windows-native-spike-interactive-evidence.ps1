@@ -14,6 +14,7 @@ $requiredRunChecks = @(
   'explorerInSameSession',
   'automationModeExplicit',
   'windowsUiAutomationExposed',
+  'inspectionProbeExposedReadOnlyWorkbench',
   'requiredControlNamesExposed',
   'applyDisabled',
   'virtualizedScrollBarExposed',
