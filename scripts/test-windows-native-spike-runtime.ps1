@@ -30,6 +30,15 @@ function Resolve-RequiredPath {
   return (Resolve-Path -LiteralPath $Path).Path
 }
 
+function Resolve-TemporaryDirectory {
+  $candidate = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+    [System.IO.Path]::GetTempPath()
+  } else {
+    $env:RUNNER_TEMP
+  }
+  return (Resolve-Path -LiteralPath $candidate).Path
+}
+
 function Stop-TestProcess {
   param(
     [System.Diagnostics.Process]$Process
@@ -131,7 +140,7 @@ function Invoke-InspectionProbe {
 
   $probe = Start-Process `
     -FilePath $ProbePath `
-    -ArgumentList @($ScreenshotPath) `
+    -ArgumentList @('--exercise-performance', $ScreenshotPath) `
     -RedirectStandardOutput $OutputPath `
     -RedirectStandardError $ErrorPath `
     -PassThru `
@@ -165,8 +174,22 @@ try {
     -RedirectStandardOutput $defaultOutputPath `
     -RedirectStandardError $defaultErrorPath `
     -PassThru
-  Start-Sleep -Seconds 3
-  $defaultProcess.Refresh()
+  $defaultWindowReady = $false
+  $defaultDeadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
+  while ([DateTimeOffset]::UtcNow -lt $defaultDeadline) {
+    Start-Sleep -Milliseconds 50
+    $defaultProcess.Refresh()
+    if ($defaultProcess.HasExited) {
+      break
+    }
+    if (
+      $defaultProcess.MainWindowHandle -ne 0 -and
+      $defaultProcess.MainWindowTitle -ceq 'Renamewright native Rust spike'
+    ) {
+      $defaultWindowReady = $true
+      break
+    }
+  }
   if ($defaultProcess.HasExited) {
     $defaultExitCode = $defaultProcess.ExitCode
     $defaultError = Get-TrimmedFileText -Path $defaultErrorPath
@@ -190,10 +213,15 @@ try {
     }
   }
   if (-not $hostedRendererUnavailable) {
+    if (-not $defaultWindowReady) {
+      throw 'The default native spike did not expose its expected main window within 20 seconds.'
+    }
     $defaultStartup.Stop()
     if (Test-InspectionListener) {
       throw 'The default native spike exposed the custom inspection listener.'
     }
+    Start-Sleep -Seconds 2
+    $defaultProcess.Refresh()
     $defaultWorkingSet = $defaultProcess.WorkingSet64
   }
 } finally {
@@ -204,7 +232,8 @@ if ($hostedRendererUnavailable) {
   $unavailableEvidence = [ordered]@{
     schemaVersion = 1
     sourceSha = $SourceSha
-    host = 'windows-2025'
+    host = [Environment]::OSVersion.VersionString
+    runnerImage = [string]$env:ImageOS
     status = 'unavailable'
     reason = 'hosted-runner-opengl-below-2'
     checks = [ordered]@{
@@ -226,8 +255,9 @@ if ($hostedRendererUnavailable) {
 }
 
 $screenshotPath = Join-Path $artifactRoot 'windows-runtime-screenshot.png'
-$probeOutputPath = Join-Path $env:RUNNER_TEMP 'native-spike-probe.stdout.txt'
-$probeErrorPath = Join-Path $env:RUNNER_TEMP 'native-spike-probe.stderr.txt'
+$temporaryDirectory = Resolve-TemporaryDirectory
+$probeOutputPath = Join-Path $temporaryDirectory 'native-spike-probe.stdout.txt'
+$probeErrorPath = Join-Path $temporaryDirectory 'native-spike-probe.stderr.txt'
 $automationStartup = [System.Diagnostics.Stopwatch]::StartNew()
 try {
   $automationProcess = Start-Process `
@@ -285,11 +315,28 @@ try {
     'automation_banner=true',
     'hangul_sample=true',
     'apply_disabled=true',
-    'screenshot=1180x760'
+    'screenshot=1180x760',
+    'scroll_last_visible=true',
+    'filter_target_visible=true',
+    'filter_count_visible=true'
   )) {
-    if (-not $probeOutput.Contains($required, [System.StringComparison]::Ordinal)) {
+    if ($probeOutput.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
       throw "The automation probe output did not contain '$required'."
     }
+  }
+  if ($probeOutput -notmatch 'scroll_ms=(?<scroll>[0-9]+)') {
+    throw 'The automation probe did not report scrolling latency.'
+  }
+  $scrollMilliseconds = [long]$Matches.scroll
+  if ($scrollMilliseconds -ge 1000) {
+    throw "The 10,000-entry scroll took $scrollMilliseconds ms."
+  }
+  if ($probeOutput -notmatch 'filter_ms=(?<filter>[0-9]+)') {
+    throw 'The automation probe did not report filtering latency.'
+  }
+  $filterMilliseconds = [long]$Matches.filter
+  if ($filterMilliseconds -ge 1000) {
+    throw "The 10,000-entry filter took $filterMilliseconds ms."
   }
   if (-not (Test-Path -LiteralPath $screenshotPath -PathType Leaf)) {
     throw 'The Windows runtime screenshot was not produced.'
@@ -309,9 +356,13 @@ try {
 $runtimeEvidence = [ordered]@{
   schemaVersion = 1
   sourceSha = $SourceSha
-  host = 'windows-2025'
+  host = [Environment]::OSVersion.VersionString
+  runnerImage = [string]$env:ImageOS
+  interactive = [Environment]::UserInteractive
+  sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
   checks = [ordered]@{
     defaultStarted = $true
+    defaultMainWindowReady = $true
     defaultInspectionListenerAbsent = $true
     automationStartedExplicitly = $true
     protocolVersion = 1
@@ -319,6 +370,8 @@ $runtimeEvidence = [ordered]@{
     automationBannerVisible = $true
     hangulDisplayVisible = $true
     applyDisabled = $true
+    tenThousandEntryScrollUnderOneSecond = $true
+    tenThousandEntryFilterUnderOneSecond = $true
     screenshotCaptured = $true
   }
   measurements = [ordered]@{
@@ -327,6 +380,8 @@ $runtimeEvidence = [ordered]@{
     automationProbeReadyMilliseconds = $automationStartup.ElapsedMilliseconds
     automationWorkingSetBytes = $automationWorkingSet
     accessKitNodeCount = $nodeCount
+    scrollMilliseconds = $scrollMilliseconds
+    filterMilliseconds = $filterMilliseconds
     screenshotWidth = 1180
     screenshotHeight = 760
     screenshotSha256 = (Get-FileHash -LiteralPath $screenshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
