@@ -1,10 +1,20 @@
 import { expect, test } from 'vitest';
 import workflow from '../../.github/workflows/ci.yaml?raw';
+import cargoManifest from '../../Cargo.toml?raw';
 import visualReviewer from '../../scripts/confirm-windows-native-spike-visual-evidence.ps1?raw';
 import matrixMerger from '../../scripts/merge-windows-native-spike-interactive-evidence.ps1?raw';
 import packager from '../../scripts/prepare-windows-native-spike.ps1?raw';
 import interactive from '../../scripts/test-windows-native-spike-interactive.ps1?raw';
 import runtime from '../../scripts/test-windows-native-spike-runtime.ps1?raw';
+
+test('optimizes release artifacts without relaxing the frozen executable budget', () => {
+  expect(cargoManifest).toContain('[profile.release]');
+  expect(cargoManifest).toContain('codegen-units = 1');
+  expect(cargoManifest).toContain('lto = "fat"');
+  expect(cargoManifest).toContain('panic = "abort"');
+  expect(cargoManifest).toContain('strip = "symbols"');
+  expect(runtime).toContain('defaultExecutableBytes = 8 * 1024 * 1024');
+});
 
 test('builds default and automation native spike executables independently on Windows', () => {
   const defaultBuild = workflow.indexOf('--bin renamewright-native-spike');
