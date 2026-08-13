@@ -1777,25 +1777,39 @@ impl NativeSpikeApp {
                             {
                                 self.selected_rule = index;
                             }
-                            if ui
-                                .add_enabled(index > 0, egui::Button::new("↑"))
-                                .on_hover_text(semantics::MOVE_RULE_UP)
-                                .clicked()
-                            {
+                            let move_up = ui.add_enabled(index > 0, egui::Button::new("↑"));
+                            move_up.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    index > 0,
+                                    self.locale.text(semantics::MOVE_RULE_UP, "규칙 위로 이동"),
+                                )
+                            });
+                            if move_up.on_hover_text(semantics::MOVE_RULE_UP).clicked() {
                                 move_rule = Some((index, index - 1));
                             }
-                            if ui
-                                .add_enabled(index + 1 < self.rules.len(), egui::Button::new("↓"))
-                                .on_hover_text(semantics::MOVE_RULE_DOWN)
-                                .clicked()
-                            {
+                            let move_down = ui
+                                .add_enabled(index + 1 < self.rules.len(), egui::Button::new("↓"));
+                            move_down.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    index + 1 < self.rules.len(),
+                                    self.locale
+                                        .text(semantics::MOVE_RULE_DOWN, "규칙 아래로 이동"),
+                                )
+                            });
+                            if move_down.on_hover_text(semantics::MOVE_RULE_DOWN).clicked() {
                                 move_rule = Some((index, index + 1));
                             }
-                            if ui
-                                .button("×")
-                                .on_hover_text(semantics::REMOVE_RULE)
-                                .clicked()
-                            {
+                            let remove = ui.button("×");
+                            remove.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    self.locale.text(semantics::REMOVE_RULE, "규칙 제거"),
+                                )
+                            });
+                            if remove.on_hover_text(semantics::REMOVE_RULE).clicked() {
                                 remove_rule = Some(index);
                             }
                         });
@@ -2526,6 +2540,8 @@ mod tests {
             semantics::SOURCE_QUERY_LABEL,
         );
         let apply = harness.get_by_label(semantics::APPLY);
+        let move_up = harness.get_by_label(semantics::MOVE_RULE_UP);
+        let remove_rule = harness.get_by_label(semantics::REMOVE_RULE);
         assert_eq!(
             add_files.accesskit_node().role(),
             egui::accesskit::Role::Button
@@ -2545,6 +2561,15 @@ mod tests {
         );
         assert_eq!(apply.accesskit_node().role(), egui::accesskit::Role::Button);
         assert!(apply.accesskit_node().is_disabled());
+        assert_eq!(
+            move_up.accesskit_node().role(),
+            egui::accesskit::Role::Button
+        );
+        assert!(move_up.accesskit_node().is_disabled());
+        assert_eq!(
+            remove_rule.accesskit_node().role(),
+            egui::accesskit::Role::Button
+        );
     }
 
     #[test]
