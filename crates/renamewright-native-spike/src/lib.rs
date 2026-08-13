@@ -11,8 +11,8 @@ use eframe::egui::{
 };
 use renamewright_application::{
     ApplicationService, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
-    ExtensionOperationDto, FilenamePartDto, PlanDto, RangeOperationDto, RangeOriginDto,
-    RulePipelineRequestDto, RuleRequestDto, SequenceOrderDto, SequencePlacementDto,
+    ExtensionOperationDto, FilenamePartDto, PlanDto, PresetDocumentDto, RangeOperationDto,
+    RangeOriginDto, RulePipelineRequestDto, RuleRequestDto, SequenceOrderDto, SequencePlacementDto,
     SequenceScopeDto, SourceOverrideDto, UnicodeNormalizationFormDto,
 };
 
@@ -52,6 +52,11 @@ pub mod semantics {
     pub const CLOSE_INSPECTOR: &str = "Close inspector";
     pub const SAVE_OVERRIDE: &str = "Save override";
     pub const CANCEL_OVERRIDE: &str = "Cancel override";
+    pub const PRESETS: &str = "Local presets";
+    pub const PRESET_NAME: &str = "Preset name";
+    pub const SAVE_PRESET: &str = "Save preset";
+    pub const APPLY_PRESET: &str = "Apply preset";
+    pub const DELETE_PRESET: &str = "Delete preset";
     pub const AUTOMATION_BANNER: &str = "AUTOMATION TEST MODE";
     pub const HIGH_CONTRAST_ACTIVE: &str = "Windows high contrast palette active";
 }
@@ -1355,6 +1360,9 @@ pub struct NativeSpikeApp {
     locale: Locale,
     override_editor: Option<OverrideEditor>,
     inspection: Option<InspectionDocument>,
+    preset_path: Option<PathBuf>,
+    presets: PresetDocumentDto,
+    preset_name: String,
     status: String,
     palette: NativePalette,
     #[cfg(feature = "automation")]
@@ -1371,6 +1379,25 @@ impl NativeSpikeApp {
 
     #[must_use]
     pub fn new_with_palette(_automation_mode: bool, palette: NativePalette) -> Self {
+        Self::new_with_storage(_automation_mode, palette, None)
+    }
+
+    #[must_use]
+    pub fn new_with_storage(
+        _automation_mode: bool,
+        palette: NativePalette,
+        preset_path: Option<PathBuf>,
+    ) -> Self {
+        let (presets, preset_status) = preset_path.as_ref().map_or_else(
+            || (PresetDocumentDto::default(), None),
+            |path| match PresetDocumentDto::load(path) {
+                Ok(document) => (document, None),
+                Err(error) => (
+                    PresetDocumentDto::default(),
+                    Some(format!("Presets unavailable ({})", error.code())),
+                ),
+            },
+        );
         Self {
             application: ApplicationService::default(),
             plan: None,
@@ -1389,7 +1416,10 @@ impl NativeSpikeApp {
             locale: Locale::English,
             override_editor: None,
             inspection: None,
-            status: format!("{SAMPLE_COUNT} sample entries ready"),
+            preset_path,
+            presets,
+            preset_name: String::new(),
+            status: preset_status.unwrap_or_else(|| format!("{SAMPLE_COUNT} sample entries ready")),
             palette,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
@@ -1405,7 +1435,8 @@ impl NativeSpikeApp {
         automation_root: automation::AutomationRoot,
         fixture: Option<&automation::AutomationFixture>,
     ) -> Self {
-        let mut app = Self::new_with_palette(true, palette);
+        let preset_path = automation_root.state_root().join("presets.json");
+        let mut app = Self::new_with_storage(true, palette, Some(preset_path));
         if let Some(fixture) = fixture {
             if let Some(prefix) = fixture.prefix() {
                 app.set_prefix(prefix);
@@ -1539,6 +1570,69 @@ impl NativeSpikeApp {
                 _ => None,
             })
             .unwrap_or_default()
+    }
+
+    fn save_presets(&mut self, next: PresetDocumentDto, success: String) {
+        if let Some(path) = &self.preset_path
+            && let Err(error) = next.save(path)
+        {
+            self.status = format!("Presets unavailable ({})", error.code());
+            return;
+        }
+        self.presets = next;
+        self.status = success;
+    }
+
+    fn save_current_preset(&mut self) {
+        let mut next = self.presets.clone();
+        match next.add(&self.preset_name, &self.rules) {
+            Ok(_) => {
+                self.preset_name.clear();
+                self.save_presets(
+                    next,
+                    self.locale
+                        .text("Preset saved", "프리셋을 저장했습니다")
+                        .to_owned(),
+                );
+            }
+            Err(error) => self.status = format!("Preset not saved ({})", error.code()),
+        }
+    }
+
+    fn apply_preset(&mut self, preset_id: u64) {
+        let Some((name, rules)) = self
+            .presets
+            .presets()
+            .iter()
+            .find(|preset| preset.preset_id() == preset_id)
+            .map(|preset| (preset.name().to_owned(), preset.rules().to_vec()))
+        else {
+            return;
+        };
+        self.next_rule_id = rules
+            .iter()
+            .map(RuleRequestDto::rule_id)
+            .max()
+            .unwrap_or_default()
+            .saturating_add(1);
+        self.rules = rules;
+        self.selected_rule = 0;
+        self.refresh_plan();
+        self.status = format!(
+            "{}: {name}",
+            self.locale.text("Preset applied", "프리셋 적용")
+        );
+    }
+
+    fn delete_preset(&mut self, preset_id: u64) {
+        let mut next = self.presets.clone();
+        next.remove(preset_id);
+        self.save_presets(
+            next,
+            self.locale
+                .text("Preset deleted", "프리셋을 삭제했습니다")
+                .to_owned(),
+        );
     }
 
     fn show_source_bar(&mut self, ui: &mut egui::Ui) {
@@ -1690,6 +1784,62 @@ impl NativeSpikeApp {
             ui.label(self.locale.text("No rules", "규칙 없음"));
         }
         ui.label(RichText::new(semantics::HANGUL_IME_HELP).color(self.palette.ink_soft));
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(
+            RichText::new(self.locale.text(semantics::PRESETS, "로컬 프리셋"))
+                .strong()
+                .color(self.palette.ink),
+        );
+        let preset_label = ui.label(self.locale.text(semantics::PRESET_NAME, "프리셋 이름"));
+        ui.add(
+            egui::TextEdit::singleline(&mut self.preset_name)
+                .id_salt("preset-name")
+                .hint_text(self.locale.text("Name", "이름")),
+        )
+        .labelled_by(preset_label.id);
+        if ui
+            .button(self.locale.text(semantics::SAVE_PRESET, "프리셋 저장"))
+            .clicked()
+        {
+            self.save_current_preset();
+        }
+        let mut apply_preset = None;
+        let mut delete_preset = None;
+        ScrollArea::vertical()
+            .id_salt("preset-list")
+            .max_height(120.0)
+            .show(ui, |ui| {
+                for preset in self.presets.presets() {
+                    ui.push_id(preset.preset_id(), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(preset.name());
+                            if ui
+                                .small_button(
+                                    self.locale.text(semantics::APPLY_PRESET, "프리셋 적용"),
+                                )
+                                .clicked()
+                            {
+                                apply_preset = Some(preset.preset_id());
+                            }
+                            if ui
+                                .small_button(
+                                    self.locale.text(semantics::DELETE_PRESET, "프리셋 삭제"),
+                                )
+                                .clicked()
+                            {
+                                delete_preset = Some(preset.preset_id());
+                            }
+                        });
+                    });
+                }
+            });
+        if let Some(preset_id) = apply_preset {
+            self.apply_preset(preset_id);
+        }
+        if let Some(preset_id) = delete_preset {
+            self.delete_preset(preset_id);
+        }
     }
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
@@ -2243,7 +2393,9 @@ mod tests {
     use super::automation::{
         AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
     };
-    use super::{Locale, NativePalette, NativeSpikeApp, RuleKind, install_theme, semantics};
+    use super::{
+        Locale, NativePalette, NativeSpikeApp, RuleKind, RuleRequestDto, install_theme, semantics,
+    };
 
     #[test]
     fn accesskit_exposes_primary_workbench_controls() {
@@ -2466,6 +2618,39 @@ mod tests {
         harness.get_by_label("규칙");
         harness.get_by_label("접두사 추가");
         harness.get_by_label("접두사 텍스트");
+    }
+
+    #[test]
+    fn native_presets_persist_and_restore_ordered_rules() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let preset_path = directory.path().join("presets.json");
+        let mut app = NativeSpikeApp::new_with_storage(
+            false,
+            NativePalette::default(),
+            Some(preset_path.clone()),
+        );
+        app.rules = vec![
+            RuleKind::Sequence.create(4),
+            RuleRequestDto::Prefix {
+                rule_id: 8,
+                enabled: true,
+                value: "archive-".to_owned(),
+            },
+        ];
+        app.preset_name = "Archive order".to_owned();
+        app.save_current_preset();
+        assert!(preset_path.is_file());
+
+        let mut restored =
+            NativeSpikeApp::new_with_storage(false, NativePalette::default(), Some(preset_path));
+        assert_eq!(restored.presets.presets().len(), 1);
+        restored.rules = vec![RuleKind::Case.create(1)];
+        restored.apply_preset(1);
+        assert_eq!(restored.rules.len(), 2);
+        assert_eq!(restored.rules[0].rule_id(), 4);
+        assert_eq!(restored.rules[1].rule_id(), 8);
+        assert_eq!(restored.next_rule_id, 9);
+        Ok(())
     }
 
     #[cfg(feature = "automation")]
