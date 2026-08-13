@@ -10,6 +10,29 @@ use eframe::egui::{
 const SAMPLE_COUNT: usize = 10_000;
 const PREVIEW_ROW_HEIGHT: f32 = 28.0;
 
+pub mod semantics {
+    pub const PRODUCT_NAME: &str = "Renamewright";
+    pub const TAGLINE: &str = "Plan every rename.";
+    pub const ADD_FOLDER: &str = "Add folder";
+    pub const ADD_FILES: &str = "Add files";
+    pub const RULES_HEADING: &str = "Rules";
+    pub const RULES_ORDER_HELP: &str = "Applied in order";
+    pub const RULE_PREFIX: &str = "Prefix";
+    pub const RULE_SEQUENCE: &str = "Sequence";
+    pub const RULE_EXTENSION: &str = "Extension";
+    pub const PREFIX_LABEL: &str = "Prefix text";
+    pub const HANGUL_IME_HELP: &str = "한글 IME 입력 확인";
+    pub const PREVIEW_HEADING: &str = "Preview";
+    pub const FILTER_ALL: &str = "All";
+    pub const FILTER_CHANGED: &str = "Changed";
+    pub const FILTER_BLOCKED: &str = "Blocked";
+    pub const SOURCE_QUERY_LABEL: &str = "Filter names";
+    pub const APPLY: &str = "Apply";
+    pub const APPLY_LOCKED: &str = "Apply locked";
+    pub const AUTOMATION_BANNER: &str = "AUTOMATION TEST MODE";
+    pub const HIGH_CONTRAST_ACTIVE: &str = "Windows high contrast palette active";
+}
+
 const PAPER: Color32 = Color32::from_rgb(247, 248, 252);
 const PAPER_RAISED: Color32 = Color32::from_rgb(253, 253, 254);
 const PAPER_SOFT: Color32 = Color32::from_rgb(234, 238, 248);
@@ -107,9 +130,9 @@ impl PlanFilter {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::All => "All",
-            Self::Changed => "Changed",
-            Self::Blocked => "Blocked",
+            Self::All => semantics::FILTER_ALL,
+            Self::Changed => semantics::FILTER_CHANGED,
+            Self::Blocked => semantics::FILTER_BLOCKED,
         }
     }
 }
@@ -171,10 +194,10 @@ impl NativeSpikeApp {
 
     fn show_source_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Renamewright").color(self.palette.ink));
-            ui.label(RichText::new("Plan every rename.").color(self.palette.ink_soft));
+            ui.heading(RichText::new(semantics::PRODUCT_NAME).color(self.palette.ink));
+            ui.label(RichText::new(semantics::TAGLINE).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Add folder").clicked() {
+                if ui.button(semantics::ADD_FOLDER).clicked() {
                     self.status = match rfd::FileDialog::new()
                         .set_title("Add a directory entry to Renamewright")
                         .pick_folder()
@@ -183,7 +206,7 @@ impl NativeSpikeApp {
                         None => "Directory selection cancelled".to_owned(),
                     };
                 }
-                if ui.button("Add files").clicked() {
+                if ui.button(semantics::ADD_FILES).clicked() {
                     self.status = match rfd::FileDialog::new()
                         .set_title("Add files to Renamewright")
                         .pick_files()
@@ -199,11 +222,18 @@ impl NativeSpikeApp {
     }
 
     fn show_rule_rail(&mut self, ui: &mut egui::Ui) {
-        ui.heading(RichText::new("Rules").color(self.palette.ink));
-        ui.label(RichText::new("Applied in order").color(self.palette.ink_soft));
+        ui.heading(RichText::new(semantics::RULES_HEADING).color(self.palette.ink));
+        ui.label(RichText::new(semantics::RULES_ORDER_HELP).color(self.palette.ink_soft));
         ui.add_space(8.0);
 
-        for (index, label) in ["Prefix", "Sequence", "Extension"].iter().enumerate() {
+        for (index, label) in [
+            semantics::RULE_PREFIX,
+            semantics::RULE_SEQUENCE,
+            semantics::RULE_EXTENSION,
+        ]
+        .iter()
+        .enumerate()
+        {
             let selected = self.selected_rule == index;
             if ui.selectable_label(selected, *label).clicked() {
                 self.selected_rule = index;
@@ -213,23 +243,24 @@ impl NativeSpikeApp {
         ui.add_space(16.0);
         ui.separator();
         ui.add_space(12.0);
-        ui.label(
-            RichText::new("Prefix text")
+        let prefix_label = ui.label(
+            RichText::new(semantics::PREFIX_LABEL)
                 .strong()
                 .color(self.palette.ink),
         );
         ui.add(
             egui::TextEdit::singleline(&mut self.prefix)
                 .id_salt("rule.prefix.value")
-                .hint_text("Prefix"),
-        );
-        ui.label(RichText::new("한글 IME 입력 확인").color(self.palette.ink_soft));
+                .hint_text(semantics::RULE_PREFIX),
+        )
+        .labelled_by(prefix_label.id);
+        ui.label(RichText::new(semantics::HANGUL_IME_HELP).color(self.palette.ink_soft));
     }
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
         let visible = self.visible_indices();
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Preview").color(self.palette.ink));
+            ui.heading(RichText::new(semantics::PREVIEW_HEADING).color(self.palette.ink));
             ui.label(
                 RichText::new(format!("{} shown", visible.len())).color(self.palette.ink_soft),
             );
@@ -245,11 +276,13 @@ impl NativeSpikeApp {
                 }
             }
             ui.separator();
+            let source_query_label = ui.label(semantics::SOURCE_QUERY_LABEL);
             ui.add(
                 egui::TextEdit::singleline(&mut self.source_query)
                     .id_salt("preview.source-query")
-                    .hint_text("Filter names"),
-            );
+                    .hint_text("Name contains"),
+            )
+            .labelled_by(source_query_label.id);
         });
         ui.add_space(8.0);
 
@@ -304,14 +337,14 @@ impl NativeSpikeApp {
             ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let apply_text = if self.palette.high_contrast {
-                    RichText::new("Apply").color(self.palette.disabled)
+                    RichText::new(semantics::APPLY).color(self.palette.disabled)
                 } else {
-                    RichText::new("Apply")
+                    RichText::new(semantics::APPLY)
                 };
                 ui.add_enabled(false, egui::Button::new(apply_text))
                     .on_disabled_hover_text("The native spike never mutates the filesystem");
                 ui.label(
-                    RichText::new("Apply locked")
+                    RichText::new(semantics::APPLY_LOCKED)
                         .color(self.palette.blocked)
                         .strong(),
                 );
@@ -340,7 +373,7 @@ impl NativeSpikeApp {
                 .show(ui, |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            RichText::new("AUTOMATION TEST MODE")
+                            RichText::new(semantics::AUTOMATION_BANNER)
                                 .color(self.palette.accent_text)
                                 .strong(),
                         );
@@ -359,7 +392,7 @@ impl NativeSpikeApp {
                 .show(ui, |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            RichText::new("Windows high contrast palette active")
+                            RichText::new(semantics::HIGH_CONTRAST_ACTIVE)
                                 .color(self.palette.ink)
                                 .strong(),
                         );
@@ -494,7 +527,7 @@ mod tests {
     use egui_kittest::Harness;
     use kittest::{NodeT as _, Queryable as _};
 
-    use super::{NativePalette, NativeSpikeApp, install_theme};
+    use super::{NativePalette, NativeSpikeApp, install_theme, semantics};
 
     #[test]
     fn accesskit_exposes_primary_workbench_controls() {
@@ -502,11 +535,33 @@ mod tests {
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), NativeSpikeApp::new(false));
 
-        harness.get_by_label("Add files");
-        harness.get_by_label("Add folder");
-        harness.get_by_label("Prefix text");
-        harness.get_by_label("한글 IME 입력 확인");
-        let apply = harness.get_by_label("Apply");
+        let add_files = harness.get_by_label(semantics::ADD_FILES);
+        let add_folder = harness.get_by_label(semantics::ADD_FOLDER);
+        let prefix = harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, semantics::PREFIX_LABEL);
+        harness.get_by_label(semantics::HANGUL_IME_HELP);
+        let source_query = harness.get_by_role_and_label(
+            egui::accesskit::Role::TextInput,
+            semantics::SOURCE_QUERY_LABEL,
+        );
+        let apply = harness.get_by_label(semantics::APPLY);
+        assert_eq!(
+            add_files.accesskit_node().role(),
+            egui::accesskit::Role::Button
+        );
+        assert_eq!(
+            add_folder.accesskit_node().role(),
+            egui::accesskit::Role::Button
+        );
+        assert_eq!(
+            prefix.accesskit_node().role(),
+            egui::accesskit::Role::TextInput
+        );
+        assert_eq!(
+            source_query.accesskit_node().role(),
+            egui::accesskit::Role::TextInput
+        );
+        assert_eq!(apply.accesskit_node().role(), egui::accesskit::Role::Button);
         assert!(apply.accesskit_node().is_disabled());
     }
 
@@ -516,7 +571,7 @@ mod tests {
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), NativeSpikeApp::new(false));
 
-        harness.get_by_label("Blocked").click();
+        harness.get_by_label(semantics::FILTER_BLOCKED).click();
         harness.run_ok();
         harness.get_by_label("10 shown");
     }
@@ -538,8 +593,8 @@ mod tests {
             );
 
         assert!(palette.is_high_contrast());
-        harness.get_by_label("Windows high contrast palette active");
-        let apply = harness.get_by_label("Apply");
+        harness.get_by_label(semantics::HIGH_CONTRAST_ACTIVE);
+        let apply = harness.get_by_label(semantics::APPLY);
         assert!(apply.accesskit_node().is_disabled());
     }
 
@@ -577,7 +632,7 @@ mod tests {
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), NativeSpikeApp::new(true));
 
-        harness.get_by_label("AUTOMATION TEST MODE");
+        harness.get_by_label(semantics::AUTOMATION_BANNER);
     }
 
     #[test]
