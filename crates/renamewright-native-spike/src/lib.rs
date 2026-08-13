@@ -3,8 +3,17 @@
 // Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4
 // Hallmark · macrostructure: workbench · theme: Cobalt · slop: pass (native-app scope)
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
+};
+use renamewright_application::{
+    ApplicationService, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
+    ExtensionOperationDto, FilenamePartDto, PlanDto, PresetDocumentDto, RangeOperationDto,
+    RangeOriginDto, RulePipelineRequestDto, RuleRequestDto, SequenceOrderDto, SequencePlacementDto,
+    SequenceScopeDto, SourceOverrideDto, UnicodeNormalizationFormDto,
 };
 
 const SAMPLE_COUNT: usize = 10_000;
@@ -29,6 +38,26 @@ pub mod semantics {
     pub const SOURCE_QUERY_LABEL: &str = "Filter names";
     pub const APPLY: &str = "Apply";
     pub const APPLY_LOCKED: &str = "Apply locked";
+    pub const ADD_RULE: &str = "Add rule";
+    pub const MOVE_RULE_UP: &str = "Move rule up";
+    pub const MOVE_RULE_DOWN: &str = "Move rule down";
+    pub const REMOVE_RULE: &str = "Remove rule";
+    pub const ENABLE_RULE: &str = "Enable rule";
+    pub const LANGUAGE: &str = "Language";
+    pub const DIAGNOSTIC_FILTER: &str = "Diagnostic filter";
+    pub const INSPECT_JSON: &str = "Inspect JSON";
+    pub const INSPECT_CSV: &str = "Inspect CSV";
+    pub const EXPORT_JSON: &str = "Export JSON";
+    pub const EXPORT_CSV: &str = "Export CSV";
+    pub const CLOSE_INSPECTOR: &str = "Close inspector";
+    pub const SAVE_OVERRIDE: &str = "Save override";
+    pub const CANCEL_OVERRIDE: &str = "Cancel override";
+    pub const PRESETS: &str = "Local presets";
+    pub const PRESET_NAME: &str = "Preset name";
+    pub const SAVE_PRESET: &str = "Save preset";
+    pub const APPLY_PRESET: &str = "Apply preset";
+    pub const DELETE_PRESET: &str = "Delete preset";
+    pub const NO_SOURCES: &str = "No sources selected";
     pub const AUTOMATION_BANNER: &str = "AUTOMATION TEST MODE";
     pub const HIGH_CONTRAST_ACTIVE: &str = "Windows high contrast palette active";
 }
@@ -53,6 +82,7 @@ pub mod automation {
     pub const MAX_AUTOMATION_TEXT_BYTES: usize = 4 * 1024;
     pub const MAX_AUTOMATION_EVENTS: usize = 256;
     pub const MAX_AUTOMATION_REQUESTS_PER_CONNECTION: usize = 128;
+    pub const MAX_AUTOMATION_SOURCES: usize = 10_000;
     const MAX_AUTOMATION_RELATIVE_PATH_BYTES: usize = 4 * 1024;
     const MAX_AUTOMATION_CONNECTION_DURATION: Duration = Duration::from_secs(120);
     const AUTOMATION_IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -125,6 +155,10 @@ pub mod automation {
         source_query: Option<String>,
         #[serde(default)]
         filter: Option<AutomationFilter>,
+        #[serde(default)]
+        sources: Vec<String>,
+        #[serde(skip)]
+        resolved_sources: Vec<PathBuf>,
     }
 
     impl AutomationFixture {
@@ -140,6 +174,10 @@ pub mod automation {
                     .source_query
                     .as_ref()
                     .is_some_and(|value| value.len() > MAX_AUTOMATION_TEXT_BYTES)
+                || fixture.sources.len() > MAX_AUTOMATION_SOURCES
+                || fixture.sources.iter().any(|source| {
+                    source.is_empty() || source.len() > MAX_AUTOMATION_RELATIVE_PATH_BYTES
+                })
             {
                 return Err(AutomationRootError::new(
                     AutomationRootErrorKind::InvalidFixture,
@@ -161,6 +199,11 @@ pub mod automation {
         #[must_use]
         pub const fn filter(&self) -> Option<AutomationFilter> {
             self.filter
+        }
+
+        #[must_use]
+        pub fn sources(&self) -> &[PathBuf] {
+            &self.resolved_sources
         }
     }
 
@@ -288,7 +331,25 @@ pub mod automation {
             &self,
             relative: &Path,
         ) -> Result<AutomationFixture, AutomationRootError> {
-            AutomationFixture::parse(&self.read_fixture(relative)?)
+            let mut fixture = AutomationFixture::parse(&self.read_fixture(relative)?)?;
+            let mut resolved_sources = Vec::with_capacity(fixture.sources.len());
+            for relative_source in &fixture.sources {
+                let relative_source = Path::new(relative_source);
+                validate_relative_path(relative_source)?;
+                let candidate = self.fixture_root.join(relative_source);
+                verify_existing_path(&self.fixture_root, &candidate)?;
+                let metadata = fs::metadata(&candidate).map_err(|_| {
+                    AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+                })?;
+                if !metadata.is_file() {
+                    return Err(AutomationRootError::new(
+                        AutomationRootErrorKind::FixtureUnavailable,
+                    ));
+                }
+                resolved_sources.push(candidate);
+            }
+            fixture.resolved_sources = resolved_sources;
+            Ok(fixture)
         }
     }
 
@@ -653,6 +714,651 @@ impl NativePalette {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Locale {
+    #[default]
+    English,
+    Korean,
+}
+
+impl Locale {
+    const ALL: [Self; 2] = [Self::English, Self::Korean];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::Korean => "한국어",
+        }
+    }
+
+    const fn text(self, english: &'static str, korean: &'static str) -> &'static str {
+        match self {
+            Self::English => english,
+            Self::Korean => korean,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuleKind {
+    Prefix,
+    Suffix,
+    LiteralReplace,
+    RegexReplace,
+    Sequence,
+    Extension,
+    Case,
+    WhitespaceCleanup,
+    UnicodeNormalization,
+    Range,
+    CharacterClass,
+}
+
+impl RuleKind {
+    const ALL: [Self; 11] = [
+        Self::Prefix,
+        Self::Suffix,
+        Self::LiteralReplace,
+        Self::RegexReplace,
+        Self::Sequence,
+        Self::Extension,
+        Self::Case,
+        Self::WhitespaceCleanup,
+        Self::UnicodeNormalization,
+        Self::Range,
+        Self::CharacterClass,
+    ];
+
+    const fn label(self, locale: Locale) -> &'static str {
+        match self {
+            Self::Prefix => locale.text("Add prefix", "접두사 추가"),
+            Self::Suffix => locale.text("Add suffix", "접미사 추가"),
+            Self::LiteralReplace => locale.text("Replace text", "텍스트 바꾸기"),
+            Self::RegexReplace => locale.text("Replace by pattern", "패턴으로 바꾸기"),
+            Self::Sequence => locale.text("Add sequence", "일련번호 추가"),
+            Self::Extension => locale.text("Change extension", "확장자 변경"),
+            Self::Case => locale.text("Change case", "대소문자 변경"),
+            Self::WhitespaceCleanup => locale.text("Clean whitespace", "공백 정리"),
+            Self::UnicodeNormalization => locale.text("Normalize Unicode", "유니코드 정규화"),
+            Self::Range => locale.text("Select character range", "문자 범위 선택"),
+            Self::CharacterClass => locale.text("Filter character class", "문자 종류 필터"),
+        }
+    }
+
+    fn create(self, rule_id: u64) -> RuleRequestDto {
+        match self {
+            Self::Prefix => RuleRequestDto::Prefix {
+                rule_id,
+                enabled: true,
+                value: String::new(),
+            },
+            Self::Suffix => RuleRequestDto::Suffix {
+                rule_id,
+                enabled: true,
+                value: String::new(),
+            },
+            Self::LiteralReplace => RuleRequestDto::LiteralReplace {
+                rule_id,
+                enabled: true,
+                search: "old".to_owned(),
+                replacement: String::new(),
+            },
+            Self::RegexReplace => RuleRequestDto::RegexReplace {
+                rule_id,
+                enabled: true,
+                pattern: ".".to_owned(),
+                replacement: String::new(),
+            },
+            Self::Sequence => RuleRequestDto::Sequence {
+                rule_id,
+                enabled: true,
+                scope: SequenceScopeDto::AllSources,
+                order: SequenceOrderDto::SourceOrder,
+                start: 1,
+                step: 1,
+                padding: 3,
+                placement: SequencePlacementDto::Prefix,
+                separator: "_".to_owned(),
+            },
+            Self::Extension => RuleRequestDto::Extension {
+                rule_id,
+                enabled: true,
+                operation: ExtensionOperationDto::Replace,
+                value: "txt".to_owned(),
+            },
+            Self::Case => RuleRequestDto::Case {
+                rule_id,
+                enabled: true,
+                target: FilenamePartDto::Stem,
+                mode: CaseModeDto::Lowercase,
+            },
+            Self::WhitespaceCleanup => RuleRequestDto::WhitespaceCleanup {
+                rule_id,
+                enabled: true,
+                target: FilenamePartDto::Stem,
+                replacement: "_".to_owned(),
+            },
+            Self::UnicodeNormalization => RuleRequestDto::UnicodeNormalization {
+                rule_id,
+                enabled: true,
+                target: FilenamePartDto::WholeName,
+                form: UnicodeNormalizationFormDto::Nfc,
+            },
+            Self::Range => RuleRequestDto::Range {
+                rule_id,
+                enabled: true,
+                target: FilenamePartDto::Stem,
+                operation: RangeOperationDto::Keep,
+                origin: RangeOriginDto::Start,
+                offset: 0,
+                length: None,
+            },
+            Self::CharacterClass => RuleRequestDto::CharacterClass {
+                rule_id,
+                enabled: true,
+                target: FilenamePartDto::Stem,
+                operation: CharacterClassOperationDto::Remove,
+                class: CharacterClassDto::Whitespace,
+            },
+        }
+    }
+}
+
+fn rule_kind(rule: &RuleRequestDto) -> RuleKind {
+    match rule {
+        RuleRequestDto::Prefix { .. } => RuleKind::Prefix,
+        RuleRequestDto::Suffix { .. } => RuleKind::Suffix,
+        RuleRequestDto::LiteralReplace { .. } => RuleKind::LiteralReplace,
+        RuleRequestDto::RegexReplace { .. } => RuleKind::RegexReplace,
+        RuleRequestDto::Sequence { .. } => RuleKind::Sequence,
+        RuleRequestDto::Extension { .. } => RuleKind::Extension,
+        RuleRequestDto::Case { .. } => RuleKind::Case,
+        RuleRequestDto::WhitespaceCleanup { .. } => RuleKind::WhitespaceCleanup,
+        RuleRequestDto::UnicodeNormalization { .. } => RuleKind::UnicodeNormalization,
+        RuleRequestDto::Range { .. } => RuleKind::Range,
+        RuleRequestDto::CharacterClass { .. } => RuleKind::CharacterClass,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DiagnosticFilter {
+    #[default]
+    All,
+    Unchanged,
+    EmptyName,
+    IllegalCharacter,
+    TrailingDotOrSpace,
+    ReservedName,
+    NameTooLong,
+    DuplicateDestination,
+    UnsupportedEncoding,
+    OccupiedDestination,
+    StaleSource,
+    ParentUnavailable,
+    SequenceOverflow,
+}
+
+impl DiagnosticFilter {
+    const ALL: [Self; 13] = [
+        Self::All,
+        Self::Unchanged,
+        Self::EmptyName,
+        Self::IllegalCharacter,
+        Self::TrailingDotOrSpace,
+        Self::ReservedName,
+        Self::NameTooLong,
+        Self::DuplicateDestination,
+        Self::UnsupportedEncoding,
+        Self::OccupiedDestination,
+        Self::StaleSource,
+        Self::ParentUnavailable,
+        Self::SequenceOverflow,
+    ];
+
+    const fn code(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Unchanged => Some("unchanged"),
+            Self::EmptyName => Some("emptyName"),
+            Self::IllegalCharacter => Some("illegalCharacter"),
+            Self::TrailingDotOrSpace => Some("trailingDotOrSpace"),
+            Self::ReservedName => Some("reservedName"),
+            Self::NameTooLong => Some("nameTooLong"),
+            Self::DuplicateDestination => Some("duplicateDestination"),
+            Self::UnsupportedEncoding => Some("unsupportedEncoding"),
+            Self::OccupiedDestination => Some("occupiedDestination"),
+            Self::StaleSource => Some("staleSource"),
+            Self::ParentUnavailable => Some("parentUnavailable"),
+            Self::SequenceOverflow => Some("sequenceOverflow"),
+        }
+    }
+
+    const fn label(self, locale: Locale) -> &'static str {
+        match self {
+            Self::All => locale.text("All diagnostics", "모든 진단"),
+            Self::Unchanged => locale.text("No change", "변경 없음"),
+            Self::EmptyName => locale.text("Empty name", "빈 이름"),
+            Self::IllegalCharacter => locale.text("Illegal Windows character", "Windows 금지 문자"),
+            Self::TrailingDotOrSpace => locale.text("Trailing dot or space", "끝의 점 또는 공백"),
+            Self::ReservedName => locale.text("Reserved Windows name", "Windows 예약 이름"),
+            Self::NameTooLong => locale.text("Name too long", "이름이 너무 김"),
+            Self::DuplicateDestination => locale.text("Duplicate target", "대상 이름 중복"),
+            Self::UnsupportedEncoding => {
+                locale.text("Unsupported encoding", "지원하지 않는 인코딩")
+            }
+            Self::OccupiedDestination => locale.text("Target exists", "대상이 이미 존재함"),
+            Self::StaleSource => locale.text("Source changed", "원본이 변경됨"),
+            Self::ParentUnavailable => locale.text("Parent unavailable", "상위 폴더 확인 불가"),
+            Self::SequenceOverflow => locale.text("Sequence overflow", "일련번호 범위 초과"),
+        }
+    }
+}
+
+fn diagnostic_label(code: &str, locale: Locale) -> &str {
+    DiagnosticFilter::ALL
+        .into_iter()
+        .find(|candidate| candidate.code() == Some(code))
+        .map_or(code, |candidate| candidate.label(locale))
+}
+
+#[derive(Debug)]
+struct OverrideEditor {
+    source_id: u64,
+    original_name: String,
+    value: String,
+}
+
+#[derive(Debug)]
+struct InspectionDocument {
+    title: &'static str,
+    content: String,
+}
+
+fn rule_enabled_mut(rule: &mut RuleRequestDto) -> &mut bool {
+    match rule {
+        RuleRequestDto::Prefix { enabled, .. }
+        | RuleRequestDto::Suffix { enabled, .. }
+        | RuleRequestDto::LiteralReplace { enabled, .. }
+        | RuleRequestDto::RegexReplace { enabled, .. }
+        | RuleRequestDto::Sequence { enabled, .. }
+        | RuleRequestDto::Extension { enabled, .. }
+        | RuleRequestDto::Case { enabled, .. }
+        | RuleRequestDto::WhitespaceCleanup { enabled, .. }
+        | RuleRequestDto::UnicodeNormalization { enabled, .. }
+        | RuleRequestDto::Range { enabled, .. }
+        | RuleRequestDto::CharacterClass { enabled, .. } => enabled,
+    }
+}
+
+fn filename_part_label(part: FilenamePartDto, locale: Locale) -> &'static str {
+    match part {
+        FilenamePartDto::WholeName => locale.text("Whole name", "전체 이름"),
+        FilenamePartDto::Stem => locale.text("Name", "이름"),
+        FilenamePartDto::Extension => locale.text("Extension", "확장자"),
+    }
+}
+
+fn filename_part_control(ui: &mut egui::Ui, target: &mut FilenamePartDto, locale: Locale) -> bool {
+    let before = *target;
+    egui::ComboBox::from_id_salt("filename-part")
+        .selected_text(filename_part_label(*target, locale))
+        .show_ui(ui, |ui| {
+            for candidate in [
+                FilenamePartDto::WholeName,
+                FilenamePartDto::Stem,
+                FilenamePartDto::Extension,
+            ] {
+                ui.selectable_value(target, candidate, filename_part_label(candidate, locale));
+            }
+        });
+    before != *target
+}
+
+fn rule_editor(ui: &mut egui::Ui, rule: &mut RuleRequestDto, locale: Locale) -> bool {
+    let mut changed = ui
+        .checkbox(
+            rule_enabled_mut(rule),
+            locale.text(semantics::ENABLE_RULE, "규칙 사용"),
+        )
+        .changed();
+    ui.add_space(4.0);
+    match rule {
+        RuleRequestDto::Prefix { value, .. } => {
+            let label = ui.label(locale.text(semantics::PREFIX_LABEL, "접두사 텍스트"));
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(value)
+                        .id_salt("rule.prefix.value")
+                        .hint_text(locale.text("Text", "텍스트")),
+                )
+                .labelled_by(label.id)
+                .changed();
+        }
+        RuleRequestDto::Suffix { value, .. } => {
+            let label = ui.label(locale.text("Suffix text", "접미사 텍스트"));
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(value)
+                        .id_salt("rule.suffix.value")
+                        .hint_text(locale.text("Text", "텍스트")),
+                )
+                .labelled_by(label.id)
+                .changed();
+        }
+        RuleRequestDto::LiteralReplace {
+            search,
+            replacement,
+            ..
+        } => {
+            ui.label(locale.text("Find", "찾기"));
+            changed |= ui.text_edit_singleline(search).changed();
+            ui.label(locale.text("Replace with", "바꿀 내용"));
+            changed |= ui.text_edit_singleline(replacement).changed();
+        }
+        RuleRequestDto::RegexReplace {
+            pattern,
+            replacement,
+            ..
+        } => {
+            ui.label(locale.text("Pattern", "패턴"));
+            changed |= ui.text_edit_singleline(pattern).changed();
+            ui.label(locale.text("Replacement", "바꿀 내용"));
+            changed |= ui.text_edit_singleline(replacement).changed();
+        }
+        RuleRequestDto::Sequence {
+            scope,
+            order,
+            start,
+            step,
+            padding,
+            placement,
+            separator,
+            ..
+        } => {
+            ui.label(locale.text("Scope", "범위"));
+            let before = *scope;
+            egui::ComboBox::from_id_salt("sequence-scope")
+                .selected_text(match scope {
+                    SequenceScopeDto::AllSources => locale.text("All sources", "모든 원본"),
+                    SequenceScopeDto::PerParent => locale.text("Per folder", "폴더별"),
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        scope,
+                        SequenceScopeDto::AllSources,
+                        locale.text("All sources", "모든 원본"),
+                    );
+                    ui.selectable_value(
+                        scope,
+                        SequenceScopeDto::PerParent,
+                        locale.text("Per folder", "폴더별"),
+                    );
+                });
+            changed |= before != *scope;
+            ui.label(locale.text("Order", "정렬"));
+            let before = *order;
+            egui::ComboBox::from_id_salt("sequence-order")
+                .selected_text(match order {
+                    SequenceOrderDto::SourceOrder => locale.text("Source order", "원본 순서"),
+                    SequenceOrderDto::NameAscending => {
+                        locale.text("Name ascending", "이름 오름차순")
+                    }
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        order,
+                        SequenceOrderDto::SourceOrder,
+                        locale.text("Source order", "원본 순서"),
+                    );
+                    ui.selectable_value(
+                        order,
+                        SequenceOrderDto::NameAscending,
+                        locale.text("Name ascending", "이름 오름차순"),
+                    );
+                });
+            changed |= before != *order;
+            ui.horizontal(|ui| {
+                ui.label(locale.text("Start", "시작"));
+                changed |= ui.add(egui::DragValue::new(start)).changed();
+                ui.label(locale.text("Step", "증가"));
+                changed |= ui
+                    .add(egui::DragValue::new(step).range(1..=u64::MAX))
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(locale.text("Digits", "자리수"));
+                changed |= ui
+                    .add(egui::DragValue::new(padding).range(1..=32))
+                    .changed();
+                ui.label(locale.text("Separator", "구분자"));
+                changed |= ui.text_edit_singleline(separator).changed();
+            });
+            let before = *placement;
+            egui::ComboBox::from_id_salt("sequence-placement")
+                .selected_text(match placement {
+                    SequencePlacementDto::Prefix => locale.text("Before name", "이름 앞"),
+                    SequencePlacementDto::Suffix => locale.text("After name", "이름 뒤"),
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        placement,
+                        SequencePlacementDto::Prefix,
+                        locale.text("Before name", "이름 앞"),
+                    );
+                    ui.selectable_value(
+                        placement,
+                        SequencePlacementDto::Suffix,
+                        locale.text("After name", "이름 뒤"),
+                    );
+                });
+            changed |= before != *placement;
+        }
+        RuleRequestDto::Extension {
+            operation, value, ..
+        } => {
+            let before = *operation;
+            egui::ComboBox::from_id_salt("extension-operation")
+                .selected_text(match operation {
+                    ExtensionOperationDto::Remove => locale.text("Remove", "제거"),
+                    ExtensionOperationDto::Replace => locale.text("Replace", "바꾸기"),
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        operation,
+                        ExtensionOperationDto::Remove,
+                        locale.text("Remove", "제거"),
+                    );
+                    ui.selectable_value(
+                        operation,
+                        ExtensionOperationDto::Replace,
+                        locale.text("Replace", "바꾸기"),
+                    );
+                });
+            changed |= before != *operation;
+            if *operation == ExtensionOperationDto::Replace {
+                changed |= ui
+                    .add(egui::TextEdit::singleline(value).hint_text("txt"))
+                    .changed();
+            }
+        }
+        RuleRequestDto::Case { target, mode, .. } => {
+            changed |= filename_part_control(ui, target, locale);
+            let before = *mode;
+            egui::ComboBox::from_id_salt("case-mode")
+                .selected_text(match mode {
+                    CaseModeDto::Lowercase => locale.text("Lowercase", "소문자"),
+                    CaseModeDto::Uppercase => locale.text("Uppercase", "대문자"),
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        mode,
+                        CaseModeDto::Lowercase,
+                        locale.text("Lowercase", "소문자"),
+                    );
+                    ui.selectable_value(
+                        mode,
+                        CaseModeDto::Uppercase,
+                        locale.text("Uppercase", "대문자"),
+                    );
+                });
+            changed |= before != *mode;
+        }
+        RuleRequestDto::WhitespaceCleanup {
+            target,
+            replacement,
+            ..
+        } => {
+            changed |= filename_part_control(ui, target, locale);
+            ui.label(locale.text("Replacement", "바꿀 내용"));
+            changed |= ui.text_edit_singleline(replacement).changed();
+        }
+        RuleRequestDto::UnicodeNormalization { target, form, .. } => {
+            changed |= filename_part_control(ui, target, locale);
+            let before = *form;
+            egui::ComboBox::from_id_salt("normalization-form")
+                .selected_text(match form {
+                    UnicodeNormalizationFormDto::Nfc => "NFC",
+                    UnicodeNormalizationFormDto::Nfd => "NFD",
+                    UnicodeNormalizationFormDto::Nfkc => "NFKC",
+                    UnicodeNormalizationFormDto::Nfkd => "NFKD",
+                })
+                .show_ui(ui, |ui| {
+                    for candidate in [
+                        UnicodeNormalizationFormDto::Nfc,
+                        UnicodeNormalizationFormDto::Nfd,
+                        UnicodeNormalizationFormDto::Nfkc,
+                        UnicodeNormalizationFormDto::Nfkd,
+                    ] {
+                        let label = match candidate {
+                            UnicodeNormalizationFormDto::Nfc => "NFC",
+                            UnicodeNormalizationFormDto::Nfd => "NFD",
+                            UnicodeNormalizationFormDto::Nfkc => "NFKC",
+                            UnicodeNormalizationFormDto::Nfkd => "NFKD",
+                        };
+                        ui.selectable_value(form, candidate, label);
+                    }
+                });
+            changed |= before != *form;
+        }
+        RuleRequestDto::Range {
+            target,
+            operation,
+            origin,
+            offset,
+            length,
+            ..
+        } => {
+            changed |= filename_part_control(ui, target, locale);
+            let before = *operation;
+            egui::ComboBox::from_id_salt("range-operation")
+                .selected_text(match operation {
+                    RangeOperationDto::Keep => locale.text("Keep", "유지"),
+                    RangeOperationDto::Remove => locale.text("Remove", "제거"),
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        operation,
+                        RangeOperationDto::Keep,
+                        locale.text("Keep", "유지"),
+                    );
+                    ui.selectable_value(
+                        operation,
+                        RangeOperationDto::Remove,
+                        locale.text("Remove", "제거"),
+                    );
+                });
+            changed |= before != *operation;
+            let before = *origin;
+            egui::ComboBox::from_id_salt("range-origin")
+                .selected_text(match origin {
+                    RangeOriginDto::Start => locale.text("From start", "앞에서"),
+                    RangeOriginDto::End => locale.text("From end", "뒤에서"),
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        origin,
+                        RangeOriginDto::Start,
+                        locale.text("From start", "앞에서"),
+                    );
+                    ui.selectable_value(
+                        origin,
+                        RangeOriginDto::End,
+                        locale.text("From end", "뒤에서"),
+                    );
+                });
+            changed |= before != *origin;
+            ui.horizontal(|ui| {
+                ui.label(locale.text("Offset", "오프셋"));
+                changed |= ui.add(egui::DragValue::new(offset)).changed();
+            });
+            let mut open_ended = length.is_none();
+            if ui
+                .checkbox(&mut open_ended, locale.text("Through end", "끝까지"))
+                .changed()
+            {
+                *length = if open_ended { None } else { Some(1) };
+                changed = true;
+            }
+            if let Some(length) = length {
+                ui.label(locale.text("Length", "길이"));
+                changed |= ui
+                    .add(egui::DragValue::new(length).range(1..=u64::MAX))
+                    .changed();
+            }
+        }
+        RuleRequestDto::CharacterClass {
+            target,
+            operation,
+            class,
+            ..
+        } => {
+            changed |= filename_part_control(ui, target, locale);
+            let before = *operation;
+            egui::ComboBox::from_id_salt("class-operation")
+                .selected_text(match operation {
+                    CharacterClassOperationDto::Keep => locale.text("Keep", "유지"),
+                    CharacterClassOperationDto::Remove => locale.text("Remove", "제거"),
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        operation,
+                        CharacterClassOperationDto::Keep,
+                        locale.text("Keep", "유지"),
+                    );
+                    ui.selectable_value(
+                        operation,
+                        CharacterClassOperationDto::Remove,
+                        locale.text("Remove", "제거"),
+                    );
+                });
+            changed |= before != *operation;
+            let before = *class;
+            let class_label = |candidate| match candidate {
+                CharacterClassDto::DecimalNumber => locale.text("Numbers", "숫자"),
+                CharacterClassDto::Letter => locale.text("Letters", "문자"),
+                CharacterClassDto::Whitespace => locale.text("Whitespace", "공백"),
+                CharacterClassDto::Punctuation => locale.text("Punctuation", "문장 부호"),
+                CharacterClassDto::Symbol => locale.text("Symbols", "기호"),
+            };
+            egui::ComboBox::from_id_salt("character-class")
+                .selected_text(class_label(*class))
+                .show_ui(ui, |ui| {
+                    for candidate in [
+                        CharacterClassDto::DecimalNumber,
+                        CharacterClassDto::Letter,
+                        CharacterClassDto::Whitespace,
+                        CharacterClassDto::Punctuation,
+                        CharacterClassDto::Symbol,
+                    ] {
+                        ui.selectable_value(class, candidate, class_label(candidate));
+                    }
+                });
+            changed |= before != *class;
+        }
+    }
+    changed
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlanFilter {
     All,
@@ -663,21 +1369,34 @@ enum PlanFilter {
 impl PlanFilter {
     const ALL: [Self; 3] = [Self::All, Self::Changed, Self::Blocked];
 
-    const fn label(self) -> &'static str {
+    const fn label(self, locale: Locale) -> &'static str {
         match self {
-            Self::All => semantics::FILTER_ALL,
-            Self::Changed => semantics::FILTER_CHANGED,
-            Self::Blocked => semantics::FILTER_BLOCKED,
+            Self::All => locale.text(semantics::FILTER_ALL, "전체"),
+            Self::Changed => locale.text(semantics::FILTER_CHANGED, "변경됨"),
+            Self::Blocked => locale.text(semantics::FILTER_BLOCKED, "차단됨"),
         }
     }
 }
 
 #[derive(Debug)]
 pub struct NativeSpikeApp {
-    prefix: String,
+    application: ApplicationService,
+    plan: Option<PlanDto>,
+    rules: Vec<RuleRequestDto>,
+    overrides: BTreeMap<u64, String>,
+    new_rule_kind: RuleKind,
+    next_rule_id: u64,
     source_query: String,
     filter: PlanFilter,
+    diagnostic_filter: DiagnosticFilter,
     selected_rule: usize,
+    locale: Locale,
+    override_editor: Option<OverrideEditor>,
+    inspection: Option<InspectionDocument>,
+    synthetic_fixture: bool,
+    preset_path: Option<PathBuf>,
+    presets: PresetDocumentDto,
+    preset_name: String,
     status: String,
     palette: NativePalette,
     #[cfg(feature = "automation")]
@@ -694,12 +1413,68 @@ impl NativeSpikeApp {
 
     #[must_use]
     pub fn new_with_palette(_automation_mode: bool, palette: NativePalette) -> Self {
+        Self::new_with_storage(_automation_mode, palette, None)
+    }
+
+    #[must_use]
+    pub fn new_with_storage(
+        _automation_mode: bool,
+        palette: NativePalette,
+        preset_path: Option<PathBuf>,
+    ) -> Self {
+        Self::new_configured(_automation_mode, palette, preset_path, true)
+    }
+
+    #[must_use]
+    pub fn new_product(palette: NativePalette, preset_path: Option<PathBuf>) -> Self {
+        Self::new_configured(false, palette, preset_path, false)
+    }
+
+    fn new_configured(
+        _automation_mode: bool,
+        palette: NativePalette,
+        preset_path: Option<PathBuf>,
+        synthetic_fixture: bool,
+    ) -> Self {
+        let (presets, preset_status) = preset_path.as_ref().map_or_else(
+            || (PresetDocumentDto::default(), None),
+            |path| match PresetDocumentDto::load(path) {
+                Ok(document) => (document, None),
+                Err(error) => (
+                    PresetDocumentDto::default(),
+                    Some(format!("Presets unavailable ({})", error.code())),
+                ),
+            },
+        );
         Self {
-            prefix: "정리_".to_owned(),
+            application: ApplicationService::default(),
+            plan: None,
+            rules: vec![RuleRequestDto::Prefix {
+                rule_id: 1,
+                enabled: true,
+                value: "정리_".to_owned(),
+            }],
+            overrides: BTreeMap::new(),
+            new_rule_kind: RuleKind::Suffix,
+            next_rule_id: 2,
             source_query: String::new(),
             filter: PlanFilter::All,
+            diagnostic_filter: DiagnosticFilter::All,
             selected_rule: 0,
-            status: format!("{SAMPLE_COUNT} sample entries ready"),
+            locale: Locale::English,
+            override_editor: None,
+            inspection: None,
+            synthetic_fixture,
+            preset_path,
+            presets,
+            preset_name: String::new(),
+            status: preset_status.unwrap_or_else(|| {
+                if synthetic_fixture {
+                    format!("{SAMPLE_COUNT} sample entries ready")
+                } else {
+                    semantics::NO_SOURCES.to_owned()
+                }
+            }),
             palette,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
@@ -715,10 +1490,11 @@ impl NativeSpikeApp {
         automation_root: automation::AutomationRoot,
         fixture: Option<&automation::AutomationFixture>,
     ) -> Self {
-        let mut app = Self::new_with_palette(true, palette);
+        let preset_path = automation_root.state_root().join("presets.json");
+        let mut app = Self::new_with_storage(true, palette, Some(preset_path));
         if let Some(fixture) = fixture {
             if let Some(prefix) = fixture.prefix() {
-                app.prefix = prefix.to_owned();
+                app.set_prefix(prefix);
             }
             if let Some(source_query) = fixture.source_query() {
                 app.source_query = source_query.to_owned();
@@ -730,7 +1506,15 @@ impl NativeSpikeApp {
                     automation::AutomationFilter::Blocked => PlanFilter::Blocked,
                 };
             }
-            app.status = "Automation fixture loaded".to_owned();
+            if fixture.sources().is_empty() {
+                app.status = "Automation fixture loaded".to_owned();
+            } else {
+                app.admit_sources(fixture.sources().to_vec());
+                app.status = format!(
+                    "Automation fixture loaded · {} sources",
+                    fixture.sources().len()
+                );
+            }
         }
         app._automation_root = Some(automation_root);
         app
@@ -741,6 +1525,29 @@ impl NativeSpikeApp {
     }
 
     fn row_is_visible(&self, index: usize) -> bool {
+        if let Some(plan) = &self.plan {
+            let Some(row) = plan.rows().get(index) else {
+                return false;
+            };
+            let matches_filter = match self.filter {
+                PlanFilter::All => true,
+                PlanFilter::Changed => row.status() == "changed",
+                PlanFilter::Blocked => row.status() == "blocked",
+            };
+            let query = self.source_query.trim().to_lowercase();
+            let matches_query = query.is_empty()
+                || row.original_name().to_lowercase().contains(&query)
+                || row.proposed_name().to_lowercase().contains(&query);
+            let matches_diagnostic = self
+                .diagnostic_filter
+                .code()
+                .is_none_or(|code| row.diagnostics().contains(&code));
+            return matches_filter && matches_query && matches_diagnostic;
+        }
+        if !self.synthetic_fixture {
+            return false;
+        }
+
         let blocked = Self::row_is_blocked(index);
         let matches_filter = match self.filter {
             PlanFilter::All | PlanFilter::Changed => true,
@@ -754,100 +1561,447 @@ impl NativeSpikeApp {
     }
 
     fn visible_indices(&self) -> Vec<usize> {
-        (0..SAMPLE_COUNT)
+        let row_count = self.plan.as_ref().map_or_else(
+            || {
+                if self.synthetic_fixture {
+                    SAMPLE_COUNT
+                } else {
+                    0
+                }
+            },
+            |plan| plan.rows().len(),
+        );
+        (0..row_count)
             .filter(|index| self.row_is_visible(*index))
             .collect()
+    }
+
+    fn admit_sources(&mut self, paths: Vec<PathBuf>) {
+        let request = self.rule_request();
+        match self.application.admit_sources_with_rules(paths, request) {
+            Ok(plan) => {
+                self.status = self.plan_status(&plan);
+                self.plan = Some(plan);
+            }
+            Err(error) => {
+                self.status = format!(
+                    "{} ({})",
+                    self.locale
+                        .text("Sources were not admitted", "원본을 추가하지 못했습니다"),
+                    error.code()
+                );
+            }
+        }
+    }
+
+    fn refresh_plan(&mut self) {
+        if self.plan.is_none() {
+            return;
+        }
+        match self.application.preview_rules(self.rule_request()) {
+            Ok(plan) => {
+                self.status = self.plan_status(&plan);
+                self.plan = Some(plan);
+            }
+            Err(code) => {
+                self.status = format!(
+                    "{} ({code})",
+                    self.locale
+                        .text("Preview unavailable", "미리보기를 만들 수 없습니다")
+                );
+            }
+        }
+    }
+
+    fn plan_status(&self, plan: &PlanDto) -> String {
+        match self.locale {
+            Locale::English => format!(
+                "{} sources · {} changed · {} blocked",
+                plan.rows().len(),
+                plan.changed_count(),
+                plan.blocked_count()
+            ),
+            Locale::Korean => format!(
+                "원본 {}개 · 변경 {}개 · 차단 {}개",
+                plan.rows().len(),
+                plan.changed_count(),
+                plan.blocked_count()
+            ),
+        }
+    }
+
+    fn rule_request(&self) -> RulePipelineRequestDto {
+        RulePipelineRequestDto::new(
+            self.rules.clone(),
+            self.overrides
+                .iter()
+                .map(|(source_id, value)| SourceOverrideDto::new(*source_id, value.clone()))
+                .collect(),
+        )
+    }
+
+    #[cfg(any(test, feature = "automation"))]
+    fn set_prefix(&mut self, prefix: &str) {
+        if let Some(RuleRequestDto::Prefix { value, .. }) = self.rules.first_mut() {
+            prefix.clone_into(value);
+        }
+    }
+
+    fn synthetic_prefix(&self) -> &str {
+        self.rules
+            .iter()
+            .find_map(|rule| match rule {
+                RuleRequestDto::Prefix {
+                    enabled: true,
+                    value,
+                    ..
+                } => Some(value.as_str()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn save_presets(&mut self, next: PresetDocumentDto, success: String) {
+        if let Some(path) = &self.preset_path
+            && let Err(error) = next.save(path)
+        {
+            self.status = format!("Presets unavailable ({})", error.code());
+            return;
+        }
+        self.presets = next;
+        self.status = success;
+    }
+
+    fn save_current_preset(&mut self) {
+        let mut next = self.presets.clone();
+        match next.add(&self.preset_name, &self.rules) {
+            Ok(_) => {
+                self.preset_name.clear();
+                self.save_presets(
+                    next,
+                    self.locale
+                        .text("Preset saved", "프리셋을 저장했습니다")
+                        .to_owned(),
+                );
+            }
+            Err(error) => self.status = format!("Preset not saved ({})", error.code()),
+        }
+    }
+
+    fn apply_preset(&mut self, preset_id: u64) {
+        let Some((name, rules)) = self
+            .presets
+            .presets()
+            .iter()
+            .find(|preset| preset.preset_id() == preset_id)
+            .map(|preset| (preset.name().to_owned(), preset.rules().to_vec()))
+        else {
+            return;
+        };
+        self.next_rule_id = rules
+            .iter()
+            .map(RuleRequestDto::rule_id)
+            .max()
+            .unwrap_or_default()
+            .saturating_add(1);
+        self.rules = rules;
+        self.selected_rule = 0;
+        self.refresh_plan();
+        self.status = format!(
+            "{}: {name}",
+            self.locale.text("Preset applied", "프리셋 적용")
+        );
+    }
+
+    fn delete_preset(&mut self, preset_id: u64) {
+        let mut next = self.presets.clone();
+        next.remove(preset_id);
+        self.save_presets(
+            next,
+            self.locale
+                .text("Preset deleted", "프리셋을 삭제했습니다")
+                .to_owned(),
+        );
     }
 
     fn show_source_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading(RichText::new(semantics::PRODUCT_NAME).color(self.palette.ink));
-            ui.label(RichText::new(semantics::TAGLINE).color(self.palette.ink_soft));
+            ui.label(
+                RichText::new(
+                    self.locale
+                        .text(semantics::TAGLINE, "모든 이름 변경을 계획하세요."),
+                )
+                .color(self.palette.ink_soft),
+            );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button(semantics::ADD_FOLDER).clicked() {
-                    self.status = match rfd::FileDialog::new()
-                        .set_title("Add a directory entry to Renamewright")
-                        .pick_folder()
-                    {
-                        Some(_) => "One directory entry selected for the spike".to_owned(),
-                        None => "Directory selection cancelled".to_owned(),
-                    };
-                }
-                if ui.button(semantics::ADD_FILES).clicked() {
-                    self.status = match rfd::FileDialog::new()
+                egui::ComboBox::from_id_salt("locale")
+                    .selected_text(self.locale.label())
+                    .show_ui(ui, |ui| {
+                        for locale in Locale::ALL {
+                            ui.selectable_value(&mut self.locale, locale, locale.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text(semantics::LANGUAGE);
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(self.locale.text(semantics::ADD_FOLDER, "폴더 추가")),
+                )
+                .on_disabled_hover_text(self.locale.text(
+                    "Directory admission is planned for Stage 6G",
+                    "폴더 추가는 Stage 6G에서 지원할 예정입니다",
+                ));
+                if ui
+                    .button(self.locale.text(semantics::ADD_FILES, "파일 추가"))
+                    .clicked()
+                {
+                    match rfd::FileDialog::new()
                         .set_title("Add files to Renamewright")
                         .pick_files()
                     {
-                        Some(paths) => {
-                            format!("{} file entries selected for the spike", paths.len())
+                        Some(paths) => self.admit_sources(paths),
+                        None => {
+                            self.status = self
+                                .locale
+                                .text("File selection cancelled", "파일 선택을 취소했습니다")
+                                .to_owned();
                         }
-                        None => "File selection cancelled".to_owned(),
-                    };
+                    }
                 }
             });
         });
     }
 
     fn show_rule_rail(&mut self, ui: &mut egui::Ui) {
-        ui.heading(RichText::new(semantics::RULES_HEADING).color(self.palette.ink));
-        ui.label(RichText::new(semantics::RULES_ORDER_HELP).color(self.palette.ink_soft));
+        ui.heading(
+            RichText::new(self.locale.text(semantics::RULES_HEADING, "규칙"))
+                .color(self.palette.ink),
+        );
+        ui.label(
+            RichText::new(
+                self.locale
+                    .text(semantics::RULES_ORDER_HELP, "위에서 아래 순서로 적용"),
+            )
+            .color(self.palette.ink_soft),
+        );
         ui.add_space(8.0);
 
-        for (index, label) in [
-            semantics::RULE_PREFIX,
-            semantics::RULE_SEQUENCE,
-            semantics::RULE_EXTENSION,
-        ]
-        .iter()
-        .enumerate()
-        {
-            let selected = self.selected_rule == index;
-            if ui.selectable_label(selected, *label).clicked() {
-                self.selected_rule = index;
-            }
+        let mut move_rule = None;
+        let mut remove_rule = None;
+        ScrollArea::vertical()
+            .id_salt("rule-list")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for (index, rule) in self.rules.iter().enumerate() {
+                    ui.push_id(rule.rule_id(), |ui| {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(
+                                    self.selected_rule == index,
+                                    format!(
+                                        "{:02} {}",
+                                        index + 1,
+                                        rule_kind(rule).label(self.locale)
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                self.selected_rule = index;
+                            }
+                            let move_up = ui.add_enabled(index > 0, egui::Button::new("↑"));
+                            move_up.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    index > 0,
+                                    self.locale.text(semantics::MOVE_RULE_UP, "규칙 위로 이동"),
+                                )
+                            });
+                            if move_up.on_hover_text(semantics::MOVE_RULE_UP).clicked() {
+                                move_rule = Some((index, index - 1));
+                            }
+                            let move_down = ui
+                                .add_enabled(index + 1 < self.rules.len(), egui::Button::new("↓"));
+                            move_down.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    index + 1 < self.rules.len(),
+                                    self.locale
+                                        .text(semantics::MOVE_RULE_DOWN, "규칙 아래로 이동"),
+                                )
+                            });
+                            if move_down.on_hover_text(semantics::MOVE_RULE_DOWN).clicked() {
+                                move_rule = Some((index, index + 1));
+                            }
+                            let remove = ui.button("×");
+                            remove.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    self.locale.text(semantics::REMOVE_RULE, "규칙 제거"),
+                                )
+                            });
+                            if remove.on_hover_text(semantics::REMOVE_RULE).clicked() {
+                                remove_rule = Some(index);
+                            }
+                        });
+                    });
+                }
+            });
+        if let Some((from, to)) = move_rule {
+            self.rules.swap(from, to);
+            self.selected_rule = to;
+            self.refresh_plan();
+        }
+        if let Some(index) = remove_rule {
+            self.rules.remove(index);
+            self.selected_rule = self.selected_rule.min(self.rules.len().saturating_sub(1));
+            self.refresh_plan();
         }
 
-        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("new-rule-kind")
+                .selected_text(self.new_rule_kind.label(self.locale))
+                .show_ui(ui, |ui| {
+                    for kind in RuleKind::ALL {
+                        ui.selectable_value(&mut self.new_rule_kind, kind, kind.label(self.locale));
+                    }
+                });
+            if ui
+                .button(self.locale.text(semantics::ADD_RULE, "규칙 추가"))
+                .clicked()
+            {
+                self.rules
+                    .push(self.new_rule_kind.create(self.next_rule_id));
+                self.next_rule_id = self.next_rule_id.saturating_add(1);
+                self.selected_rule = self.rules.len().saturating_sub(1);
+                self.refresh_plan();
+            }
+        });
+
+        ui.add_space(8.0);
         ui.separator();
-        ui.add_space(12.0);
-        let prefix_label = ui.label(
-            RichText::new(semantics::PREFIX_LABEL)
+        ui.add_space(8.0);
+        if let Some(rule) = self.rules.get_mut(self.selected_rule) {
+            ui.label(
+                RichText::new(rule_kind(rule).label(self.locale))
+                    .strong()
+                    .color(self.palette.ink),
+            );
+            let changed = ui
+                .push_id(rule.rule_id(), |ui| rule_editor(ui, rule, self.locale))
+                .inner;
+            if changed {
+                self.refresh_plan();
+            }
+        } else {
+            ui.label(self.locale.text("No rules", "규칙 없음"));
+        }
+        ui.label(RichText::new(semantics::HANGUL_IME_HELP).color(self.palette.ink_soft));
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(
+            RichText::new(self.locale.text(semantics::PRESETS, "로컬 프리셋"))
                 .strong()
                 .color(self.palette.ink),
         );
+        let preset_label = ui.label(self.locale.text(semantics::PRESET_NAME, "프리셋 이름"));
         ui.add(
-            egui::TextEdit::singleline(&mut self.prefix)
-                .id_salt("rule.prefix.value")
-                .hint_text(semantics::RULE_PREFIX),
+            egui::TextEdit::singleline(&mut self.preset_name)
+                .id_salt("preset-name")
+                .hint_text(self.locale.text("Name", "이름")),
         )
-        .labelled_by(prefix_label.id);
-        ui.label(RichText::new(semantics::HANGUL_IME_HELP).color(self.palette.ink_soft));
+        .labelled_by(preset_label.id);
+        if ui
+            .button(self.locale.text(semantics::SAVE_PRESET, "프리셋 저장"))
+            .clicked()
+        {
+            self.save_current_preset();
+        }
+        let mut apply_preset = None;
+        let mut delete_preset = None;
+        ScrollArea::vertical()
+            .id_salt("preset-list")
+            .max_height(120.0)
+            .show(ui, |ui| {
+                for preset in self.presets.presets() {
+                    ui.push_id(preset.preset_id(), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(preset.name());
+                            if ui
+                                .small_button(
+                                    self.locale.text(semantics::APPLY_PRESET, "프리셋 적용"),
+                                )
+                                .clicked()
+                            {
+                                apply_preset = Some(preset.preset_id());
+                            }
+                            if ui
+                                .small_button(
+                                    self.locale.text(semantics::DELETE_PRESET, "프리셋 삭제"),
+                                )
+                                .clicked()
+                            {
+                                delete_preset = Some(preset.preset_id());
+                            }
+                        });
+                    });
+                }
+            });
+        if let Some(preset_id) = apply_preset {
+            self.apply_preset(preset_id);
+        }
+        if let Some(preset_id) = delete_preset {
+            self.delete_preset(preset_id);
+        }
     }
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
         let visible = self.visible_indices();
         ui.horizontal(|ui| {
-            ui.heading(RichText::new(semantics::PREVIEW_HEADING).color(self.palette.ink));
+            ui.heading(
+                RichText::new(self.locale.text(semantics::PREVIEW_HEADING, "미리보기"))
+                    .color(self.palette.ink),
+            );
             ui.label(
-                RichText::new(format!("{} shown", visible.len())).color(self.palette.ink_soft),
+                RichText::new(match self.locale {
+                    Locale::English => format!("{} shown", visible.len()),
+                    Locale::Korean => format!("{}개 표시", visible.len()),
+                })
+                .color(self.palette.ink_soft),
             );
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             for candidate in PlanFilter::ALL {
                 if ui
-                    .selectable_label(self.filter == candidate, candidate.label())
+                    .selectable_label(self.filter == candidate, candidate.label(self.locale))
                     .clicked()
                 {
                     self.filter = candidate;
                 }
             }
             ui.separator();
-            let source_query_label = ui.label(semantics::SOURCE_QUERY_LABEL);
+            egui::ComboBox::from_id_salt("diagnostic-filter")
+                .selected_text(self.diagnostic_filter.label(self.locale))
+                .show_ui(ui, |ui| {
+                    for candidate in DiagnosticFilter::ALL {
+                        ui.selectable_value(
+                            &mut self.diagnostic_filter,
+                            candidate,
+                            candidate.label(self.locale),
+                        );
+                    }
+                })
+                .response
+                .on_hover_text(semantics::DIAGNOSTIC_FILTER);
+            ui.separator();
+            let source_query_label =
+                ui.label(self.locale.text(semantics::SOURCE_QUERY_LABEL, "이름 필터"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.source_query)
                     .id_salt("preview.source-query")
-                    .hint_text("Name contains"),
+                    .hint_text(self.locale.text("Name contains", "이름에 포함")),
             )
             .labelled_by(source_query_label.id);
         });
@@ -860,42 +2014,136 @@ impl NativeSpikeApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_sized(
-                        [210.0, 20.0],
-                        egui::Label::new(RichText::new("Source").strong().color(self.palette.ink)),
-                    );
-                    ui.add_sized(
-                        [250.0, 20.0],
+                        [150.0, 20.0],
                         egui::Label::new(
-                            RichText::new("Proposed").strong().color(self.palette.ink),
+                            RichText::new(self.locale.text("Source", "원본"))
+                                .strong()
+                                .color(self.palette.ink),
                         ),
                     );
-                    ui.label(RichText::new("Status").strong().color(self.palette.ink));
+                    ui.add_sized(
+                        [180.0, 20.0],
+                        egui::Label::new(
+                            RichText::new(self.locale.text("Proposed", "변경안"))
+                                .strong()
+                                .color(self.palette.ink),
+                        ),
+                    );
+                    ui.add_sized(
+                        [80.0, 20.0],
+                        egui::Label::new(
+                            RichText::new(self.locale.text("Status", "상태"))
+                                .strong()
+                                .color(self.palette.ink),
+                        ),
+                    );
+                    ui.label(
+                        RichText::new(self.locale.text("Diagnostics", "진단"))
+                            .strong()
+                            .color(self.palette.ink),
+                    );
                 });
                 ui.separator();
+                let mut requested_override = None;
                 ScrollArea::vertical()
                     .id_salt("preview.rows")
                     .auto_shrink([false, false])
                     .show_rows(ui, PREVIEW_ROW_HEIGHT, visible.len(), |ui, row_range| {
                         for visible_row in row_range {
                             let index = visible[visible_row];
-                            let source = format!("IMG_{index:05}.jpg");
-                            let proposed = format!("{}{source}", self.prefix);
-                            let blocked = Self::row_is_blocked(index);
+                            let (source_id, source, proposed, status, diagnostics, blocked) =
+                                self.plan.as_ref().map_or_else(
+                                    || {
+                                        let source = format!("IMG_{index:05}.jpg");
+                                        let proposed =
+                                            format!("{}{source}", self.synthetic_prefix());
+                                        let blocked = Self::row_is_blocked(index);
+                                        let status = if blocked {
+                                            self.locale.text("Blocked", "차단됨")
+                                        } else {
+                                            self.locale.text("Changed", "변경됨")
+                                        };
+                                        (
+                                            None,
+                                            source,
+                                            proposed,
+                                            status,
+                                            if blocked {
+                                                self.locale.text("Sample conflict", "샘플 충돌")
+                                            } else {
+                                                ""
+                                            }
+                                            .to_owned(),
+                                            blocked,
+                                        )
+                                    },
+                                    |plan| {
+                                        let row = &plan.rows()[index];
+                                        (
+                                            Some(row.source_id()),
+                                            row.original_name().to_owned(),
+                                            row.proposed_name().to_owned(),
+                                            if row.status() == "blocked" {
+                                                self.locale.text("Blocked", "차단됨")
+                                            } else if row.status() == "unchanged" {
+                                                self.locale.text("Unchanged", "변경 없음")
+                                            } else {
+                                                self.locale.text("Changed", "변경됨")
+                                            },
+                                            row.diagnostics()
+                                                .iter()
+                                                .map(|code| diagnostic_label(code, self.locale))
+                                                .collect::<Vec<_>>()
+                                                .join(", "),
+                                            row.status() == "blocked",
+                                        )
+                                    },
+                                );
                             ui.push_id(index, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.add_sized([210.0, 20.0], egui::Label::new(source));
-                                    ui.add_sized([250.0, 20.0], egui::Label::new(proposed));
-                                    let status = if blocked { "Blocked" } else { "Changed" };
+                                    ui.add_sized([150.0, 20.0], egui::Label::new(&source));
+                                    ui.add_sized([180.0, 20.0], egui::Label::new(proposed));
                                     let color = if blocked {
                                         self.palette.blocked
                                     } else {
                                         self.palette.accent
                                     };
-                                    ui.label(RichText::new(status).color(color).strong());
+                                    ui.add_sized(
+                                        [80.0, 20.0],
+                                        egui::Label::new(
+                                            RichText::new(status).color(color).strong(),
+                                        ),
+                                    );
+                                    ui.label(diagnostics);
+                                    if let Some(source_id) = source_id
+                                        && ui
+                                            .small_button(
+                                                if self.overrides.contains_key(&source_id) {
+                                                    self.locale.text("Edit override", "재정의 편집")
+                                                } else {
+                                                    self.locale.text("Override", "재정의")
+                                                },
+                                            )
+                                            .clicked()
+                                    {
+                                        requested_override = Some((source_id, source));
+                                    }
                                 });
                             });
                         }
                     });
+                if let Some((source_id, original_name)) = requested_override {
+                    let value = self
+                        .overrides
+                        .get(&source_id)
+                        .cloned()
+                        .unwrap_or_else(|| original_name.clone());
+                    self.override_editor = Some(OverrideEditor {
+                        source_id,
+                        original_name,
+                        value,
+                    });
+                }
             });
     }
 
@@ -904,25 +2152,224 @@ impl NativeSpikeApp {
             ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let apply_text = if self.palette.high_contrast {
-                    RichText::new(semantics::APPLY).color(self.palette.disabled)
+                    RichText::new(self.locale.text(semantics::APPLY, "적용"))
+                        .color(self.palette.disabled)
                 } else {
-                    RichText::new(semantics::APPLY)
+                    RichText::new(self.locale.text(semantics::APPLY, "적용"))
                 };
                 ui.add_enabled(false, egui::Button::new(apply_text))
-                    .on_disabled_hover_text("The native spike never mutates the filesystem");
+                    .on_disabled_hover_text(self.locale.text(
+                        "The native read-only workbench never mutates the filesystem",
+                        "네이티브 읽기 전용 작업대는 파일 시스템을 변경하지 않습니다",
+                    ));
                 ui.label(
-                    RichText::new(semantics::APPLY_LOCKED)
+                    RichText::new(self.locale.text(semantics::APPLY_LOCKED, "적용 잠김"))
                         .color(self.palette.blocked)
                         .strong(),
                 );
+                if ui
+                    .add_enabled(
+                        self.plan.is_some(),
+                        egui::Button::new(self.locale.text(semantics::EXPORT_CSV, "CSV 내보내기")),
+                    )
+                    .clicked()
+                {
+                    self.export_plan(false);
+                }
+                if ui
+                    .add_enabled(
+                        self.plan.is_some(),
+                        egui::Button::new(
+                            self.locale.text(semantics::EXPORT_JSON, "JSON 내보내기"),
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.export_plan(true);
+                }
+                if ui
+                    .add_enabled(
+                        self.plan.is_some(),
+                        egui::Button::new(self.locale.text(semantics::INSPECT_CSV, "CSV 검토")),
+                    )
+                    .clicked()
+                {
+                    self.inspect_plan(false);
+                }
+                if ui
+                    .add_enabled(
+                        self.plan.is_some(),
+                        egui::Button::new(self.locale.text(semantics::INSPECT_JSON, "JSON 검토")),
+                    )
+                    .clicked()
+                {
+                    self.inspect_plan(true);
+                }
             });
         });
     }
 
+    fn inspect_plan(&mut self, json: bool) {
+        let Some(plan_id) = self.plan.as_ref().map(PlanDto::plan_id) else {
+            return;
+        };
+        let document = if json {
+            self.application.inspect_plan_json(plan_id)
+        } else {
+            self.application.inspect_plan_csv(plan_id)
+        };
+        match document {
+            Ok(content) => {
+                self.inspection = Some(InspectionDocument {
+                    title: if json {
+                        self.locale.text("Plan JSON", "계획 JSON")
+                    } else {
+                        self.locale.text("Plan CSV", "계획 CSV")
+                    },
+                    content,
+                });
+            }
+            Err(error) => {
+                self.status = format!(
+                    "{} ({error})",
+                    self.locale
+                        .text("Inspection unavailable", "계획을 검토할 수 없습니다")
+                );
+            }
+        }
+    }
+
+    fn export_plan(&mut self, json: bool) {
+        let Some(plan_id) = self.plan.as_ref().map(PlanDto::plan_id) else {
+            return;
+        };
+        let document = if json {
+            self.application.inspect_plan_json(plan_id)
+        } else {
+            self.application.inspect_plan_csv(plan_id)
+        };
+        let Ok(document) = document else {
+            self.status = self
+                .locale
+                .text(
+                    "The current plan could not be inspected",
+                    "현재 계획을 검토할 수 없습니다",
+                )
+                .to_owned();
+            return;
+        };
+        let extension = if json { "json" } else { "csv" };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export the path-free Renamewright plan")
+            .add_filter(extension.to_uppercase(), &[extension])
+            .set_file_name(format!("renamewright-plan.{extension}"))
+            .save_file()
+        else {
+            self.status = self
+                .locale
+                .text("Plan export cancelled", "계획 내보내기를 취소했습니다")
+                .to_owned();
+            return;
+        };
+        match ApplicationService::export_document(&path, &document) {
+            Ok(()) => {
+                self.status = match self.locale {
+                    Locale::English => format!("Plan {extension} exported"),
+                    Locale::Korean => format!("계획 {extension}을 내보냈습니다"),
+                };
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn show_transient_windows(&mut self, context: &egui::Context) {
+        let mut save_override = false;
+        let mut remove_override = false;
+        let mut close_override = false;
+        if let Some(editor) = self.override_editor.as_mut() {
+            egui::Window::new(self.locale.text("Filename override", "파일 이름 재정의"))
+                .collapsible(false)
+                .resizable(false)
+                .show(context, |ui| {
+                    ui.label(&editor.original_name);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut editor.value)
+                            .hint_text(self.locale.text("Proposed filename", "변경할 파일 이름")),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(self.locale.text(semantics::SAVE_OVERRIDE, "재정의 저장"))
+                            .clicked()
+                        {
+                            save_override = true;
+                        }
+                        if ui
+                            .button(self.locale.text("Reset override", "재정의 초기화"))
+                            .clicked()
+                        {
+                            remove_override = true;
+                        }
+                        if ui
+                            .button(self.locale.text(semantics::CANCEL_OVERRIDE, "취소"))
+                            .clicked()
+                        {
+                            close_override = true;
+                        }
+                    });
+                });
+        }
+        if save_override {
+            if let Some(editor) = self.override_editor.take() {
+                self.overrides.insert(editor.source_id, editor.value);
+                self.refresh_plan();
+            }
+        } else if remove_override {
+            if let Some(editor) = self.override_editor.take() {
+                self.overrides.remove(&editor.source_id);
+                self.refresh_plan();
+            }
+        } else if close_override {
+            self.override_editor = None;
+        }
+
+        let mut close_inspection = false;
+        if let Some(document) = self.inspection.as_mut() {
+            egui::Window::new(document.title)
+                .default_width(720.0)
+                .default_height(480.0)
+                .show(context, |ui| {
+                    ScrollArea::both().show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut document.content)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .interactive(false),
+                        );
+                    });
+                    if ui
+                        .button(self.locale.text(semantics::CLOSE_INSPECTOR, "검토 창 닫기"))
+                        .clicked()
+                    {
+                        close_inspection = true;
+                    }
+                });
+        }
+        if close_inspection {
+            self.inspection = None;
+        }
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui) {
-        let dropped_count = ui.ctx().input(|input| input.raw.dropped_files.len());
-        if dropped_count > 0 {
-            self.status = format!("{dropped_count} dropped entries observed by the native shell");
+        let dropped_paths = ui.ctx().input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect::<Vec<_>>()
+        });
+        if !dropped_paths.is_empty() {
+            self.admit_sources(dropped_paths);
         }
 
         #[cfg(feature = "automation")]
@@ -1002,6 +2449,8 @@ impl NativeSpikeApp {
                     .inner_margin(12.0),
             )
             .show(ui, |ui| self.show_preview(ui));
+
+        self.show_transient_windows(ui.ctx());
     }
 }
 
@@ -1090,9 +2539,7 @@ pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "automation")]
     use std::error::Error;
-    #[cfg(feature = "automation")]
     use std::fs;
     #[cfg(feature = "automation")]
     use std::path::Path;
@@ -1105,7 +2552,9 @@ mod tests {
     use super::automation::{
         AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
     };
-    use super::{NativePalette, NativeSpikeApp, install_theme, semantics};
+    use super::{
+        Locale, NativePalette, NativeSpikeApp, RuleKind, RuleRequestDto, install_theme, semantics,
+    };
 
     #[test]
     fn accesskit_exposes_primary_workbench_controls() {
@@ -1123,6 +2572,8 @@ mod tests {
             semantics::SOURCE_QUERY_LABEL,
         );
         let apply = harness.get_by_label(semantics::APPLY);
+        let move_up = harness.get_by_label(semantics::MOVE_RULE_UP);
+        let remove_rule = harness.get_by_label(semantics::REMOVE_RULE);
         assert_eq!(
             add_files.accesskit_node().role(),
             egui::accesskit::Role::Button
@@ -1131,6 +2582,7 @@ mod tests {
             add_folder.accesskit_node().role(),
             egui::accesskit::Role::Button
         );
+        assert!(add_folder.accesskit_node().is_disabled());
         assert_eq!(
             prefix.accesskit_node().role(),
             egui::accesskit::Role::TextInput
@@ -1141,6 +2593,15 @@ mod tests {
         );
         assert_eq!(apply.accesskit_node().role(), egui::accesskit::Role::Button);
         assert!(apply.accesskit_node().is_disabled());
+        assert_eq!(
+            move_up.accesskit_node().role(),
+            egui::accesskit::Role::Button
+        );
+        assert!(move_up.accesskit_node().is_disabled());
+        assert_eq!(
+            remove_rule.accesskit_node().role(),
+            egui::accesskit::Role::Button
+        );
     }
 
     #[test]
@@ -1224,6 +2685,186 @@ mod tests {
         assert!(harness.query_all_by(|_| true).count() < 500);
     }
 
+    #[test]
+    fn production_workbench_starts_empty_without_synthetic_sources() {
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                NativeSpikeApp::new_product(NativePalette::default(), None),
+            );
+
+        harness.get_by_label(semantics::NO_SOURCES);
+        harness.get_by_label("0 shown");
+        assert!(harness.query_by_label("IMG_00000.jpg").is_none());
+    }
+
+    #[test]
+    fn admitted_sources_render_the_application_service_plan() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = NativeSpikeApp::new(false);
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+
+        let Some(plan) = &app.plan else {
+            return Err("the native workbench did not retain the service plan".into());
+        };
+        assert_eq!(plan.rows()[0].proposed_name(), "final-report.txt");
+        app.set_prefix("reviewed-");
+        app.refresh_plan();
+        let Some(plan) = &app.plan else {
+            return Err("the refreshed service plan was not retained".into());
+        };
+        assert_eq!(plan.rows()[0].proposed_name(), "reviewed-report.txt");
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+        harness.get_by_label("report.txt");
+        harness.get_by_label("reviewed-report.txt");
+        harness.get_by_label("1 shown");
+        Ok(())
+    }
+
+    #[test]
+    fn every_native_rule_family_builds_a_valid_ordered_service_request()
+    -> Result<(), Box<dyn Error>> {
+        let mut app = NativeSpikeApp::new(false);
+        app.rules.clear();
+        for (index, kind) in RuleKind::ALL.into_iter().enumerate() {
+            app.rules.push(kind.create(index as u64 + 1));
+        }
+
+        let request = app.rule_request();
+        app.application.validate_rule_request(&request)?;
+        assert_eq!(request.rules().len(), RuleKind::ALL.len());
+        assert!(
+            request
+                .rules()
+                .iter()
+                .enumerate()
+                .all(|(index, rule)| rule.rule_id() == index as u64 + 1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_override_renders_service_diagnostics_and_path_free_inspection()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = NativeSpikeApp::new(false);
+        app.set_prefix("");
+        app.admit_sources(vec![source]);
+        let source_id = app
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.rows().first())
+            .map(|row| row.source_id())
+            .ok_or("the admitted row was missing")?;
+        app.overrides.insert(source_id, "CON".to_owned());
+        app.refresh_plan();
+        let plan = app.plan.as_ref().ok_or("the override plan was missing")?;
+        assert_eq!(plan.blocked_count(), 1);
+        assert!(plan.rows()[0].diagnostics().contains(&"reservedName"));
+        app.inspect_plan(true);
+        let inspection = app
+            .inspection
+            .as_ref()
+            .ok_or("the plan inspector did not open")?;
+        assert!(inspection.content.contains("\"proposedDisplay\": \"CON\""));
+        assert!(
+            !inspection
+                .content
+                .contains(&directory.path().to_string_lossy().to_string())
+        );
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+        harness.get_by_label("Reserved Windows name");
+        harness.get_by_label("Plan JSON");
+        Ok(())
+    }
+
+    #[test]
+    fn korean_catalog_updates_native_workbench_labels() {
+        let mut app = NativeSpikeApp::new(false);
+        app.locale = Locale::Korean;
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        harness.get_by_label("파일 추가");
+        harness.get_by_label("폴더 추가");
+        harness.get_by_label("규칙");
+        harness.get_by_label("접두사 추가");
+        harness.get_by_label("접두사 텍스트");
+        harness.get_by_label("미리보기");
+        harness.get_by_label("전체");
+        harness.get_by_label("적용 잠김");
+    }
+
+    #[test]
+    fn keyboard_input_edits_and_traverses_the_selected_rule() -> Result<(), Box<dyn Error>> {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), NativeSpikeApp::new(false));
+
+        let prefix = harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, semantics::PREFIX_LABEL);
+        prefix.click();
+        harness.run_ok();
+        assert!(harness.get_by_label(semantics::PREFIX_LABEL).is_focused());
+        harness.event(egui::Event::Text("한글".to_owned()));
+        harness.run_ok();
+        harness.key_press(egui::Key::Tab);
+        harness.run_ok();
+
+        let Some(RuleRequestDto::Prefix { value, .. }) = harness.state().rules.first() else {
+            return Err("the selected prefix rule was missing".into());
+        };
+        assert!(value.contains("한글"));
+        assert!(harness.get_by_label(semantics::PRESET_NAME).is_focused());
+        Ok(())
+    }
+
+    #[test]
+    fn native_presets_persist_and_restore_ordered_rules() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let preset_path = directory.path().join("presets.json");
+        let mut app = NativeSpikeApp::new_with_storage(
+            false,
+            NativePalette::default(),
+            Some(preset_path.clone()),
+        );
+        app.rules = vec![
+            RuleKind::Sequence.create(4),
+            RuleRequestDto::Prefix {
+                rule_id: 8,
+                enabled: true,
+                value: "archive-".to_owned(),
+            },
+        ];
+        app.preset_name = "Archive order".to_owned();
+        app.save_current_preset();
+        assert!(preset_path.is_file());
+
+        let mut restored =
+            NativeSpikeApp::new_with_storage(false, NativePalette::default(), Some(preset_path));
+        assert_eq!(restored.presets.presets().len(), 1);
+        restored.rules = vec![RuleKind::Case.create(1)];
+        restored.apply_preset(1);
+        assert_eq!(restored.rules.len(), 2);
+        assert_eq!(restored.rules[0].rule_id(), 4);
+        assert_eq!(restored.rules[1].rule_id(), 8);
+        assert_eq!(restored.next_rule_id, 9);
+        Ok(())
+    }
+
     #[cfg(feature = "automation")]
     #[test]
     fn automation_root_is_exclusive_and_prepares_isolated_state() -> Result<(), Box<dyn Error>> {
@@ -1299,6 +2940,33 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_fixture_admits_only_confined_real_sources() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let fixtures = directory.path().join("fixtures");
+        fs::create_dir(&fixtures)?;
+        fs::write(fixtures.join("report.txt"), b"report")?;
+        fs::write(
+            fixtures.join("session.json"),
+            br#"{"schemaVersion":1,"prefix":"final-","sources":["report.txt"]}"#,
+        )?;
+        let root = AutomationRoot::open(directory.path())?;
+        let fixture = root.load_fixture(Path::new("session.json"))?;
+        assert_eq!(fixture.sources().len(), 1);
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                NativeSpikeApp::new_automated(NativePalette::default(), root, Some(&fixture)),
+            );
+        harness.get_by_label("report.txt");
+        harness.get_by_label("final-report.txt");
+        harness.get_by_label("Automation fixture loaded · 1 sources");
+        Ok(())
+    }
+
     #[cfg(all(feature = "automation", unix))]
     #[test]
     fn automation_fixture_rejects_symlink_escape() -> Result<(), Box<dyn Error>> {
@@ -1309,10 +2977,18 @@ mod tests {
         fs::write(outside.path().join("secret.json"), b"secret")?;
         fs::create_dir(directory.path().join("fixtures"))?;
         symlink(outside.path(), directory.path().join("fixtures/escape"))?;
+        fs::write(
+            directory.path().join("fixtures/session.json"),
+            br#"{"schemaVersion":1,"sources":["escape/secret.json"]}"#,
+        )?;
         let root = AutomationRoot::open(directory.path())?;
 
         let Err(error) = root.read_fixture(Path::new("escape/secret.json")) else {
             return Err("a symlink escaped the automation root".into());
+        };
+        assert_eq!(error.kind(), AutomationRootErrorKind::ReparsePointRejected);
+        let Err(error) = root.load_fixture(Path::new("session.json")) else {
+            return Err("a symlinked source escaped the automation root".into());
         };
         assert_eq!(error.kind(), AutomationRootErrorKind::ReparsePointRejected);
         Ok(())

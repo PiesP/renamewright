@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
@@ -117,6 +117,10 @@ impl StoredPlan {
 
 const RULE_PIPELINE_SCHEMA_VERSION: u16 = 4;
 const PLAN_CSV_SCHEMA_VERSION: u16 = 1;
+const PRESET_DOCUMENT_SCHEMA_VERSION: u16 = 2;
+const MAX_PRESETS: usize = 32;
+const MAX_PRESET_NAME_BYTES: usize = 256;
+const MAX_PRESET_DOCUMENT_BYTES: u64 = 512 * 1_024;
 const MAX_SEQUENCE_INPUT: u64 = 9_007_199_254_740_991;
 const MAX_RANGE_INPUT: u64 = u32::MAX as u64;
 
@@ -219,6 +223,71 @@ pub struct RulePipelineRequestDto {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RulePresetDto {
+    preset_id: u64,
+    name: String,
+    rule_schema_version: u16,
+    rules: Vec<RuleRequestDto>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetDocumentDto {
+    schema_version: u16,
+    next_preset_id: u64,
+    presets: Vec<RulePresetDto>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresetDocumentErrorKind {
+    UnsupportedSchema,
+    InvalidDocument,
+    DocumentTooLarge,
+    TooManyPresets,
+    InvalidName,
+    DuplicateName,
+    StorageUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PresetDocumentError {
+    kind: PresetDocumentErrorKind,
+}
+
+impl PresetDocumentError {
+    const fn new(kind: PresetDocumentErrorKind) -> Self {
+        Self { kind }
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> PresetDocumentErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self.kind {
+            PresetDocumentErrorKind::UnsupportedSchema => "unsupportedPresetSchema",
+            PresetDocumentErrorKind::InvalidDocument => "invalidPresetDocument",
+            PresetDocumentErrorKind::DocumentTooLarge => "presetDocumentTooLarge",
+            PresetDocumentErrorKind::TooManyPresets => "tooManyPresets",
+            PresetDocumentErrorKind::InvalidName => "invalidPresetName",
+            PresetDocumentErrorKind::DuplicateName => "duplicatePresetName",
+            PresetDocumentErrorKind::StorageUnavailable => "presetStorageUnavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for PresetDocumentError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl std::error::Error for PresetDocumentError {}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -301,7 +370,8 @@ pub enum RuleRequestDto {
 }
 
 impl RuleRequestDto {
-    const fn rule_id(&self) -> u64 {
+    #[must_use]
+    pub const fn rule_id(&self) -> u64 {
         match self {
             Self::Prefix { rule_id, .. }
             | Self::Suffix { rule_id, .. }
@@ -317,7 +387,8 @@ impl RuleRequestDto {
         }
     }
 
-    const fn enabled(&self) -> bool {
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
         match self {
             Self::Prefix { enabled, .. }
             | Self::Suffix { enabled, .. }
@@ -509,6 +580,208 @@ impl RuleRequestDto {
     }
 }
 
+impl SourceOverrideDto {
+    #[must_use]
+    pub fn new(source_id: u64, value: impl Into<String>) -> Self {
+        Self {
+            source_id,
+            value: value.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn source_id(&self) -> u64 {
+        self.source_id
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl RulePipelineRequestDto {
+    #[must_use]
+    pub fn new(rules: Vec<RuleRequestDto>, overrides: Vec<SourceOverrideDto>) -> Self {
+        Self {
+            schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules,
+            overrides,
+        }
+    }
+
+    #[must_use]
+    pub fn rules(&self) -> &[RuleRequestDto] {
+        &self.rules
+    }
+
+    #[must_use]
+    pub fn overrides(&self) -> &[SourceOverrideDto] {
+        &self.overrides
+    }
+}
+
+impl RulePresetDto {
+    #[must_use]
+    pub const fn preset_id(&self) -> u64 {
+        self.preset_id
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn rules(&self) -> &[RuleRequestDto] {
+        &self.rules
+    }
+}
+
+impl Default for PresetDocumentDto {
+    fn default() -> Self {
+        Self {
+            schema_version: PRESET_DOCUMENT_SCHEMA_VERSION,
+            next_preset_id: 1,
+            presets: Vec::new(),
+        }
+    }
+}
+
+impl PresetDocumentDto {
+    #[must_use]
+    pub fn presets(&self) -> &[RulePresetDto] {
+        &self.presets
+    }
+
+    pub fn add(
+        &mut self,
+        name: &str,
+        rules: &[RuleRequestDto],
+    ) -> Result<u64, PresetDocumentError> {
+        validate_preset_document(self)?;
+        if self.presets.len() >= MAX_PRESETS {
+            return Err(PresetDocumentError::new(
+                PresetDocumentErrorKind::TooManyPresets,
+            ));
+        }
+        let name = name.trim();
+        if name.is_empty() || name.len() > MAX_PRESET_NAME_BYTES {
+            return Err(PresetDocumentError::new(
+                PresetDocumentErrorKind::InvalidName,
+            ));
+        }
+        if self.presets.iter().any(|preset| preset.name == name) {
+            return Err(PresetDocumentError::new(
+                PresetDocumentErrorKind::DuplicateName,
+            ));
+        }
+        compile_rule_request(&RulePipelineRequestDto::new(rules.to_vec(), Vec::new()))
+            .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::InvalidDocument))?;
+        let preset_id = self.next_preset_id;
+        self.next_preset_id = self.next_preset_id.saturating_add(1);
+        self.presets.push(RulePresetDto {
+            preset_id,
+            name: name.to_owned(),
+            rule_schema_version: RULE_PIPELINE_SCHEMA_VERSION,
+            rules: rules.to_vec(),
+        });
+        Ok(preset_id)
+    }
+
+    pub fn remove(&mut self, preset_id: u64) {
+        self.presets.retain(|preset| preset.preset_id != preset_id);
+    }
+
+    pub fn load(path: &Path) -> Result<Self, PresetDocumentError> {
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(_) => {
+                return Err(PresetDocumentError::new(
+                    PresetDocumentErrorKind::StorageUnavailable,
+                ));
+            }
+        };
+        let mut serialized = Vec::new();
+        file.take(MAX_PRESET_DOCUMENT_BYTES.saturating_add(1))
+            .read_to_end(&mut serialized)
+            .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable))?;
+        if serialized.len() as u64 > MAX_PRESET_DOCUMENT_BYTES {
+            return Err(PresetDocumentError::new(
+                PresetDocumentErrorKind::DocumentTooLarge,
+            ));
+        }
+        let document: Self = serde_json::from_slice(&serialized)
+            .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::InvalidDocument))?;
+        validate_preset_document(&document)?;
+        Ok(document)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), PresetDocumentError> {
+        validate_preset_document(self)?;
+        let serialized = serde_json::to_vec(self)
+            .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::InvalidDocument))?;
+        if serialized.len() as u64 > MAX_PRESET_DOCUMENT_BYTES {
+            return Err(PresetDocumentError::new(
+                PresetDocumentErrorKind::DocumentTooLarge,
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|_| {
+                PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable)
+            })?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable))?;
+        file.write_all(&serialized)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable))
+    }
+}
+
+fn validate_preset_document(document: &PresetDocumentDto) -> Result<(), PresetDocumentError> {
+    if document.schema_version != PRESET_DOCUMENT_SCHEMA_VERSION {
+        return Err(PresetDocumentError::new(
+            PresetDocumentErrorKind::UnsupportedSchema,
+        ));
+    }
+    if document.presets.len() > MAX_PRESETS || document.next_preset_id == 0 {
+        return Err(PresetDocumentError::new(
+            PresetDocumentErrorKind::InvalidDocument,
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    for preset in &document.presets {
+        if preset.preset_id == 0
+            || preset.preset_id >= document.next_preset_id
+            || preset.rule_schema_version != RULE_PIPELINE_SCHEMA_VERSION
+            || preset.name.is_empty()
+            || preset.name.trim() != preset.name
+            || preset.name.len() > MAX_PRESET_NAME_BYTES
+            || !ids.insert(preset.preset_id)
+            || !names.insert(&preset.name)
+        {
+            return Err(PresetDocumentError::new(
+                PresetDocumentErrorKind::InvalidDocument,
+            ));
+        }
+        compile_rule_request(&RulePipelineRequestDto::new(
+            preset.rules.clone(),
+            Vec::new(),
+        ))
+        .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::InvalidDocument))?;
+    }
+    Ok(())
+}
+
 const fn filename_part(part: FilenamePartDto) -> FilenamePart {
     match part {
         FilenamePartDto::WholeName => FilenamePart::WholeName,
@@ -651,7 +924,25 @@ impl PlanningCommandErrorDto {
     pub const fn code(&self) -> &'static str {
         self.code
     }
+
+    #[must_use]
+    pub const fn rule_id(&self) -> Option<u64> {
+        self.rule_id
+    }
+
+    #[must_use]
+    pub const fn source_id(&self) -> Option<u64> {
+        self.source_id
+    }
 }
+
+impl std::fmt::Display for PlanningCommandErrorDto {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl std::error::Error for PlanningCommandErrorDto {}
 
 impl From<RuleRequestError> for PlanningCommandErrorDto {
     fn from(error: RuleRequestError) -> Self {
@@ -776,6 +1067,12 @@ impl ApplicationService {
         I: IntoIterator<Item = std::path::PathBuf>,
     {
         let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
+        let paths = paths.into_iter().collect::<Vec<_>>();
+        if contains_directory(&paths) {
+            return Err(PlanningCommandErrorDto::new(
+                "directoryAdmissionUnavailable",
+            ));
+        }
         let mut registry = self
             .registry
             .lock()
@@ -1085,7 +1382,7 @@ impl From<RecoveryCommandErrorKind> for RecoveryCommandErrorDto {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanDto {
     plan_id: u64,
@@ -1096,7 +1393,7 @@ pub struct PlanDto {
     can_apply: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanRowDto {
     source_id: u64,
@@ -1105,6 +1402,70 @@ pub struct PlanRowDto {
     status: &'static str,
     diagnostics: Vec<&'static str>,
     override_applied: bool,
+}
+
+impl PlanDto {
+    #[must_use]
+    pub const fn plan_id(&self) -> u64 {
+        self.plan_id
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[PlanRowDto] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub const fn changed_count(&self) -> usize {
+        self.changed_count
+    }
+
+    #[must_use]
+    pub const fn blocked_count(&self) -> usize {
+        self.blocked_count
+    }
+
+    #[must_use]
+    pub const fn can_apply(&self) -> bool {
+        self.can_apply
+    }
+}
+
+impl PlanRowDto {
+    #[must_use]
+    pub const fn source_id(&self) -> u64 {
+        self.source_id
+    }
+
+    #[must_use]
+    pub fn original_name(&self) -> &str {
+        &self.original_name
+    }
+
+    #[must_use]
+    pub fn proposed_name(&self) -> &str {
+        &self.proposed_name
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> &'static str {
+        self.status
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> &[&'static str] {
+        &self.diagnostics
+    }
+
+    #[must_use]
+    pub const fn override_applied(&self) -> bool {
+        self.override_applied
+    }
 }
 
 #[derive(Serialize)]
@@ -1156,21 +1517,31 @@ struct TraceStepDocument<'a> {
 }
 
 fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf]) {
-    let outcome = state
-        .registry
-        .lock()
-        .map_err(|_| "the source registry is unavailable".to_owned())
-        .and_then(|mut registry| {
-            registry
-                .admit_paths(paths.iter().cloned())
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        });
+    let outcome = if contains_directory(paths) {
+        Err("directoryAdmissionUnavailable".to_owned())
+    } else {
+        state
+            .registry
+            .lock()
+            .map_err(|_| "the source registry is unavailable".to_owned())
+            .and_then(|mut registry| {
+                registry
+                    .admit_paths(paths.iter().cloned())
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+    };
 
     if let Ok(mut changes) = state.source_changes.lock() {
         changes.revision = changes.revision.saturating_add(1);
         changes.error = outcome.err();
     }
+}
+
+fn contains_directory(paths: &[std::path::PathBuf]) -> bool {
+    paths.iter().any(|path| {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+    })
 }
 
 fn plan_from_registry(
@@ -2042,7 +2413,8 @@ mod tests {
 
     use super::{
         ApplicationService, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
-        ExtensionOperationDto, FilenamePartDto, LedgerEntryDto, PlanDto,
+        ExtensionOperationDto, FilenamePartDto, LedgerEntryDto, MAX_PRESET_DOCUMENT_BYTES, PlanDto,
+        PresetDocumentDto, PresetDocumentError, PresetDocumentErrorKind,
         RULE_PIPELINE_SCHEMA_VERSION, RangeOperationDto, RangeOriginDto, RulePipelineRequestDto,
         RuleRequestDto, RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto,
         SequenceScopeDto, SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto,
@@ -2074,6 +2446,160 @@ mod tests {
         assert_eq!(registry.snapshots().len(), 1);
         assert_eq!(changes.revision, 1);
         assert_eq!(changes.error, None);
+        Ok(())
+    }
+
+    #[test]
+    fn directory_admission_remains_unavailable_without_partial_registry_changes()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        let selected_directory = directory.path().join("folder");
+        fs::write(&source, b"report")?;
+        fs::create_dir(&selected_directory)?;
+        let state = ApplicationService::default();
+
+        let error = state
+            .admit_sources_with_rules(
+                [source.clone(), selected_directory.clone()],
+                ApplicationService::prefix_rule_request("final-"),
+            )
+            .err()
+            .ok_or("directory admission unexpectedly succeeded")?;
+        assert_eq!(error.code(), "directoryAdmissionUnavailable");
+        assert!(
+            state
+                .registry
+                .lock()
+                .map_err(|_| "registry lock failed")?
+                .snapshots()
+                .is_empty()
+        );
+
+        admit_dropped_sources(&state, &[source, selected_directory]);
+        let registry = state.registry.lock().map_err(|_| "registry lock failed")?;
+        let changes = state
+            .source_changes
+            .lock()
+            .map_err(|_| "change lock failed")?;
+        assert!(registry.snapshots().is_empty());
+        assert_eq!(
+            changes.error.as_deref(),
+            Some("directoryAdmissionUnavailable")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_plan_projection_exposes_ids_names_and_diagnostics_without_paths()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let state = ApplicationService::default();
+
+        let plan = state.admit_sources_with_rules(
+            [source],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        let Some(row) = plan.rows().first() else {
+            return Err("the admitted source was not projected".into());
+        };
+
+        assert_eq!(plan.plan_id(), 1);
+        assert_eq!(plan.generation(), 1);
+        assert_eq!(plan.changed_count(), 1);
+        assert_eq!(plan.blocked_count(), 0);
+        assert!(plan.can_apply());
+        assert_eq!(row.original_name(), "report.txt");
+        assert_eq!(row.proposed_name(), "final-report.txt");
+        assert_eq!(row.status(), "changed");
+        assert!(row.diagnostics().is_empty());
+        assert!(!row.override_applied());
+        assert!(row.source_id() > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn native_rule_request_boundary_retains_order_and_source_overrides() {
+        let request = RulePipelineRequestDto::new(
+            vec![
+                RuleRequestDto::Prefix {
+                    rule_id: 4,
+                    enabled: true,
+                    value: "draft-".to_owned(),
+                },
+                RuleRequestDto::Suffix {
+                    rule_id: 9,
+                    enabled: false,
+                    value: "-review".to_owned(),
+                },
+            ],
+            vec![SourceOverrideDto::new(12, "manual.txt")],
+        );
+
+        assert_eq!(request.rules().len(), 2);
+        assert_eq!(request.rules()[0].rule_id(), 4);
+        assert!(request.rules()[0].enabled());
+        assert_eq!(request.rules()[1].rule_id(), 9);
+        assert!(!request.rules()[1].enabled());
+        assert_eq!(request.overrides()[0].source_id(), 12);
+        assert_eq!(request.overrides()[0].value(), "manual.txt");
+    }
+
+    #[test]
+    fn native_presets_round_trip_only_valid_rule_pipelines() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("presets.json");
+        let rules = vec![RuleRequestDto::Prefix {
+            rule_id: 7,
+            enabled: true,
+            value: "archive-".to_owned(),
+        }];
+        let mut document = PresetDocumentDto::default();
+        let preset_id = document.add("Archive", &rules)?;
+        document.save(&path)?;
+
+        let mut loaded = PresetDocumentDto::load(&path)?;
+        assert_eq!(loaded.presets().len(), 1);
+        assert_eq!(loaded.presets()[0].preset_id(), preset_id);
+        assert_eq!(loaded.presets()[0].name(), "Archive");
+        assert_eq!(loaded.presets()[0].rules(), rules);
+        assert_eq!(
+            loaded
+                .add("Archive", &rules)
+                .err()
+                .map(PresetDocumentError::kind),
+            Some(PresetDocumentErrorKind::DuplicateName)
+        );
+        loaded.remove(preset_id);
+        loaded.save(&path)?;
+        assert!(PresetDocumentDto::load(&path)?.presets().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn native_preset_loading_rejects_unbounded_or_invalid_documents() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("presets.json");
+        fs::write(
+            &path,
+            br#"{"schemaVersion":99,"nextPresetId":1,"presets":[]}"#,
+        )?;
+        assert_eq!(
+            PresetDocumentDto::load(&path)
+                .err()
+                .map(PresetDocumentError::kind),
+            Some(PresetDocumentErrorKind::UnsupportedSchema)
+        );
+        fs::File::create(&path)?.set_len(MAX_PRESET_DOCUMENT_BYTES + 1)?;
+        assert_eq!(
+            PresetDocumentDto::load(&path)
+                .err()
+                .map(PresetDocumentError::kind),
+            Some(PresetDocumentErrorKind::DocumentTooLarge)
+        );
         Ok(())
     }
 

@@ -184,9 +184,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .iter()
                     .any(|(_, node)| node.label() == Some("Apply") && node.is_disabled())
             });
+            let read_only_workbench = [
+                "01 Add prefix",
+                "Add suffix",
+                "Add rule",
+                "All diagnostics",
+                "Local presets",
+                "Preset name",
+                "Inspect JSON",
+                "Inspect CSV",
+            ]
+            .into_iter()
+            .all(has_text);
+            let rule_actions_named = ["Move rule up", "Move rule down", "Remove rule"]
+                .into_iter()
+                .all(has_text);
             println!(
                 "tree_step={step} pixels_per_point={pixels_per_point} nodes={node_count} \
-                 automation_banner={} hangul_sample={} apply_disabled={apply_disabled}",
+                 automation_banner={} hangul_sample={} apply_disabled={apply_disabled} \
+                 read_only_workbench={read_only_workbench} rule_actions_named={rule_actions_named}",
                 has_text("AUTOMATION TEST MODE"),
                 has_text("한글 IME 입력 확인"),
             );

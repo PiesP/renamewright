@@ -21,7 +21,7 @@ $requiredRunChecks = @(
   'focusScreenshotCaptured',
   'koreanImeComposition',
   'nativeFileDialogOpened',
-  'nativeFolderDialogOpened',
+  'addFolderDisabled',
   'observedDpiSupported',
   'tenThousandEntryScrollWithinBudget',
   'tenThousandEntryFilterWithinBudget',
@@ -208,7 +208,7 @@ foreach ($file in $evidenceFiles) {
   if (
     $explorerDragDropRequired -and
     $explorerDragDropExercised -and
-    $nativeDragDropStatus -cmatch '^[1-9][0-9]* dropped entries observed by the native shell$'
+    $nativeDragDropStatus -cmatch '^[1-9][0-9]* sources · [0-9]+ changed · [0-9]+ blocked$'
   ) {
     $explorerDragDropComplete = $true
   }

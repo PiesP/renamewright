@@ -26,9 +26,15 @@ Post-0.1 development is replacing the Tauri/Solid shell with an
 `renamewright-application` service now owns session state, source admission,
 planning, inspection/export, Ledger, Recovery, Undo, cancellation, and execution
 preparation; Tauri retains only its framework adapters and native dialogs. The
-target artifact is one portable Windows executable with no Node.js, WebView2,
-or sidecar runtime. New-plan Apply and directory execution remain disabled until
-their dedicated journal, Windows, automation, and packaged UI gates pass.
+native read-only workbench now sends selected, dropped, and root-confined test
+fixture paths directly into that service and renders only its path-free plan
+projection. It exposes every ordered rule family, diagnostics, source overrides,
+bounded local presets, Korean/English UI text, and path-free JSON/CSV inspection
+and create-new export; its retained 10,000-row synthetic view remains a UI
+performance fixture. The target artifact is one portable Windows executable
+with no Node.js, WebView2, or sidecar runtime. New-plan Apply and directory
+execution remain disabled until their dedicated journal, Windows, automation,
+and packaged UI gates pass.
 
 ## Development
 
@@ -49,7 +55,9 @@ The native inspection build is a separate test artifact and starts only when
 compiled with `--features automation` and launched with both `--automation` and
 `--automation-root <absolute-disposable-directory>`. An optional
 `--automation-fixture <relative-json-path>` resolves only below that root's
-bounded `fixtures` directory. The loopback inspection adapter services one
+bounded `fixtures` directory. A fixture may list up to 10,000 relative source
+files; every component is reparse-checked and remains confined to that fixture
+root before native admission. The loopback inspection adapter services one
 connection at a time and bounds input frames, event batches, requests, viewport
 size, and connection lifetime.
 

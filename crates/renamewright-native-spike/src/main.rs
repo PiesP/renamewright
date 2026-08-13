@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 #[cfg(feature = "automation")]
@@ -11,6 +11,25 @@ use renamewright_native_spike::automation::{
     AUTOMATION_BIND_ADDRESS, AutomationRoot, serve_bounded,
 };
 use renamewright_native_spike::{NativePalette, NativeSpikeApp, install_theme};
+
+#[cfg(windows)]
+fn native_preset_path() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join("Renamewright").join("presets.json"))
+}
+
+#[cfg(not(windows))]
+fn native_preset_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".local").join("share"))
+        })
+        .map(|root| root.join("renamewright").join("presets.json"))
+}
 
 #[cfg(windows)]
 fn native_palette() -> Result<NativePalette, std::io::Error> {
@@ -159,7 +178,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     automation_launch.fixture.as_ref(),
                 )));
             }
-            Ok(Box::new(NativeSpikeApp::new_with_palette(false, palette)))
+            Ok(Box::new(NativeSpikeApp::new_product(
+                palette,
+                native_preset_path(),
+            )))
         }),
     )?;
     Ok(())
