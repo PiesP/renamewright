@@ -51,7 +51,7 @@
     "@solidjs/testing-library": "0.8.10",
     "@tauri-apps/cli": "2.11.4",
     "@testing-library/jest-dom": "7.0.1",
-    "@testing-library/user-event": "14.6.3",
+    "@testing-library/user-event": "14.6.4",
     "@vitest/coverage-v8": "4.1.10",
     "jsdom": "30.0.1",
     "typescript": "7.0.2",
