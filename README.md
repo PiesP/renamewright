@@ -22,11 +22,13 @@ plan remains disabled; recovery and Undo are limited to journaled transactions,
 fresh filesystem revalidation, and native user confirmation.
 
 Post-0.1 development is replacing the Tauri/Solid shell with an
-`eframe`/`egui` native Rust UI and extracting a UI-independent Rust application
-service. The target artifact is one portable Windows executable with no Node.js,
-WebView2, or sidecar runtime. New-plan Apply and directory execution remain
-disabled until their dedicated journal, Windows, automation, and packaged UI
-gates pass.
+`eframe`/`egui` native Rust UI. The UI-independent
+`renamewright-application` service now owns session state, source admission,
+planning, inspection/export, Ledger, Recovery, Undo, cancellation, and execution
+preparation; Tauri retains only its framework adapters and native dialogs. The
+target artifact is one portable Windows executable with no Node.js, WebView2,
+or sidecar runtime. New-plan Apply and directory execution remain disabled until
+their dedicated journal, Windows, automation, and packaged UI gates pass.
 
 ## Development
 

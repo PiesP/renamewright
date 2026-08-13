@@ -8,12 +8,13 @@ policy in `.github/SECURITY.md`.
 
 Renamewright is a Windows-first, local desktop batch-renaming workbench. Version
 0.1 uses Rust, Tauri 2, and a bundled Solid/TypeScript WebView. Post-0.1 work is
-migrating the shell and UI to `eframe`/`egui`, extracting a UI-independent Rust
-application service, and adding explicitly selected directory entries. Security
-review covers both shells while they coexist, the Rust core, application and
-platform crates, the Windows native boundary, journal and recovery formats,
-test-only automation, build workflows, dependency controls, and Windows
-acceptance artifacts.
+migrating the shell and UI to `eframe`/`egui`; the extracted UI-independent Rust
+application service owns state and use cases while shell frameworks retain
+native dialogs and adapter code. Later work adds explicitly selected directory
+entries. Security review covers both shells while they coexist, the Rust core,
+application and platform crates, the Windows native boundary, journal and
+recovery formats, test-only automation, build workflows, dependency controls,
+and Windows acceptance artifacts.
 
 The production application has no public network listener, account, telemetry,
 cloud sync, updater, remote UI, shell integration, or user-script/plugin system.

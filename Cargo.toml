@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/renamewright-application",
   "crates/renamewright-core",
   "crates/renamewright-native-spike",
   "crates/renamewright-platform",
