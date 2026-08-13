@@ -651,7 +651,25 @@ impl PlanningCommandErrorDto {
     pub const fn code(&self) -> &'static str {
         self.code
     }
+
+    #[must_use]
+    pub const fn rule_id(&self) -> Option<u64> {
+        self.rule_id
+    }
+
+    #[must_use]
+    pub const fn source_id(&self) -> Option<u64> {
+        self.source_id
+    }
 }
+
+impl std::fmt::Display for PlanningCommandErrorDto {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl std::error::Error for PlanningCommandErrorDto {}
 
 impl From<RuleRequestError> for PlanningCommandErrorDto {
     fn from(error: RuleRequestError) -> Self {
@@ -1105,6 +1123,70 @@ pub struct PlanRowDto {
     status: &'static str,
     diagnostics: Vec<&'static str>,
     override_applied: bool,
+}
+
+impl PlanDto {
+    #[must_use]
+    pub const fn plan_id(&self) -> u64 {
+        self.plan_id
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &[PlanRowDto] {
+        &self.rows
+    }
+
+    #[must_use]
+    pub const fn changed_count(&self) -> usize {
+        self.changed_count
+    }
+
+    #[must_use]
+    pub const fn blocked_count(&self) -> usize {
+        self.blocked_count
+    }
+
+    #[must_use]
+    pub const fn can_apply(&self) -> bool {
+        self.can_apply
+    }
+}
+
+impl PlanRowDto {
+    #[must_use]
+    pub const fn source_id(&self) -> u64 {
+        self.source_id
+    }
+
+    #[must_use]
+    pub fn original_name(&self) -> &str {
+        &self.original_name
+    }
+
+    #[must_use]
+    pub fn proposed_name(&self) -> &str {
+        &self.proposed_name
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> &'static str {
+        self.status
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> &[&'static str] {
+        &self.diagnostics
+    }
+
+    #[must_use]
+    pub const fn override_applied(&self) -> bool {
+        self.override_applied
+    }
 }
 
 #[derive(Serialize)]
@@ -2074,6 +2156,36 @@ mod tests {
         assert_eq!(registry.snapshots().len(), 1);
         assert_eq!(changes.revision, 1);
         assert_eq!(changes.error, None);
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_plan_projection_exposes_ids_names_and_diagnostics_without_paths()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let state = ApplicationService::default();
+
+        let plan = state.admit_sources_with_rules(
+            [source],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        let Some(row) = plan.rows().first() else {
+            return Err("the admitted source was not projected".into());
+        };
+
+        assert_eq!(plan.plan_id(), 1);
+        assert_eq!(plan.generation(), 1);
+        assert_eq!(plan.changed_count(), 1);
+        assert_eq!(plan.blocked_count(), 0);
+        assert!(plan.can_apply());
+        assert_eq!(row.original_name(), "report.txt");
+        assert_eq!(row.proposed_name(), "final-report.txt");
+        assert_eq!(row.status(), "changed");
+        assert!(row.diagnostics().is_empty());
+        assert!(!row.override_applied());
+        assert!(row.source_id() > 0);
         Ok(())
     }
 
