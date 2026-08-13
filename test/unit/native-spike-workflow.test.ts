@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
 import workflow from '../../.github/workflows/ci.yaml?raw';
 import packager from '../../scripts/prepare-windows-native-spike.ps1?raw';
+import runtime from '../../scripts/test-windows-native-spike-runtime.ps1?raw';
 
 test('builds default and automation native spike executables independently on Windows', () => {
   const defaultBuild = workflow.indexOf('--bin renamewright-native-spike');
@@ -8,6 +9,8 @@ test('builds default and automation native spike executables independently on Wi
   const automationBuild = workflow.indexOf('--features automation');
   const probeCopy = workflow.indexOf("'target/release/inspection-probe.exe'");
   const packageStep = workflow.indexOf('Prepare the source-bound native spike artifact');
+  const runtimeStep = workflow.indexOf('Exercise the Windows native spike runtime');
+  const uploadStep = workflow.indexOf('Upload the source-bound native spike artifact');
 
   expect(workflow).toContain('cargo test `\n            --package renamewright-native-spike');
   expect(workflow).toContain('--all-features');
@@ -16,6 +19,8 @@ test('builds default and automation native spike executables independently on Wi
   expect(automationBuild).toBeGreaterThan(defaultCopy);
   expect(probeCopy).toBeGreaterThan(automationBuild);
   expect(packageStep).toBeGreaterThan(probeCopy);
+  expect(runtimeStep).toBeGreaterThan(packageStep);
+  expect(uploadStep).toBeGreaterThan(runtimeStep);
 });
 
 test('uploads a source-bound artifact only for durable workflow runs', () => {
@@ -43,4 +48,20 @@ test('keeps production and automation binary evidence separate and path-free', (
   expect(packager).toContain("automationArtifact = 'renamewright-native-spike-automation.exe'");
   expect(packager).toContain('Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256');
   expect(packager).not.toContain('$root = [ordered]');
+});
+
+test('exercises the exact Windows executables before uploading runtime evidence', () => {
+  expect(runtime).toContain("-ArgumentList @('--automation')");
+  expect(runtime).toContain("ConnectAsync('127.0.0.1', 45719)");
+  expect(runtime).toContain('The default native spike exposed the custom inspection listener.');
+  expect(runtime).toContain("'automation_banner=true'");
+  expect(runtime).toContain("'hangul_sample=true'");
+  expect(runtime).toContain("'apply_disabled=true'");
+  expect(runtime).toContain("'screenshot=1180x760'");
+  expect(runtime).toContain('$nodeCount -le 0 -or $nodeCount -ge 500');
+  expect(runtime).toContain('defaultStartupMilliseconds');
+  expect(runtime).toContain('automationProbeReadyMilliseconds');
+  expect(runtime).toContain('automationWorkingSetBytes');
+  expect(runtime).toContain("'windows-runtime-evidence.json'");
+  expect(runtime).toContain("Where-Object Name -ne 'SHA256SUMS'");
 });
