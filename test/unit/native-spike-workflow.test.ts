@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import workflow from '../../.github/workflows/ci.yaml?raw';
+import matrixMerger from '../../scripts/merge-windows-native-spike-interactive-evidence.ps1?raw';
 import packager from '../../scripts/prepare-windows-native-spike.ps1?raw';
 import interactive from '../../scripts/test-windows-native-spike-interactive.ps1?raw';
 import runtime from '../../scripts/test-windows-native-spike-runtime.ps1?raw';
@@ -120,6 +121,16 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain("$composedPrefix -cne '정리_한글'");
   expect(interactive).toContain("-Title 'Add files to Renamewright'");
   expect(interactive).toContain("-Title 'Add a directory entry to Renamewright'");
+  expect(interactive).toContain("$EvidenceLabel -cnotmatch '^[a-z0-9][a-z0-9-]{0,47}$'");
+  expect(interactive).toContain('$ExpectedDpiPercent -ne 0');
+  expect(interactive).toContain('$RequireHighContrast -and -not $highContrastObserved');
+  expect(interactive).toContain('Wait-ForExplorerDropStatus');
+  expect(interactive).toContain('$RequireExplorerDragDrop');
+  expect(interactive).toContain('disposable files or folders');
+  expect(interactive).toContain('nativeDragDropExercised = $nativeDragDropExercised');
+  expect(interactive).toContain('focusScreenshotFile');
+  expect(interactive).toContain('performanceScreenshotFile');
+  expect(interactive).toContain('evidenceLabel = $EvidenceLabel');
   expect(interactive).toContain('tenThousandEntryScrollMilliseconds = 200');
   expect(interactive).toContain('tenThousandEntryFilterMilliseconds = 200');
   expect(interactive).toContain(
@@ -140,4 +151,19 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('Update-ArtifactChecksums');
   expect(interactive).not.toContain('Invoke-Expression');
   expect(interactive).not.toContain('DownloadString');
+});
+
+test('merges only intentional source-bound Windows acceptance configurations', () => {
+  expect(matrixMerger).toContain('$requiredDpiPercent = @(100, 125, 150, 200, 250)');
+  expect(matrixMerger).toContain("'windows-interactive-evidence*.json'");
+  expect(matrixMerger).toContain('$expectedDpiPercent -eq $dpiPercent');
+  expect(matrixMerger).toContain('$highContrastRequired -and $highContrastObserved');
+  expect(matrixMerger).toContain('$explorerDragDropRequired -and');
+  expect(matrixMerger).toContain("native shell$'");
+  expect(matrixMerger).toContain('Assert-Screenshot');
+  expect(matrixMerger).toContain('checksumsVerified = $true');
+  expect(matrixMerger).toContain("status = if ($complete) { 'complete' } else { 'partial' }");
+  expect(matrixMerger).toContain('$RequireComplete -and -not $complete');
+  expect(matrixMerger).not.toContain('Set-ItemProperty');
+  expect(matrixMerger).not.toContain('Start-Process');
 });

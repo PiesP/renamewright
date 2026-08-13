@@ -3,7 +3,12 @@ param(
   [Parameter(Mandatory = $true)] [string]$AutomationExecutablePath,
   [Parameter(Mandatory = $true)] [string]$InspectionProbePath,
   [Parameter(Mandatory = $true)] [string]$ArtifactDirectory,
-  [Parameter(Mandatory = $true)] [string]$SourceSha
+  [Parameter(Mandatory = $true)] [string]$SourceSha,
+  [string]$EvidenceLabel = 'current',
+  [int]$ExpectedDpiPercent = 0,
+  [switch]$RequireHighContrast,
+  [switch]$RequireExplorerDragDrop,
+  [ValidateRange(5, 300)] [int]$ExplorerDragDropTimeoutSeconds = 60
 )
 
 Set-StrictMode -Version Latest
@@ -19,6 +24,13 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
 }
 if (-not [Environment]::UserInteractive) {
   throw 'Interactive native-spike acceptance requires an interactive Windows session.'
+}
+if ($EvidenceLabel -cnotmatch '^[a-z0-9][a-z0-9-]{0,47}$') {
+  throw 'EvidenceLabel must contain only lowercase ASCII letters, digits, and hyphens.'
+}
+$supportedDpiPercent = @(100, 125, 150, 200, 250)
+if ($ExpectedDpiPercent -ne 0 -and $supportedDpiPercent -notcontains $ExpectedDpiPercent) {
+  throw 'ExpectedDpiPercent must be 100, 125, 150, 200, or 250 when specified.'
 }
 
 Add-Type -AssemblyName UIAutomationClient
@@ -132,6 +144,24 @@ function Find-Element {
     }
   }
   throw "Windows UI Automation did not expose the expected control named '$Name'."
+}
+
+function Wait-ForExplorerDropStatus {
+  param(
+    [Parameter(Mandatory = $true)]
+    [System.Windows.Automation.AutomationElement]$Root,
+    [Parameter(Mandatory = $true)] [int]$TimeoutSeconds
+  )
+  $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+  while ([DateTimeOffset]::UtcNow -lt $deadline) {
+    foreach ($element in (Get-Descendants -Root $Root)) {
+      if ($element.Current.Name -cmatch '^[1-9][0-9]* dropped entries observed by the native shell$') {
+        return $element.Current.Name
+      }
+    }
+    Start-Sleep -Milliseconds 200
+  }
+  throw 'No native-shell drop status appeared before the Explorer drag/drop timeout.'
 }
 
 function Wait-ForDialog {
@@ -252,12 +282,14 @@ if ($null -eq $explorerInSession) {
 }
 
 $temporaryDirectory = [System.IO.Path]::GetTempPath()
-$processOutputPath = Join-Path $artifactRoot 'interactive-process.stdout.txt'
-$processErrorPath = Join-Path $artifactRoot 'interactive-process.stderr.txt'
+$artifactSuffix = if ($EvidenceLabel -ceq 'current') { '' } else { "-$EvidenceLabel" }
+$processOutputPath = Join-Path $artifactRoot "interactive-process$artifactSuffix.stdout.txt"
+$processErrorPath = Join-Path $artifactRoot "interactive-process$artifactSuffix.stderr.txt"
 $probeOutputPath = Join-Path $temporaryDirectory 'renamewright-interactive-probe.stdout.txt'
 $probeErrorPath = Join-Path $temporaryDirectory 'renamewright-interactive-probe.stderr.txt'
-$focusScreenshotPath = Join-Path $artifactRoot 'windows-keyboard-focus.png'
-$performanceScreenshotPath = Join-Path $artifactRoot 'windows-interactive-performance.png'
+$focusScreenshotPath = Join-Path $artifactRoot "windows-keyboard-focus$artifactSuffix.png"
+$performanceScreenshotPath = Join-Path $artifactRoot "windows-interactive-performance$artifactSuffix.png"
+$evidencePath = Join-Path $artifactRoot "windows-interactive-evidence$artifactSuffix.json"
 
 $application = $null
 $windowHandle = [IntPtr]::Zero
@@ -409,7 +441,29 @@ try {
     throw "The native spike window reported unsupported DPI $dpi."
   }
   $dpiPercent = [int][Math]::Round(($dpi / 96.0) * 100)
+  if ($ExpectedDpiPercent -ne 0 -and $dpiPercent -ne $ExpectedDpiPercent) {
+    throw "The native spike reported $dpiPercent percent DPI instead of the expected $ExpectedDpiPercent percent."
+  }
   $highContrastObserved = [System.Windows.SystemParameters]::HighContrast
+  if ($RequireHighContrast -and -not $highContrastObserved) {
+    throw 'Windows high contrast was required but was not active for the native spike run.'
+  }
+
+  $nativeDragDropExercised = $false
+  $nativeDragDropStatus = ''
+  if ($RequireExplorerDragDrop) {
+    if (-not [RenamewrightAcceptanceNativeMethods]::SetForegroundWindow($windowHandle)) {
+      throw 'Windows could not activate the native spike for the Explorer drag/drop check.'
+    }
+    Write-Host (
+      'Drag one or more disposable files or folders from the current-session Explorer ' +
+      "window into Renamewright within $ExplorerDragDropTimeoutSeconds seconds."
+    )
+    $nativeDragDropStatus = Wait-ForExplorerDropStatus `
+      -Root $applicationRoot `
+      -TimeoutSeconds $ExplorerDragDropTimeoutSeconds
+    $nativeDragDropExercised = $true
+  }
 
   $performanceProbeOutput = Invoke-Probe `
     -ProbePath $inspectionProbe `
@@ -440,7 +494,7 @@ try {
     throw "The interactive 10,000-entry filter took $filterMilliseconds ms, exceeding the $($performanceBudgets.tenThousandEntryFilterMilliseconds)-ms budget."
   }
 
-  $remainingDpi = @(100, 125, 150, 200, 250 | Where-Object { $_ -ne $dpiPercent })
+  $remainingDpi = @($supportedDpiPercent | Where-Object { $_ -ne $dpiPercent })
   $evidence = [ordered]@{
     schemaVersion = 1
     sourceSha = $SourceSha
@@ -464,8 +518,8 @@ try {
       observedDpiSupported = $true
       tenThousandEntryScrollWithinBudget = $true
       tenThousandEntryFilterWithinBudget = $true
-      highContrastModeExercised = $false
-      nativeDragDropExercised = $false
+      highContrastModeExercised = [bool]$highContrastObserved
+      nativeDragDropExercised = $nativeDragDropExercised
       fullDpiMatrixExercised = ($remainingDpi.Count -eq 0)
     }
     measurements = [ordered]@{
@@ -476,25 +530,34 @@ try {
       windowDpi = $dpi
       windowDpiPercent = $dpiPercent
       highContrastObserved = [bool]$highContrastObserved
+      nativeDragDropStatus = $nativeDragDropStatus
       scrollMilliseconds = $scrollMilliseconds
       filterMilliseconds = $filterMilliseconds
+      focusScreenshotFile = [System.IO.Path]::GetFileName($focusScreenshotPath)
       focusScreenshotSha256 = (
         Get-FileHash -LiteralPath $focusScreenshotPath -Algorithm SHA256
       ).Hash.ToLowerInvariant()
+      performanceScreenshotFile = [System.IO.Path]::GetFileName($performanceScreenshotPath)
       performanceScreenshotSha256 = (
         Get-FileHash -LiteralPath $performanceScreenshotPath -Algorithm SHA256
       ).Hash.ToLowerInvariant()
     }
+    intent = [ordered]@{
+      evidenceLabel = $EvidenceLabel
+      expectedDpiPercent = $ExpectedDpiPercent
+      requireHighContrast = [bool]$RequireHighContrast
+      requireExplorerDragDrop = [bool]$RequireExplorerDragDrop
+    }
     budgets = $performanceBudgets
     remaining = [ordered]@{
       dpiPercent = $remainingDpi
-      highContrast = $true
-      nativeDragDrop = $true
+      highContrast = (-not [bool]$highContrastObserved)
+      nativeDragDrop = (-not $nativeDragDropExercised)
       focusVisibilityReview = $true
     }
   }
   $evidence | ConvertTo-Json -Depth 8 |
-    Set-Content -LiteralPath (Join-Path $artifactRoot 'windows-interactive-evidence.json') -Encoding utf8
+    Set-Content -LiteralPath $evidencePath -Encoding utf8
 } finally {
   if ($hangulKeyToggled) {
     [RenamewrightAcceptanceNativeMethods]::keybd_event(0x15, 0, 0, [UIntPtr]::Zero)
