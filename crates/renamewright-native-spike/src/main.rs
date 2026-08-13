@@ -38,7 +38,7 @@ fn install_korean_font(ctx: &egui::Context) -> Option<String> {
 
 #[cfg(feature = "automation")]
 fn automation_requested() -> bool {
-    std::env::args().any(|argument| argument == "--automation")
+    pico_args::Arguments::from_env().contains("--automation")
 }
 
 #[cfg(not(feature = "automation"))]

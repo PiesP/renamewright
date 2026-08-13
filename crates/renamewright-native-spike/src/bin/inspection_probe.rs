@@ -13,7 +13,7 @@ fn request(stream: &mut TcpStream, request: &Request) -> Result<Response, Box<dy
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let screenshot_path = std::env::args().nth(1).map(PathBuf::from);
+    let screenshot_path: Option<PathBuf> = pico_args::Arguments::from_env().opt_free_from_str()?;
     let mut stream = TcpStream::connect("127.0.0.1:45719")?;
     let version = egui_inspection::protocol::read_handshake(&mut stream)?;
     println!("protocol_version={version}");
