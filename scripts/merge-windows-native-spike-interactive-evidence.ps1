@@ -59,6 +59,23 @@ function Get-RequiredProperty {
   return $property.Value
 }
 
+function ConvertFrom-RoundtripTimestamp {
+  param(
+    [Parameter(Mandatory = $true)] [string]$Value,
+    [Parameter(Mandatory = $true)] [string]$Context
+  )
+  try {
+    return [DateTimeOffset]::ParseExact(
+      $Value,
+      'O',
+      [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::RoundtripKind
+    )
+  } catch {
+    throw "$Context contained an invalid round-trip timestamp."
+  }
+}
+
 function Assert-Screenshot {
   param(
     [Parameter(Mandatory = $true)] [string]$ArtifactRoot,
@@ -121,12 +138,15 @@ foreach ($file in $evidenceFiles) {
   }
 
   $evidence = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
-  if ([int](Get-RequiredProperty -Object $evidence -Name 'schemaVersion' -Context $context) -ne 1) {
+  if ([int](Get-RequiredProperty -Object $evidence -Name 'schemaVersion' -Context $context) -ne 2) {
     throw "$context used an unsupported schema version."
   }
   if ([string](Get-RequiredProperty -Object $evidence -Name 'sourceSha' -Context $context) -cne $SourceSha) {
     throw "$context was not bound to the requested source SHA."
   }
+  $capturedAt = ConvertFrom-RoundtripTimestamp `
+    -Value ([string](Get-RequiredProperty -Object $evidence -Name 'capturedAtUtc' -Context $context)) `
+    -Context "$context capture timestamp"
   foreach ($checkName in $requiredRunChecks) {
     if (-not [bool](Get-RequiredProperty -Object $evidence.checks -Name $checkName -Context $context)) {
       throw "$context did not pass required check '$checkName'."
@@ -217,6 +237,33 @@ foreach ($file in $evidenceFiles) {
     -ExpectedSha256 $performanceScreenshotSha256 `
     -Context $context
 
+  $visualReview = Get-RequiredProperty -Object $evidence -Name 'visualReview' -Context $context
+  $confirmedAt = ConvertFrom-RoundtripTimestamp `
+    -Value ([string](
+      Get-RequiredProperty -Object $visualReview -Name 'confirmedAtUtc' -Context $context
+    )) `
+    -Context "$context visual review timestamp"
+  if ($confirmedAt -le $capturedAt) {
+    throw "$context visual review did not occur after screenshot capture."
+  }
+  foreach ($reviewCheck in @('readableContrast', 'visibleKeyboardFocus', 'unclippedLayout')) {
+    if (-not [bool](Get-RequiredProperty -Object $visualReview -Name $reviewCheck -Context $context)) {
+      throw "$context did not pass visual review check '$reviewCheck'."
+    }
+  }
+  $reviewedFocusSha256 = [string](
+    Get-RequiredProperty -Object $visualReview -Name 'focusScreenshotSha256' -Context $context
+  )
+  $reviewedPerformanceSha256 = [string](
+    Get-RequiredProperty -Object $visualReview -Name 'performanceScreenshotSha256' -Context $context
+  )
+  if (
+    $reviewedFocusSha256 -cne $focusScreenshotSha256 -or
+    $reviewedPerformanceSha256 -cne $performanceScreenshotSha256
+  ) {
+    throw "$context visual review did not bind both captured screenshots."
+  }
+
   $runs += [ordered]@{
     evidenceLabel = $label
     dpiPercent = $dpiPercent
@@ -224,6 +271,8 @@ foreach ($file in $evidenceFiles) {
     highContrast = $highContrastObserved
     highContrastPaletteActive = $highContrastPaletteActive
     explorerDragDrop = $explorerDragDropExercised
+    capturedAtUtc = $capturedAt.ToString('O')
+    visualReviewConfirmedAtUtc = $confirmedAt.ToString('O')
     focusScreenshotFile = $focusScreenshotFile
     focusScreenshotSha256 = $focusScreenshotSha256
     performanceScreenshotFile = $performanceScreenshotFile
@@ -238,7 +287,7 @@ $complete = (
   $explorerDragDropComplete
 )
 $matrixEvidence = [ordered]@{
-  schemaVersion = 1
+  schemaVersion = 2
   sourceSha = $SourceSha
   status = if ($complete) { 'complete' } else { 'partial' }
   checks = [ordered]@{

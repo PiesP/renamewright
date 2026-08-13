@@ -8,7 +8,6 @@ param(
   [int]$ExpectedDpiPercent = 0,
   [switch]$RequireHighContrast,
   [switch]$RequireExplorerDragDrop,
-  [switch]$ConfirmVisualReview,
   [ValidateRange(5, 300)] [int]$ExplorerDragDropTimeoutSeconds = 60
 )
 
@@ -508,8 +507,9 @@ try {
 
   $remainingDpi = @($supportedDpiPercent | Where-Object { $_ -ne $dpiPercent })
   $evidence = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     sourceSha = $SourceSha
+    capturedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
     status = 'partial'
     host = [Environment]::OSVersion.VersionString
     interactive = [Environment]::UserInteractive
@@ -530,7 +530,7 @@ try {
       observedDpiSupported = $true
       tenThousandEntryScrollWithinBudget = $true
       tenThousandEntryFilterWithinBudget = $true
-      visualReviewConfirmed = [bool]$ConfirmVisualReview
+      visualReviewConfirmed = $false
       highContrastPaletteMatchesSystem = $true
       highContrastPaletteActive = $highContrastPaletteActive
       highContrastModeExercised = [bool]$highContrastObserved
@@ -563,14 +563,13 @@ try {
       expectedDpiPercent = $ExpectedDpiPercent
       requireHighContrast = [bool]$RequireHighContrast
       requireExplorerDragDrop = [bool]$RequireExplorerDragDrop
-      confirmVisualReview = [bool]$ConfirmVisualReview
     }
     budgets = $performanceBudgets
     remaining = [ordered]@{
       dpiPercent = $remainingDpi
       highContrast = (-not [bool]$highContrastObserved)
       nativeDragDrop = (-not $nativeDragDropExercised)
-      focusVisibilityReview = (-not [bool]$ConfirmVisualReview)
+      focusVisibilityReview = $true
     }
   }
   $evidence | ConvertTo-Json -Depth 8 |
