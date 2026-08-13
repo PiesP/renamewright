@@ -120,6 +120,16 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain("$composedPrefix -cne '정리_한글'");
   expect(interactive).toContain("-Title 'Add files to Renamewright'");
   expect(interactive).toContain("-Title 'Add a directory entry to Renamewright'");
+  expect(interactive).toContain("$EvidenceLabel -cnotmatch '^[a-z0-9][a-z0-9-]{0,47}$'");
+  expect(interactive).toContain('$ExpectedDpiPercent -ne 0');
+  expect(interactive).toContain('$RequireHighContrast -and -not $highContrastObserved');
+  expect(interactive).toContain('Wait-ForExplorerDropStatus');
+  expect(interactive).toContain('$RequireExplorerDragDrop');
+  expect(interactive).toContain('disposable files or folders');
+  expect(interactive).toContain('nativeDragDropExercised = $nativeDragDropExercised');
+  expect(interactive).toContain('focusScreenshotFile');
+  expect(interactive).toContain('performanceScreenshotFile');
+  expect(interactive).toContain('evidenceLabel = $EvidenceLabel');
   expect(interactive).toContain('tenThousandEntryScrollMilliseconds = 200');
   expect(interactive).toContain('tenThousandEntryFilterMilliseconds = 200');
   expect(interactive).toContain(
