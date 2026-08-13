@@ -49,7 +49,9 @@ The native inspection build is a separate test artifact and starts only when
 compiled with `--features automation` and launched with both `--automation` and
 `--automation-root <absolute-disposable-directory>`. An optional
 `--automation-fixture <relative-json-path>` resolves only below that root's
-bounded `fixtures` directory.
+bounded `fixtures` directory. The loopback inspection adapter services one
+connection at a time and bounds input frames, event batches, requests, viewport
+size, and connection lifetime.
 
 ## Product commitments
 

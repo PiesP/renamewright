@@ -38,13 +38,27 @@ pub mod automation {
     use std::fmt::{Display, Formatter};
     use std::fs::{self, File, OpenOptions};
     use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream, ToSocketAddrs as _};
     use std::path::{Component, Path, PathBuf};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
+    use eframe::egui;
+    use egui_inspection::{InspectionPlugin, Request, Response};
     use serde::Deserialize;
 
+    pub const AUTOMATION_BIND_ADDRESS: &str = "127.0.0.1:45719";
     pub const MAX_AUTOMATION_FIXTURE_BYTES: u64 = 256 * 1024;
+    pub const MAX_AUTOMATION_MESSAGE_BYTES: usize = 1024 * 1024;
     pub const MAX_AUTOMATION_TEXT_BYTES: usize = 4 * 1024;
+    pub const MAX_AUTOMATION_EVENTS: usize = 256;
+    pub const MAX_AUTOMATION_REQUESTS_PER_CONNECTION: usize = 128;
     const MAX_AUTOMATION_RELATIVE_PATH_BYTES: usize = 4 * 1024;
+    const MAX_AUTOMATION_CONNECTION_DURATION: Duration = Duration::from_secs(120);
+    const AUTOMATION_IO_TIMEOUT: Duration = Duration::from_secs(5);
+    const AUTOMATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+    const MAX_AUTOMATION_VIEWPORT_WIDTH: u32 = 3_840;
+    const MAX_AUTOMATION_VIEWPORT_HEIGHT: u32 = 2_160;
     const LOCK_FILE_NAME: &str = ".renamewright-automation.lock";
     const FIXTURE_DIRECTORY_NAME: &str = "fixtures";
     const STATE_DIRECTORY_NAME: &str = "state";
@@ -284,6 +298,122 @@ pub mod automation {
         }
     }
 
+    pub fn serve_bounded(ctx: &egui::Context, address: &str) -> std::io::Result<()> {
+        let resolved = address
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| std::io::Error::other("the automation address did not resolve"))?;
+        if !resolved.ip().is_loopback() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the automation listener must use loopback",
+            ));
+        }
+        let listener = TcpListener::bind(resolved)?;
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("renamewright_automation_accept".to_owned())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else {
+                        continue;
+                    };
+                    let _ = serve_connection(stream, &ctx);
+                }
+            })?;
+        Ok(())
+    }
+
+    fn serve_connection(stream: TcpStream, ctx: &egui::Context) -> std::io::Result<()> {
+        stream.set_read_timeout(Some(AUTOMATION_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(AUTOMATION_IO_TIMEOUT))?;
+        let mut reader = std::io::BufReader::new(stream.try_clone()?);
+        let mut writer = std::io::BufWriter::new(stream);
+        egui_inspection::protocol::write_handshake(&mut writer)?;
+        let started = Instant::now();
+
+        for _ in 0..MAX_AUTOMATION_REQUESTS_PER_CONNECTION {
+            if started.elapsed() > MAX_AUTOMATION_CONNECTION_DURATION {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the automation connection exceeded its runtime bound",
+                ));
+            }
+            let request: Request = match read_bounded_message(&mut reader) {
+                Ok(request) => request,
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            if !request_is_bounded(&request) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the automation request exceeded a semantic bound",
+                ));
+            }
+
+            let (sender, receiver) = mpsc::channel();
+            let registered = ctx
+                .with_plugin::<InspectionPlugin, _>(|plugin| {
+                    plugin.submit(request, move |response| {
+                        let _ = sender.send(response);
+                    });
+                })
+                .is_some();
+            if !registered {
+                return egui_inspection::write_message(
+                    &mut writer,
+                    &Response::Error {
+                        message: "the automation inspection plugin is unavailable".to_owned(),
+                    },
+                );
+            }
+            ctx.request_repaint();
+            let response = receiver
+                .recv_timeout(AUTOMATION_REQUEST_TIMEOUT)
+                .unwrap_or_else(|_| Response::Error {
+                    message: "the automation request timed out".to_owned(),
+                });
+            egui_inspection::write_message(&mut writer, &response)?;
+        }
+        Ok(())
+    }
+
+    fn read_bounded_message<R, T>(reader: &mut R) -> std::io::Result<T>
+    where
+        R: std::io::Read,
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let mut header = [0_u8; 4];
+        reader.read_exact(&mut header)?;
+        let length = u32::from_be_bytes(header) as usize;
+        if length > MAX_AUTOMATION_MESSAGE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the automation message exceeded its byte bound",
+            ));
+        }
+        let mut body = vec![0_u8; length];
+        reader.read_exact(&mut body)?;
+        egui_inspection::protocol::decode_frame_body(&body)
+    }
+
+    const fn request_is_bounded(request: &Request) -> bool {
+        match request {
+            Request::GetInfo | Request::GetTree => true,
+            Request::GetScreenshot { pixels_per_point } => match pixels_per_point {
+                Some(value) => value.is_finite() && *value > 0.0 && *value <= 4.0,
+                None => true,
+            },
+            Request::ApplyEvents { events } => events.len() <= MAX_AUTOMATION_EVENTS,
+            Request::Resize { width, height } => {
+                *width > 0
+                    && *height > 0
+                    && *width <= MAX_AUTOMATION_VIEWPORT_WIDTH
+                    && *height <= MAX_AUTOMATION_VIEWPORT_HEIGHT
+            }
+        }
+    }
+
     fn validate_relative_path(path: &Path) -> Result<(), AutomationRootError> {
         if path.as_os_str().as_encoded_bytes().len() > MAX_AUTOMATION_RELATIVE_PATH_BYTES {
             return Err(AutomationRootError::new(
@@ -378,6 +508,63 @@ pub mod automation {
     #[cfg(not(windows))]
     fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
         metadata.file_type().is_symlink()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io::Cursor;
+
+        use eframe::egui;
+        use egui_inspection::Request;
+
+        use super::{
+            MAX_AUTOMATION_EVENTS, MAX_AUTOMATION_MESSAGE_BYTES, read_bounded_message,
+            request_is_bounded, serve_bounded,
+        };
+
+        #[test]
+        fn framed_requests_are_rejected_before_oversized_allocation() {
+            let declared = u32::try_from(MAX_AUTOMATION_MESSAGE_BYTES + 1)
+                .unwrap_or(u32::MAX)
+                .to_be_bytes();
+            let mut input = Cursor::new(declared);
+
+            let error = read_bounded_message::<_, Request>(&mut input).err();
+            assert_eq!(
+                error.map(|error| error.kind()),
+                Some(std::io::ErrorKind::InvalidData)
+            );
+        }
+
+        #[test]
+        fn inspection_actions_have_event_viewport_and_scale_bounds() {
+            assert!(request_is_bounded(&Request::ApplyEvents {
+                events: vec![egui::Event::Copy; MAX_AUTOMATION_EVENTS],
+            }));
+            assert!(!request_is_bounded(&Request::ApplyEvents {
+                events: vec![egui::Event::Copy; MAX_AUTOMATION_EVENTS + 1],
+            }));
+            assert!(request_is_bounded(&Request::Resize {
+                width: 3_840,
+                height: 2_160,
+            }));
+            assert!(!request_is_bounded(&Request::Resize {
+                width: 3_841,
+                height: 2_160,
+            }));
+            assert!(!request_is_bounded(&Request::GetScreenshot {
+                pixels_per_point: Some(f32::NAN),
+            }));
+        }
+
+        #[test]
+        fn inspection_listener_rejects_non_loopback_binding() {
+            let error = serve_bounded(&egui::Context::default(), "0.0.0.0:0").err();
+            assert_eq!(
+                error.map(|error| error.kind()),
+                Some(std::io::ErrorKind::PermissionDenied)
+            );
+        }
     }
 }
 

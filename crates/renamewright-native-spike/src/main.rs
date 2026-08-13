@@ -7,7 +7,9 @@ use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 #[cfg(feature = "automation")]
 use renamewright_native_spike::automation::AutomationFixture;
 #[cfg(feature = "automation")]
-use renamewright_native_spike::automation::AutomationRoot;
+use renamewright_native_spike::automation::{
+    AUTOMATION_BIND_ADDRESS, AutomationRoot, serve_bounded,
+};
 use renamewright_native_spike::{NativePalette, NativeSpikeApp, install_theme};
 
 #[cfg(windows)]
@@ -113,7 +115,7 @@ fn attach_automation(ctx: &egui::Context) -> Result<(), String> {
     ctx.add_plugin(egui_inspection::InspectionPlugin::new(Some(
         "Renamewright native spike".to_owned(),
     )));
-    egui_inspection::serve(ctx, "127.0.0.1:45719").map_err(|error| error.to_string())
+    serve_bounded(ctx, AUTOMATION_BIND_ADDRESS).map_err(|error| error.to_string())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
