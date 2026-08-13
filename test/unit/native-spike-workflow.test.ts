@@ -67,6 +67,8 @@ test('exercises the exact Windows executables before uploading runtime evidence'
   expect(runtime).toContain("'automation_banner=true'");
   expect(runtime).toContain("'hangul_sample=true'");
   expect(runtime).toContain("'apply_disabled=true'");
+  expect(runtime).toContain("'read_only_workbench=true'");
+  expect(runtime).toContain("'rule_actions_named=true'");
   expect(runtime).toContain("'screenshot=1180x760'");
   expect(runtime).toContain("'scroll_last_visible=true'");
   expect(runtime).toContain("'filter_target_visible=true'");
@@ -128,7 +130,10 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('Windows UI Automation');
   expect(interactive).toContain("$composedPrefix -cne '정리_한글'");
   expect(interactive).toContain("-Title 'Add files to Renamewright'");
-  expect(interactive).toContain("-Title 'Add a directory entry to Renamewright'");
+  expect(interactive).toContain("-Name 'Prefix text'");
+  expect(interactive).toContain("-Name 'Add folder'");
+  expect(interactive).toContain('$addFolderButton.Current.IsEnabled');
+  expect(interactive).toContain('enabled directory admission before Stage 6G');
   expect(interactive).toContain("$EvidenceLabel -cnotmatch '^[a-z0-9][a-z0-9-]{0,47}$'");
   expect(interactive).toContain('$ExpectedDpiPercent -ne 0');
   expect(interactive).toContain('$RequireHighContrast -and -not $highContrastObserved');
@@ -140,7 +145,8 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('visualReviewConfirmed = $false');
   expect(interactive).toContain('Wait-ForExplorerDropStatus');
   expect(interactive).toContain('$RequireExplorerDragDrop');
-  expect(interactive).toContain('disposable files or folders');
+  expect(interactive).toContain('one or more disposable files');
+  expect(interactive).not.toContain('disposable files or folders');
   expect(interactive).toContain('nativeDragDropExercised = $nativeDragDropExercised');
   expect(interactive).toContain('focusScreenshotFile');
   expect(interactive).toContain('performanceScreenshotFile');
@@ -206,7 +212,9 @@ test('merges only intentional source-bound Windows acceptance configurations', (
   );
   expect(matrixMerger).toContain('visual review did not bind both captured screenshots');
   expect(matrixMerger).toContain('$explorerDragDropRequired -and');
-  expect(matrixMerger).toContain("native shell$'");
+  expect(matrixMerger).toContain("'addFolderDisabled'");
+  expect(matrixMerger).not.toContain("'nativeFolderDialogOpened'");
+  expect(matrixMerger).toContain('sources · [0-9]+ changed · [0-9]+ blocked');
   expect(matrixMerger).toContain('Assert-Screenshot');
   expect(matrixMerger).toContain('checksumsVerified = $true');
   expect(matrixMerger).toContain("status = if ($complete) { 'complete' } else { 'partial' }");

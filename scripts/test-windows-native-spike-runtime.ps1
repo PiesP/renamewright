@@ -350,6 +350,8 @@ try {
     'automation_banner=true',
     'hangul_sample=true',
     'apply_disabled=true',
+    'read_only_workbench=true',
+    'rule_actions_named=true',
     'screenshot=1180x760',
     'scroll_last_visible=true',
     'filter_target_visible=true',

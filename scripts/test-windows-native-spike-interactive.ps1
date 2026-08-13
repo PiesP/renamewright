@@ -160,7 +160,7 @@ function Wait-ForExplorerDropStatus {
   $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
   while ([DateTimeOffset]::UtcNow -lt $deadline) {
     foreach ($element in (Get-Descendants -Root $Root)) {
-      if ($element.Current.Name -cmatch '^[1-9][0-9]* dropped entries observed by the native shell$') {
+      if ($element.Current.Name -cmatch '^[1-9][0-9]* sources · [0-9]+ changed · [0-9]+ blocked$') {
         return $element.Current.Name
       }
     }
@@ -355,7 +355,9 @@ try {
 
   foreach ($requiredName in @(
     'AUTOMATION TEST MODE', 'Renamewright', 'Add files', 'Add folder',
-    'Prefix', 'Sequence', 'Extension', '한글 IME 입력 확인', 'Apply'
+    '01 Add prefix', 'Add suffix', 'Add rule', 'All diagnostics',
+    'Local presets', 'Preset name', 'Move rule up', 'Move rule down',
+    'Remove rule', '한글 IME 입력 확인', 'Apply'
   )) {
     $found = $false
     foreach ($element in $elements) {
@@ -378,8 +380,8 @@ try {
   $scrollBars = @($elements | Where-Object {
     $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::ScrollBar
   })
-  if ($editControls.Count -lt 2) {
-    throw 'Windows UI Automation did not expose both native spike edit controls.'
+  if ($editControls.Count -lt 3) {
+    throw 'Windows UI Automation did not expose the planner edit controls.'
   }
   if ($scrollBars.Count -lt 1) {
     throw 'Windows UI Automation did not expose the virtualized preview scrollbar.'
@@ -399,7 +401,10 @@ try {
   }
   Save-WindowScreenshot -Window $windowHandle -Path $focusScreenshotPath
 
-  $prefixEdit = $editControls[0]
+  $prefixEdit = Find-Element `
+    -Elements $elements `
+    -Name 'Prefix text' `
+    -ControlType ([System.Windows.Automation.ControlType]::Edit)
   $prefixEdit.SetFocus()
   Start-Sleep -Milliseconds 200
   [uint32]$windowProcessId = 0
@@ -455,11 +460,9 @@ try {
     -Elements $elements `
     -Name 'Add folder' `
     -ControlType ([System.Windows.Automation.ControlType]::Button)
-  Invoke-And-CloseDialog `
-    -Button $addFolderButton `
-    -OwnerProcessId $application.Id `
-    -Title 'Add a directory entry to Renamewright'
-  Start-Sleep -Milliseconds 300
+  if ($addFolderButton.Current.IsEnabled) {
+    throw 'The native read-only workbench enabled directory admission before Stage 6G.'
+  }
 
   $dpi = [RenamewrightAcceptanceNativeMethods]::GetDpiForWindow($windowHandle)
   if (@(96, 120, 144, 192, 240) -notcontains $dpi) {
@@ -492,7 +495,7 @@ try {
       throw 'Windows could not activate the native spike for the Explorer drag/drop check.'
     }
     Write-Host (
-      'Drag one or more disposable files or folders from the current-session Explorer ' +
+      'Drag one or more disposable files from the current-session Explorer ' +
       "window into Renamewright within $ExplorerDragDropTimeoutSeconds seconds."
     )
     $nativeDragDropStatus = Wait-ForExplorerDropStatus `
@@ -552,7 +555,7 @@ try {
       focusScreenshotCaptured = $true
       koreanImeComposition = $true
       nativeFileDialogOpened = $true
-      nativeFolderDialogOpened = $true
+      addFolderDisabled = $true
       observedDpiSupported = $true
       tenThousandEntryScrollWithinBudget = $true
       tenThousandEntryFilterWithinBudget = $true

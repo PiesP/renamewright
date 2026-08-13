@@ -1067,6 +1067,12 @@ impl ApplicationService {
         I: IntoIterator<Item = std::path::PathBuf>,
     {
         let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
+        let paths = paths.into_iter().collect::<Vec<_>>();
+        if contains_directory(&paths) {
+            return Err(PlanningCommandErrorDto::new(
+                "directoryAdmissionUnavailable",
+            ));
+        }
         let mut registry = self
             .registry
             .lock()
@@ -1511,21 +1517,31 @@ struct TraceStepDocument<'a> {
 }
 
 fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf]) {
-    let outcome = state
-        .registry
-        .lock()
-        .map_err(|_| "the source registry is unavailable".to_owned())
-        .and_then(|mut registry| {
-            registry
-                .admit_paths(paths.iter().cloned())
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        });
+    let outcome = if contains_directory(paths) {
+        Err("directoryAdmissionUnavailable".to_owned())
+    } else {
+        state
+            .registry
+            .lock()
+            .map_err(|_| "the source registry is unavailable".to_owned())
+            .and_then(|mut registry| {
+                registry
+                    .admit_paths(paths.iter().cloned())
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+    };
 
     if let Ok(mut changes) = state.source_changes.lock() {
         changes.revision = changes.revision.saturating_add(1);
         changes.error = outcome.err();
     }
+}
+
+fn contains_directory(paths: &[std::path::PathBuf]) -> bool {
+    paths.iter().any(|path| {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+    })
 }
 
 fn plan_from_registry(
@@ -2430,6 +2446,47 @@ mod tests {
         assert_eq!(registry.snapshots().len(), 1);
         assert_eq!(changes.revision, 1);
         assert_eq!(changes.error, None);
+        Ok(())
+    }
+
+    #[test]
+    fn directory_admission_remains_unavailable_without_partial_registry_changes()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        let selected_directory = directory.path().join("folder");
+        fs::write(&source, b"report")?;
+        fs::create_dir(&selected_directory)?;
+        let state = ApplicationService::default();
+
+        let error = state
+            .admit_sources_with_rules(
+                [source.clone(), selected_directory.clone()],
+                ApplicationService::prefix_rule_request("final-"),
+            )
+            .err()
+            .ok_or("directory admission unexpectedly succeeded")?;
+        assert_eq!(error.code(), "directoryAdmissionUnavailable");
+        assert!(
+            state
+                .registry
+                .lock()
+                .map_err(|_| "registry lock failed")?
+                .snapshots()
+                .is_empty()
+        );
+
+        admit_dropped_sources(&state, &[source, selected_directory]);
+        let registry = state.registry.lock().map_err(|_| "registry lock failed")?;
+        let changes = state
+            .source_changes
+            .lock()
+            .map_err(|_| "change lock failed")?;
+        assert!(registry.snapshots().is_empty());
+        assert_eq!(
+            changes.error.as_deref(),
+            Some("directoryAdmissionUnavailable")
+        );
         Ok(())
     }
 
