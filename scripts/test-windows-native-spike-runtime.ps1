@@ -259,6 +259,8 @@ $temporaryDirectory = Resolve-TemporaryDirectory
 $probeOutputPath = Join-Path $temporaryDirectory 'native-spike-probe.stdout.txt'
 $probeErrorPath = Join-Path $temporaryDirectory 'native-spike-probe.stderr.txt'
 $automationStartup = [System.Diagnostics.Stopwatch]::StartNew()
+$automationProbe = $null
+$automationListenerReadyMilliseconds = $null
 try {
   $automationProcess = Start-Process `
     -FilePath $automationExecutable `
@@ -279,6 +281,11 @@ try {
         -ErrorPath $automationErrorPath)
     }
     if (Test-InspectionListener) {
+      if ($null -eq $automationListenerReadyMilliseconds) {
+        $automationStartup.Stop()
+        $automationListenerReadyMilliseconds = $automationStartup.ElapsedMilliseconds
+        $automationProbe = [System.Diagnostics.Stopwatch]::StartNew()
+      }
       $probeExitCode = Invoke-InspectionProbe `
         -ProbePath $inspectionProbe `
         -ScreenshotPath $screenshotPath `
@@ -290,7 +297,12 @@ try {
     }
     Start-Sleep -Milliseconds 250
   }
-  $automationStartup.Stop()
+  if ($automationStartup.IsRunning) {
+    $automationStartup.Stop()
+  }
+  if ($null -ne $automationProbe) {
+    $automationProbe.Stop()
+  }
   if ($probeExitCode -ne 0) {
     $probeError = if (Test-Path -LiteralPath $probeErrorPath) {
       Get-Content -LiteralPath $probeErrorPath -Raw
@@ -377,7 +389,8 @@ $runtimeEvidence = [ordered]@{
   measurements = [ordered]@{
     defaultStartupMilliseconds = $defaultStartup.ElapsedMilliseconds
     defaultWorkingSetBytes = $defaultWorkingSet
-    automationProbeReadyMilliseconds = $automationStartup.ElapsedMilliseconds
+    automationListenerReadyMilliseconds = $automationListenerReadyMilliseconds
+    automationProbeCompleteMilliseconds = $automationProbe.ElapsedMilliseconds
     automationWorkingSetBytes = $automationWorkingSet
     accessKitNodeCount = $nodeCount
     scrollMilliseconds = $scrollMilliseconds

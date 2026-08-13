@@ -72,7 +72,8 @@ test('exercises the exact Windows executables before uploading runtime evidence'
   expect(runtime).toContain('defaultMainWindowReady = $true');
   expect(runtime).toContain('host = [Environment]::OSVersion.VersionString');
   expect(runtime).not.toContain("host = 'windows-2025'");
-  expect(runtime).toContain('automationProbeReadyMilliseconds');
+  expect(runtime).toContain('automationListenerReadyMilliseconds');
+  expect(runtime).toContain('automationProbeCompleteMilliseconds');
   expect(runtime).toContain('automationWorkingSetBytes');
   expect(runtime).toContain("'windows-runtime-evidence.json'");
   expect(runtime).toContain("Where-Object Name -ne 'SHA256SUMS'");
