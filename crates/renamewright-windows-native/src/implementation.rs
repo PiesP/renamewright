@@ -8,13 +8,83 @@ use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle};
 use std::path::Path;
 use std::ptr;
 
+use windows_sys::Win32::Graphics::Gdi::{
+    COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+    GetSysColor,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
     FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FileIdInfo, FileRenameInfoEx, GetFileInformationByHandleEx, SetFileInformationByHandle,
 };
+use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETHIGHCONTRAST, SystemParametersInfoW};
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HighContrastPalette {
+    pub window: [u8; 3],
+    pub window_text: [u8; 3],
+    pub highlight: [u8; 3],
+    pub highlight_text: [u8; 3],
+    pub gray_text: [u8; 3],
+}
+
+const fn colorref_to_rgb(color: u32) -> [u8; 3] {
+    [
+        (color & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        ((color >> 16) & 0xff) as u8,
+    ]
+}
+
+pub fn high_contrast_palette() -> io::Result<Option<HighContrastPalette>> {
+    let mut settings = HIGHCONTRASTW {
+        cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "high-contrast settings buffer is too large",
+            )
+        })?,
+        dwFlags: 0,
+        lpszDefaultScheme: ptr::null_mut(),
+    };
+
+    // SAFETY: `settings` is a writable, correctly aligned `HIGHCONTRASTW`
+    // whose declared size matches its allocation. The pointer remains valid
+    // for the synchronous call and is not retained by Win32. This operation
+    // only reads the current accessibility setting; it cannot change it.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let succeeded = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            settings.cbSize,
+            ptr::from_mut(&mut settings).cast(),
+            0,
+        )
+    };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if settings.dwFlags & HCF_HIGHCONTRASTON == 0 {
+        return Ok(None);
+    }
+
+    // SAFETY: `GetSysColor` reads immutable process-global Windows theme
+    // state for fixed, documented indices and does not dereference pointers.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let palette = unsafe {
+        HighContrastPalette {
+            window: colorref_to_rgb(GetSysColor(COLOR_WINDOW)),
+            window_text: colorref_to_rgb(GetSysColor(COLOR_WINDOWTEXT)),
+            highlight: colorref_to_rgb(GetSysColor(COLOR_HIGHLIGHT)),
+            highlight_text: colorref_to_rgb(GetSysColor(COLOR_HIGHLIGHTTEXT)),
+            gray_text: colorref_to_rgb(GetSysColor(COLOR_GRAYTEXT)),
+        }
+    };
+    Ok(Some(palette))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileIdentity {
@@ -214,5 +284,15 @@ fn encode_destination(destination: &Path) -> io::Result<Vec<u16>> {
         ))
     } else {
         Ok(encoded)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::colorref_to_rgb;
+
+    #[test]
+    fn colorref_conversion_preserves_windows_bgr_layout() {
+        assert_eq!(colorref_to_rgb(0x00_33_22_11), [0x11, 0x22, 0x33]);
     }
 }

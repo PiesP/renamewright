@@ -1,19 +1,19 @@
 {
-  "date": "2026-08-12",
-  "framework": "Solid 1.9 with Vite 8 in a Tauri 2 shell",
+  "date": "2026-08-13",
+  "framework": "Transitional Solid/Vite/Tauri 2 baseline moving to eframe/egui",
   "fontStack": "Space Grotesk Variable, Inter Variable, and JetBrains Mono Variable from local font packages",
   "palette": "Cobalt OKLCH tokens in tokens.css",
   "motion": "motion-cut; tokenized press and short state transitions; no animation library",
   "spacing": "4pt token scale in tokens.css",
   "preserve": [
-    "Solid and Tauri application structure",
     "Workbench macrostructure and Cobalt theme",
     "source bar, rule rail, preview pane, and review lock",
     "Rust-owned native paths and opaque frontend identifiers"
   ],
   "introduce": [
-    "compound diagnostic exploration",
-    "separate transaction activity hierarchy",
-    "screen-reader recovery and Undo state announcements"
+    "UI-independent Rust application service",
+    "eframe/egui native shell with AccessKit semantics",
+    "test-only agent inspection with production exclusion",
+    "explicit file and directory entry admission"
   ]
 }

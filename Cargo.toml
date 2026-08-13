@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/renamewright-core",
+  "crates/renamewright-native-spike",
   "crates/renamewright-platform",
   "crates/renamewright-windows-native",
   "src-tauri",
