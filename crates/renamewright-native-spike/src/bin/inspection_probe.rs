@@ -153,7 +153,7 @@ fn exercise_performance(
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = parse_screenshot_path(pico_args::Arguments::from_env())?;
-    let mut stream = TcpStream::connect("127.0.0.1:45719")?;
+    let mut stream = TcpStream::connect("127.0.0.1:26191")?;
     let version = egui_inspection::protocol::read_handshake(&mut stream)?;
     println!("protocol_version={version}");
 

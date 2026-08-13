@@ -76,7 +76,7 @@ pub mod automation {
     use egui_inspection::{InspectionPlugin, Request, Response};
     use serde::Deserialize;
 
-    pub const AUTOMATION_BIND_ADDRESS: &str = "127.0.0.1:45719";
+    pub const AUTOMATION_BIND_ADDRESS: &str = "127.0.0.1:26191";
     pub const MAX_AUTOMATION_FIXTURE_BYTES: u64 = 256 * 1024;
     pub const MAX_AUTOMATION_MESSAGE_BYTES: usize = 1024 * 1024;
     pub const MAX_AUTOMATION_TEXT_BYTES: usize = 4 * 1024;
