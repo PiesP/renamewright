@@ -39,8 +39,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             pixels_per_point,
             accesskit,
         } => {
-            let node_count = accesskit.map_or(0, |tree| tree.nodes.len());
-            println!("tree_step={step} pixels_per_point={pixels_per_point} nodes={node_count}");
+            let node_count = accesskit.as_ref().map_or(0, |tree| tree.nodes.len());
+            let has_label = |expected: &str| {
+                accesskit.as_ref().is_some_and(|tree| {
+                    tree.nodes
+                        .iter()
+                        .any(|(_, node)| node.label() == Some(expected))
+                })
+            };
+            let apply_disabled = accesskit.as_ref().is_some_and(|tree| {
+                tree.nodes
+                    .iter()
+                    .any(|(_, node)| node.label() == Some("Apply") && node.is_disabled())
+            });
+            println!(
+                "tree_step={step} pixels_per_point={pixels_per_point} nodes={node_count} \
+                 automation_banner={} hangul_sample={} apply_disabled={apply_disabled}",
+                has_label("AUTOMATION TEST MODE"),
+                has_label("한글 IME 입력 확인"),
+            );
         }
         response => return Err(format!("unexpected tree response: {response:?}").into()),
     }
