@@ -23,7 +23,7 @@ default = []
 automation = ["dep:egui_inspection"]
 
 [dependencies]
-eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "glow", "wayland", "x11"] }
 egui_inspection = { version = "0.35.0", optional = true, features = ["plugin"] }
 rfd = "0.17.2"
 
