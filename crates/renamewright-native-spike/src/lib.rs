@@ -1368,11 +1368,11 @@ enum PlanFilter {
 impl PlanFilter {
     const ALL: [Self; 3] = [Self::All, Self::Changed, Self::Blocked];
 
-    const fn label(self) -> &'static str {
+    const fn label(self, locale: Locale) -> &'static str {
         match self {
-            Self::All => semantics::FILTER_ALL,
-            Self::Changed => semantics::FILTER_CHANGED,
-            Self::Blocked => semantics::FILTER_BLOCKED,
+            Self::All => locale.text(semantics::FILTER_ALL, "전체"),
+            Self::Changed => locale.text(semantics::FILTER_CHANGED, "변경됨"),
+            Self::Blocked => locale.text(semantics::FILTER_BLOCKED, "차단됨"),
         }
     }
 }
@@ -1548,16 +1548,16 @@ impl NativeSpikeApp {
         let request = self.rule_request();
         match self.application.admit_sources_with_rules(paths, request) {
             Ok(plan) => {
-                self.status = format!(
-                    "{} sources · {} changed · {} blocked",
-                    plan.rows().len(),
-                    plan.changed_count(),
-                    plan.blocked_count()
-                );
+                self.status = self.plan_status(&plan);
                 self.plan = Some(plan);
             }
             Err(error) => {
-                self.status = format!("Sources were not admitted ({})", error.code());
+                self.status = format!(
+                    "{} ({})",
+                    self.locale
+                        .text("Sources were not admitted", "원본을 추가하지 못했습니다"),
+                    error.code()
+                );
             }
         }
     }
@@ -1568,17 +1568,33 @@ impl NativeSpikeApp {
         }
         match self.application.preview_rules(self.rule_request()) {
             Ok(plan) => {
-                self.status = format!(
-                    "{} sources · {} changed · {} blocked",
-                    plan.rows().len(),
-                    plan.changed_count(),
-                    plan.blocked_count()
-                );
+                self.status = self.plan_status(&plan);
                 self.plan = Some(plan);
             }
             Err(code) => {
-                self.status = format!("Preview unavailable ({code})");
+                self.status = format!(
+                    "{} ({code})",
+                    self.locale
+                        .text("Preview unavailable", "미리보기를 만들 수 없습니다")
+                );
             }
+        }
+    }
+
+    fn plan_status(&self, plan: &PlanDto) -> String {
+        match self.locale {
+            Locale::English => format!(
+                "{} sources · {} changed · {} blocked",
+                plan.rows().len(),
+                plan.changed_count(),
+                plan.blocked_count()
+            ),
+            Locale::Korean => format!(
+                "원본 {}개 · 변경 {}개 · 차단 {}개",
+                plan.rows().len(),
+                plan.changed_count(),
+                plan.blocked_count()
+            ),
         }
     }
 
@@ -1695,8 +1711,14 @@ impl NativeSpikeApp {
                     })
                     .response
                     .on_hover_text(semantics::LANGUAGE);
-                ui.add_enabled(false, egui::Button::new(semantics::ADD_FOLDER))
-                    .on_disabled_hover_text("Directory admission is planned for Stage 6G");
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(self.locale.text(semantics::ADD_FOLDER, "폴더 추가")),
+                )
+                .on_disabled_hover_text(self.locale.text(
+                    "Directory admission is planned for Stage 6G",
+                    "폴더 추가는 Stage 6G에서 지원할 예정입니다",
+                ));
                 if ui
                     .button(self.locale.text(semantics::ADD_FILES, "파일 추가"))
                     .clicked()
@@ -1706,7 +1728,12 @@ impl NativeSpikeApp {
                         .pick_files()
                     {
                         Some(paths) => self.admit_sources(paths),
-                        None => self.status = "File selection cancelled".to_owned(),
+                        None => {
+                            self.status = self
+                                .locale
+                                .text("File selection cancelled", "파일 선택을 취소했습니다")
+                                .to_owned();
+                        }
                     }
                 }
             });
@@ -1885,16 +1912,23 @@ impl NativeSpikeApp {
     fn show_preview(&mut self, ui: &mut egui::Ui) {
         let visible = self.visible_indices();
         ui.horizontal(|ui| {
-            ui.heading(RichText::new(semantics::PREVIEW_HEADING).color(self.palette.ink));
+            ui.heading(
+                RichText::new(self.locale.text(semantics::PREVIEW_HEADING, "미리보기"))
+                    .color(self.palette.ink),
+            );
             ui.label(
-                RichText::new(format!("{} shown", visible.len())).color(self.palette.ink_soft),
+                RichText::new(match self.locale {
+                    Locale::English => format!("{} shown", visible.len()),
+                    Locale::Korean => format!("{}개 표시", visible.len()),
+                })
+                .color(self.palette.ink_soft),
             );
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             for candidate in PlanFilter::ALL {
                 if ui
-                    .selectable_label(self.filter == candidate, candidate.label())
+                    .selectable_label(self.filter == candidate, candidate.label(self.locale))
                     .clicked()
                 {
                     self.filter = candidate;
@@ -1915,11 +1949,12 @@ impl NativeSpikeApp {
                 .response
                 .on_hover_text(semantics::DIAGNOSTIC_FILTER);
             ui.separator();
-            let source_query_label = ui.label(semantics::SOURCE_QUERY_LABEL);
+            let source_query_label =
+                ui.label(self.locale.text(semantics::SOURCE_QUERY_LABEL, "이름 필터"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.source_query)
                     .id_salt("preview.source-query")
-                    .hint_text("Name contains"),
+                    .hint_text(self.locale.text("Name contains", "이름에 포함")),
             )
             .labelled_by(source_query_label.id);
         });
@@ -1976,13 +2011,22 @@ impl NativeSpikeApp {
                                         let proposed =
                                             format!("{}{source}", self.synthetic_prefix());
                                         let blocked = Self::row_is_blocked(index);
-                                        let status = if blocked { "Blocked" } else { "Changed" };
+                                        let status = if blocked {
+                                            self.locale.text("Blocked", "차단됨")
+                                        } else {
+                                            self.locale.text("Changed", "변경됨")
+                                        };
                                         (
                                             None,
                                             source,
                                             proposed,
                                             status,
-                                            if blocked { "Sample conflict" } else { "" }.to_owned(),
+                                            if blocked {
+                                                self.locale.text("Sample conflict", "샘플 충돌")
+                                            } else {
+                                                ""
+                                            }
+                                            .to_owned(),
                                             blocked,
                                         )
                                     },
@@ -1993,11 +2037,11 @@ impl NativeSpikeApp {
                                             row.original_name().to_owned(),
                                             row.proposed_name().to_owned(),
                                             if row.status() == "blocked" {
-                                                "Blocked"
+                                                self.locale.text("Blocked", "차단됨")
                                             } else if row.status() == "unchanged" {
-                                                "Unchanged"
+                                                self.locale.text("Unchanged", "변경 없음")
                                             } else {
-                                                "Changed"
+                                                self.locale.text("Changed", "변경됨")
                                             },
                                             row.diagnostics()
                                                 .iter()
@@ -2061,14 +2105,18 @@ impl NativeSpikeApp {
             ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let apply_text = if self.palette.high_contrast {
-                    RichText::new(semantics::APPLY).color(self.palette.disabled)
+                    RichText::new(self.locale.text(semantics::APPLY, "적용"))
+                        .color(self.palette.disabled)
                 } else {
-                    RichText::new(semantics::APPLY)
+                    RichText::new(self.locale.text(semantics::APPLY, "적용"))
                 };
                 ui.add_enabled(false, egui::Button::new(apply_text))
-                    .on_disabled_hover_text("The native spike never mutates the filesystem");
+                    .on_disabled_hover_text(self.locale.text(
+                        "The native read-only workbench never mutates the filesystem",
+                        "네이티브 읽기 전용 작업대는 파일 시스템을 변경하지 않습니다",
+                    ));
                 ui.label(
-                    RichText::new(semantics::APPLY_LOCKED)
+                    RichText::new(self.locale.text(semantics::APPLY_LOCKED, "적용 잠김"))
                         .color(self.palette.blocked)
                         .strong(),
                 );
@@ -2126,11 +2174,21 @@ impl NativeSpikeApp {
         match document {
             Ok(content) => {
                 self.inspection = Some(InspectionDocument {
-                    title: if json { "Plan JSON" } else { "Plan CSV" },
+                    title: if json {
+                        self.locale.text("Plan JSON", "계획 JSON")
+                    } else {
+                        self.locale.text("Plan CSV", "계획 CSV")
+                    },
                     content,
                 });
             }
-            Err(error) => self.status = format!("Inspection unavailable ({error})"),
+            Err(error) => {
+                self.status = format!(
+                    "{} ({error})",
+                    self.locale
+                        .text("Inspection unavailable", "계획을 검토할 수 없습니다")
+                );
+            }
         }
     }
 
@@ -2144,7 +2202,13 @@ impl NativeSpikeApp {
             self.application.inspect_plan_csv(plan_id)
         };
         let Ok(document) = document else {
-            self.status = "The current plan could not be inspected".to_owned();
+            self.status = self
+                .locale
+                .text(
+                    "The current plan could not be inspected",
+                    "현재 계획을 검토할 수 없습니다",
+                )
+                .to_owned();
             return;
         };
         let extension = if json { "json" } else { "csv" };
@@ -2154,11 +2218,19 @@ impl NativeSpikeApp {
             .set_file_name(format!("renamewright-plan.{extension}"))
             .save_file()
         else {
-            self.status = "Plan export cancelled".to_owned();
+            self.status = self
+                .locale
+                .text("Plan export cancelled", "계획 내보내기를 취소했습니다")
+                .to_owned();
             return;
         };
         match ApplicationService::export_document(&path, &document) {
-            Ok(()) => self.status = format!("Plan {extension} exported"),
+            Ok(()) => {
+                self.status = match self.locale {
+                    Locale::English => format!("Plan {extension} exported"),
+                    Locale::Korean => format!("계획 {extension}을 내보냈습니다"),
+                };
+            }
             Err(error) => self.status = error,
         }
     }
@@ -2655,9 +2727,13 @@ mod tests {
             .build_ui_state(|ui, app| app.show(ui), app);
 
         harness.get_by_label("파일 추가");
+        harness.get_by_label("폴더 추가");
         harness.get_by_label("규칙");
         harness.get_by_label("접두사 추가");
         harness.get_by_label("접두사 텍스트");
+        harness.get_by_label("미리보기");
+        harness.get_by_label("전체");
+        harness.get_by_label("적용 잠김");
     }
 
     #[test]
