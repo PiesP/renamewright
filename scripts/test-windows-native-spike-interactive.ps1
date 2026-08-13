@@ -115,7 +115,7 @@ function Update-ArtifactChecksums {
 function Test-InspectionListener {
   $client = [System.Net.Sockets.TcpClient]::new()
   try {
-    $connect = $client.ConnectAsync('127.0.0.1', 45719)
+    $connect = $client.ConnectAsync('127.0.0.1', 26191)
     if (-not $connect.Wait(500)) { return $false }
     return $client.Connected
   } catch {

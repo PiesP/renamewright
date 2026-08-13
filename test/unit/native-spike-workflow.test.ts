@@ -57,7 +57,7 @@ test('keeps production and automation binary evidence separate and path-free', (
   expect(packager).toContain("'AUTOMATION TEST MODE'");
   expect(packager).toContain("'--automation-root'");
   expect(packager).toContain("'--automation-fixture'");
-  expect(packager).toContain("'127.0.0.1:45719'");
+  expect(packager).toContain("'127.0.0.1:26191'");
   expect(packager).toContain('defaultExcludesAutomationMarkers = $true');
   expect(packager).toContain('automationRequiresExplicitRoot = $true');
   expect(packager).toContain("target = 'x86_64-pc-windows-msvc'");
@@ -72,7 +72,7 @@ test('exercises the exact Windows executables before uploading runtime evidence'
   expect(runtime).toContain('-ArgumentList $automationArguments');
   expect(runtime).toContain('isolatedAutomationRoot = $true');
   expect(runtime).toContain("-ArgumentList @('--exercise-performance', $ScreenshotPath)");
-  expect(runtime).toContain("ConnectAsync('127.0.0.1', 45719)");
+  expect(runtime).toContain("ConnectAsync('127.0.0.1', 26191)");
   expect(runtime).toContain('The default native spike exposed the custom inspection listener.');
   expect(runtime).toContain("'automation_banner=true'");
   expect(runtime).toContain("'hangul_sample=true'");

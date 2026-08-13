@@ -93,7 +93,7 @@ $automationMarkers = @(
   'AUTOMATION TEST MODE',
   '--automation-root',
   '--automation-fixture',
-  '127.0.0.1:45719'
+  '127.0.0.1:26191'
 )
 $defaultText = Read-BinaryText -Path $defaultSource
 foreach ($marker in $automationMarkers) {
@@ -110,7 +110,7 @@ foreach ($marker in $automationMarkers) {
 }
 
 $probeText = Read-BinaryText -Path $probeSource
-if (-not $probeText.Contains('127.0.0.1:45719', [System.StringComparison]::Ordinal)) {
+if (-not $probeText.Contains('127.0.0.1:26191', [System.StringComparison]::Ordinal)) {
   throw 'The inspection probe does not contain the expected loopback endpoint.'
 }
 
