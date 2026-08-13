@@ -1103,7 +1103,7 @@ impl From<RecoveryCommandErrorKind> for RecoveryCommandErrorDto {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanDto {
     plan_id: u64,
@@ -1114,7 +1114,7 @@ pub struct PlanDto {
     can_apply: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanRowDto {
     source_id: u64,

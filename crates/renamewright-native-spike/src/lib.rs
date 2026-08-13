@@ -3,9 +3,12 @@
 // Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4
 // Hallmark · macrostructure: workbench · theme: Cobalt · slop: pass (native-app scope)
 
+use std::path::PathBuf;
+
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
 };
+use renamewright_application::{ApplicationService, PlanDto};
 
 const SAMPLE_COUNT: usize = 10_000;
 const PREVIEW_ROW_HEIGHT: f32 = 28.0;
@@ -674,6 +677,8 @@ impl PlanFilter {
 
 #[derive(Debug)]
 pub struct NativeSpikeApp {
+    application: ApplicationService,
+    plan: Option<PlanDto>,
     prefix: String,
     source_query: String,
     filter: PlanFilter,
@@ -695,6 +700,8 @@ impl NativeSpikeApp {
     #[must_use]
     pub fn new_with_palette(_automation_mode: bool, palette: NativePalette) -> Self {
         Self {
+            application: ApplicationService::default(),
+            plan: None,
             prefix: "정리_".to_owned(),
             source_query: String::new(),
             filter: PlanFilter::All,
@@ -741,6 +748,22 @@ impl NativeSpikeApp {
     }
 
     fn row_is_visible(&self, index: usize) -> bool {
+        if let Some(plan) = &self.plan {
+            let Some(row) = plan.rows().get(index) else {
+                return false;
+            };
+            let matches_filter = match self.filter {
+                PlanFilter::All => true,
+                PlanFilter::Changed => row.status() == "changed",
+                PlanFilter::Blocked => row.status() == "blocked",
+            };
+            let query = self.source_query.trim().to_lowercase();
+            let matches_query = query.is_empty()
+                || row.original_name().to_lowercase().contains(&query)
+                || row.proposed_name().to_lowercase().contains(&query);
+            return matches_filter && matches_query;
+        }
+
         let blocked = Self::row_is_blocked(index);
         let matches_filter = match self.filter {
             PlanFilter::All | PlanFilter::Changed => true,
@@ -754,9 +777,51 @@ impl NativeSpikeApp {
     }
 
     fn visible_indices(&self) -> Vec<usize> {
-        (0..SAMPLE_COUNT)
+        let row_count = self
+            .plan
+            .as_ref()
+            .map_or(SAMPLE_COUNT, |plan| plan.rows().len());
+        (0..row_count)
             .filter(|index| self.row_is_visible(*index))
             .collect()
+    }
+
+    fn admit_sources(&mut self, paths: Vec<PathBuf>) {
+        let request = ApplicationService::prefix_rule_request(self.prefix.clone());
+        match self.application.admit_sources_with_rules(paths, request) {
+            Ok(plan) => {
+                self.status = format!(
+                    "{} sources · {} changed · {} blocked",
+                    plan.rows().len(),
+                    plan.changed_count(),
+                    plan.blocked_count()
+                );
+                self.plan = Some(plan);
+            }
+            Err(error) => {
+                self.status = format!("Sources were not admitted ({})", error.code());
+            }
+        }
+    }
+
+    fn refresh_plan(&mut self) {
+        if self.plan.is_none() {
+            return;
+        }
+        match self.application.preview_prefix(self.prefix.clone()) {
+            Ok(plan) => {
+                self.status = format!(
+                    "{} sources · {} changed · {} blocked",
+                    plan.rows().len(),
+                    plan.changed_count(),
+                    plan.blocked_count()
+                );
+                self.plan = Some(plan);
+            }
+            Err(code) => {
+                self.status = format!("Preview unavailable ({code})");
+            }
+        }
     }
 
     fn show_source_bar(&mut self, ui: &mut egui::Ui) {
@@ -764,25 +829,16 @@ impl NativeSpikeApp {
             ui.heading(RichText::new(semantics::PRODUCT_NAME).color(self.palette.ink));
             ui.label(RichText::new(semantics::TAGLINE).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button(semantics::ADD_FOLDER).clicked() {
-                    self.status = match rfd::FileDialog::new()
-                        .set_title("Add a directory entry to Renamewright")
-                        .pick_folder()
-                    {
-                        Some(_) => "One directory entry selected for the spike".to_owned(),
-                        None => "Directory selection cancelled".to_owned(),
-                    };
-                }
+                ui.add_enabled(false, egui::Button::new(semantics::ADD_FOLDER))
+                    .on_disabled_hover_text("Directory admission is planned for Stage 6G");
                 if ui.button(semantics::ADD_FILES).clicked() {
-                    self.status = match rfd::FileDialog::new()
+                    match rfd::FileDialog::new()
                         .set_title("Add files to Renamewright")
                         .pick_files()
                     {
-                        Some(paths) => {
-                            format!("{} file entries selected for the spike", paths.len())
-                        }
-                        None => "File selection cancelled".to_owned(),
-                    };
+                        Some(paths) => self.admit_sources(paths),
+                        None => self.status = "File selection cancelled".to_owned(),
+                    }
                 }
             });
         });
@@ -815,12 +871,17 @@ impl NativeSpikeApp {
                 .strong()
                 .color(self.palette.ink),
         );
-        ui.add(
-            egui::TextEdit::singleline(&mut self.prefix)
-                .id_salt("rule.prefix.value")
-                .hint_text(semantics::RULE_PREFIX),
-        )
-        .labelled_by(prefix_label.id);
+        let prefix_changed = ui
+            .add(
+                egui::TextEdit::singleline(&mut self.prefix)
+                    .id_salt("rule.prefix.value")
+                    .hint_text(semantics::RULE_PREFIX),
+            )
+            .labelled_by(prefix_label.id)
+            .changed();
+        if prefix_changed {
+            self.refresh_plan();
+        }
         ui.label(RichText::new(semantics::HANGUL_IME_HELP).color(self.palette.ink_soft));
     }
 
@@ -878,14 +939,35 @@ impl NativeSpikeApp {
                     .show_rows(ui, PREVIEW_ROW_HEIGHT, visible.len(), |ui, row_range| {
                         for visible_row in row_range {
                             let index = visible[visible_row];
-                            let source = format!("IMG_{index:05}.jpg");
-                            let proposed = format!("{}{source}", self.prefix);
-                            let blocked = Self::row_is_blocked(index);
+                            let (source, proposed, status, blocked) =
+                                self.plan.as_ref().map_or_else(
+                                    || {
+                                        let source = format!("IMG_{index:05}.jpg");
+                                        let proposed = format!("{}{source}", self.prefix);
+                                        let blocked = Self::row_is_blocked(index);
+                                        let status = if blocked { "Blocked" } else { "Changed" };
+                                        (source, proposed, status, blocked)
+                                    },
+                                    |plan| {
+                                        let row = &plan.rows()[index];
+                                        (
+                                            row.original_name().to_owned(),
+                                            row.proposed_name().to_owned(),
+                                            if row.status() == "blocked" {
+                                                "Blocked"
+                                            } else if row.status() == "unchanged" {
+                                                "Unchanged"
+                                            } else {
+                                                "Changed"
+                                            },
+                                            row.status() == "blocked",
+                                        )
+                                    },
+                                );
                             ui.push_id(index, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.add_sized([210.0, 20.0], egui::Label::new(source));
                                     ui.add_sized([250.0, 20.0], egui::Label::new(proposed));
-                                    let status = if blocked { "Blocked" } else { "Changed" };
                                     let color = if blocked {
                                         self.palette.blocked
                                     } else {
@@ -920,9 +1002,16 @@ impl NativeSpikeApp {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
-        let dropped_count = ui.ctx().input(|input| input.raw.dropped_files.len());
-        if dropped_count > 0 {
-            self.status = format!("{dropped_count} dropped entries observed by the native shell");
+        let dropped_paths = ui.ctx().input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect::<Vec<_>>()
+        });
+        if !dropped_paths.is_empty() {
+            self.admit_sources(dropped_paths);
         }
 
         #[cfg(feature = "automation")]
@@ -1090,9 +1179,7 @@ pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "automation")]
     use std::error::Error;
-    #[cfg(feature = "automation")]
     use std::fs;
     #[cfg(feature = "automation")]
     use std::path::Path;
@@ -1131,6 +1218,7 @@ mod tests {
             add_folder.accesskit_node().role(),
             egui::accesskit::Role::Button
         );
+        assert!(add_folder.accesskit_node().is_disabled());
         assert_eq!(
             prefix.accesskit_node().role(),
             egui::accesskit::Role::TextInput
@@ -1222,6 +1310,35 @@ mod tests {
         assert!(harness.query_by_label("IMG_00000.jpg").is_some());
         assert!(harness.query_by_label("IMG_09999.jpg").is_none());
         assert!(harness.query_all_by(|_| true).count() < 500);
+    }
+
+    #[test]
+    fn admitted_sources_render_the_application_service_plan() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = NativeSpikeApp::new(false);
+        app.prefix = "final-".to_owned();
+        app.admit_sources(vec![source]);
+
+        let Some(plan) = &app.plan else {
+            return Err("the native workbench did not retain the service plan".into());
+        };
+        assert_eq!(plan.rows()[0].proposed_name(), "final-report.txt");
+        app.prefix = "reviewed-".to_owned();
+        app.refresh_plan();
+        let Some(plan) = &app.plan else {
+            return Err("the refreshed service plan was not retained".into());
+        };
+        assert_eq!(plan.rows()[0].proposed_name(), "reviewed-report.txt");
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+        harness.get_by_label("report.txt");
+        harness.get_by_label("reviewed-report.txt");
+        harness.get_by_label("1 shown");
+        Ok(())
     }
 
     #[cfg(feature = "automation")]
