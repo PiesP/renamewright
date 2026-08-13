@@ -6,12 +6,14 @@ policy in `.github/SECURITY.md`.
 
 ## System and scope
 
-Renamewright is a pre-release, Windows-first, local desktop batch-renaming
-workbench built with Rust, Tauri 2, and a bundled Solid/TypeScript WebView.
-Security review covers the Rust core and platform crates, the Windows native
-boundary, Tauri commands and capabilities, the bundled frontend, journal and
-recovery formats, build workflows, dependency controls, and Windows acceptance
-artifacts.
+Renamewright is a Windows-first, local desktop batch-renaming workbench. Version
+0.1 uses Rust, Tauri 2, and a bundled Solid/TypeScript WebView. Post-0.1 work is
+migrating the shell and UI to `eframe`/`egui`, extracting a UI-independent Rust
+application service, and adding explicitly selected directory entries. Security
+review covers both shells while they coexist, the Rust core, application and
+platform crates, the Windows native boundary, journal and recovery formats,
+test-only automation, build workflows, dependency controls, and Windows
+acceptance artifacts.
 
 The production application has no public network listener, account, telemetry,
 cloud sync, updater, remote UI, shell integration, or user-script/plugin system.
@@ -22,7 +24,7 @@ Important assets are:
 
 - integrity and availability of files selected by the local user;
 - confidentiality of native paths, journal contents, and local filesystem
-  structure across the WebView boundary;
+  structure across every UI and automation boundary;
 - truthful, recoverable journal state for every filesystem mutation;
 - bounded resource use for attacker-controlled preview, IPC, preset, and journal
   data; and
@@ -30,11 +32,17 @@ Important assets are:
 
 ## Threat model and trust boundaries
 
-Treat WebView JavaScript and every Tauri command argument as attacker-controlled.
-A finding at this boundary does not require a separately demonstrated XSS when
-the registered command itself exposes an unsafe native capability. The absence
-of remote content, the restrictive CSP, and bundled assets remain relevant to
-likelihood and severity.
+Treat WebView JavaScript and every Tauri command argument as attacker-controlled
+while the compatibility shell exists. A finding at this boundary does not
+require a separately demonstrated XSS when the registered command itself exposes
+an unsafe native capability. The absence of remote content, the restrictive CSP,
+and bundled assets remain relevant to likelihood and severity.
+
+Treat every test-only inspection message, injected input event, fixture manifest,
+and automation root as untrusted. The automation feature has the authority of
+the current local user and is never assumed harmless merely because it binds to
+loopback. Production artifacts must not compile or start the custom inspection
+listener or fixture loader.
 
 Treat filenames, rule and override text, preset documents, dropped entries,
 filesystem races, and journal files as untrusted. A user may select a hostile
@@ -52,9 +60,10 @@ checksums, and uploaded artifacts form the software supply-chain boundary.
 
 ## Security invariants
 
-- Native paths remain Rust-owned. WebView DTOs, IPC errors, status text, plan
-  JSON/CSV, and ordinary logs expose opaque IDs, display names, and structured
-  codes rather than absolute paths or journal-native names.
+- Native paths remain Rust-owned. UI models, WebView DTOs during migration,
+  inspection output, status text, plan JSON/CSV, and ordinary logs expose opaque
+  IDs, display names, and structured codes rather than absolute paths or
+  journal-native names.
 - Registered Tauri commands do not accept arbitrary source, destination,
   journal, or export paths from the WebView. Export destinations are selected
   natively and opened with create-new semantics.
@@ -63,6 +72,14 @@ checksums, and uploaded artifacts form the software supply-chain boundary.
   allocations or copies. Invalid and unsupported input fails closed.
 - Applying a newly previewed plan remains disabled and no new-plan Apply command
   is registered. Only Recovery and Undo may mutate names in the current product.
+- Default release builds contain no custom HTTP, TCP inspection, MCP, shell, or
+  general filesystem automation API. Test automation requires a separately
+  compiled feature, an explicit launch mode, loopback binding, isolated local
+  state, a visible test-mode indicator, and a disposable root. Absolute paths,
+  parent traversal, reparse escape, and access outside that root fail closed.
+- Standard AccessKit and Windows UI Automation may expose and operate the visible
+  interface under the current user's authority; it must not expose hidden native
+  paths or bypass confirmation and revalidation.
 - Recovery and Undo require a single mutation lock, a current path-free
   inspection, native confirmation, and a fresh post-confirmation inspection.
   Identity changes, occupied destinations, ambiguous prepared steps, damaged
@@ -76,6 +93,10 @@ checksums, and uploaded artifacts form the software supply-chain boundary.
   component. This is not a claim that every intermediate directory redirect is
   rejected; findings that use an intermediate redirect to violate identity,
   parent confinement, or no-replace guarantees remain reportable.
+- Directory support does not combine selecting a directory entry with recursive
+  discovery. Directory symlinks, junctions, and reparse points are not followed,
+  moves remain same-parent, and initial plans containing both an ancestor and its
+  descendant are blocked.
 - Unsafe Rust is forbidden outside `renamewright-windows-native`. In that crate
   it is limited to the reviewed Win32 identity query, variable-length rename
   buffer construction, and handle-based rename calls. Every relevant audit must
