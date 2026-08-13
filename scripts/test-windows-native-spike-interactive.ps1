@@ -9,6 +9,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$performanceBudgets = [ordered]@{
+  tenThousandEntryScrollMilliseconds = 200
+  tenThousandEntryFilterMilliseconds = 200
+}
+
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
   throw 'Interactive native-spike acceptance requires Windows.'
 }
@@ -428,8 +433,11 @@ try {
     throw 'The interactive performance probe did not report filter latency.'
   }
   $filterMilliseconds = [long]$Matches.filter
-  if ($scrollMilliseconds -ge 1000 -or $filterMilliseconds -ge 1000) {
-    throw 'The interactive 10,000-entry performance check exceeded one second.'
+  if ($scrollMilliseconds -gt $performanceBudgets.tenThousandEntryScrollMilliseconds) {
+    throw "The interactive 10,000-entry scroll took $scrollMilliseconds ms, exceeding the $($performanceBudgets.tenThousandEntryScrollMilliseconds)-ms budget."
+  }
+  if ($filterMilliseconds -gt $performanceBudgets.tenThousandEntryFilterMilliseconds) {
+    throw "The interactive 10,000-entry filter took $filterMilliseconds ms, exceeding the $($performanceBudgets.tenThousandEntryFilterMilliseconds)-ms budget."
   }
 
   $remainingDpi = @(100, 125, 150, 200, 250 | Where-Object { $_ -ne $dpiPercent })
@@ -454,8 +462,8 @@ try {
       nativeFileDialogOpened = $true
       nativeFolderDialogOpened = $true
       observedDpiSupported = $true
-      tenThousandEntryScrollUnderOneSecond = $true
-      tenThousandEntryFilterUnderOneSecond = $true
+      tenThousandEntryScrollWithinBudget = $true
+      tenThousandEntryFilterWithinBudget = $true
       highContrastModeExercised = $false
       nativeDragDropExercised = $false
       fullDpiMatrixExercised = ($remainingDpi.Count -eq 0)
@@ -477,6 +485,7 @@ try {
         Get-FileHash -LiteralPath $performanceScreenshotPath -Algorithm SHA256
       ).Hash.ToLowerInvariant()
     }
+    budgets = $performanceBudgets
     remaining = [ordered]@{
       dpiPercent = $remainingDpi
       highContrast = $true

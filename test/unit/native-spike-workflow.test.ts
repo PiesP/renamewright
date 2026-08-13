@@ -64,10 +64,22 @@ test('exercises the exact Windows executables before uploading runtime evidence'
   expect(runtime).toContain("'scroll_last_visible=true'");
   expect(runtime).toContain("'filter_target_visible=true'");
   expect(runtime).toContain("'filter_count_visible=true'");
-  expect(runtime).toContain('$scrollMilliseconds -ge 1000');
-  expect(runtime).toContain('$filterMilliseconds -ge 1000');
+  expect(runtime).toContain(
+    '$scrollMilliseconds -gt $performanceBudgets.tenThousandEntryScrollMilliseconds'
+  );
+  expect(runtime).toContain(
+    '$filterMilliseconds -gt $performanceBudgets.tenThousandEntryFilterMilliseconds'
+  );
   expect(runtime).toContain('$nodeCount -le 0 -or $nodeCount -ge 500');
   expect(runtime).toContain('defaultStartupMilliseconds');
+  expect(runtime).toContain('defaultExecutableBytes = 8 * 1024 * 1024');
+  expect(runtime).toContain('defaultWindowReadyMilliseconds = 1000');
+  expect(runtime).toContain('defaultIdleWorkingSetBytes = 160 * 1024 * 1024');
+  expect(runtime).toContain('tenThousandEntryScrollMilliseconds = 200');
+  expect(runtime).toContain('tenThousandEntryFilterMilliseconds = 200');
+  expect(runtime).toContain('defaultExecutableWithinBudget = $true');
+  expect(runtime).toContain('defaultWindowReadyWithinBudget = $true');
+  expect(runtime).toContain('defaultIdleWorkingSetWithinBudget = $true');
   expect(runtime).toContain("MainWindowTitle -ceq 'Renamewright native Rust spike'");
   expect(runtime).toContain('defaultMainWindowReady = $true');
   expect(runtime).toContain('host = [Environment]::OSVersion.VersionString');
@@ -108,6 +120,16 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain("$composedPrefix -cne '정리_한글'");
   expect(interactive).toContain("-Title 'Add files to Renamewright'");
   expect(interactive).toContain("-Title 'Add a directory entry to Renamewright'");
+  expect(interactive).toContain('tenThousandEntryScrollMilliseconds = 200');
+  expect(interactive).toContain('tenThousandEntryFilterMilliseconds = 200');
+  expect(interactive).toContain(
+    '$scrollMilliseconds -gt $performanceBudgets.tenThousandEntryScrollMilliseconds'
+  );
+  expect(interactive).toContain(
+    '$filterMilliseconds -gt $performanceBudgets.tenThousandEntryFilterMilliseconds'
+  );
+  expect(interactive).toContain('tenThousandEntryScrollWithinBudget = $true');
+  expect(interactive).toContain('tenThousandEntryFilterWithinBudget = $true');
   expect(interactive).toContain('GetDpiForWindow');
   expect(interactive).toContain('SetForegroundWindow');
   expect(interactive).toContain('Save-WindowScreenshot');

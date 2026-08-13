@@ -21,6 +21,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$performanceBudgets = [ordered]@{
+  defaultExecutableBytes = 8 * 1024 * 1024
+  defaultWindowReadyMilliseconds = 1000
+  defaultIdleWorkingSetBytes = 160 * 1024 * 1024
+  tenThousandEntryScrollMilliseconds = 200
+  tenThousandEntryFilterMilliseconds = 200
+}
+
 function Resolve-RequiredPath {
   param(
     [Parameter(Mandatory = $true)]
@@ -157,6 +165,10 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ([string]$manifest.sourceSha -cne $SourceSha) {
   throw 'The native spike runtime artifact is not bound to the requested source SHA.'
 }
+$defaultExecutableBytes = (Get-Item -LiteralPath $defaultExecutable).Length
+if ($defaultExecutableBytes -gt $performanceBudgets.defaultExecutableBytes) {
+  throw "The default native spike size $defaultExecutableBytes exceeded the $($performanceBudgets.defaultExecutableBytes)-byte budget."
+}
 
 $defaultOutputPath = Join-Path $artifactRoot 'default-process.stdout.txt'
 $defaultErrorPath = Join-Path $artifactRoot 'default-process.stderr.txt'
@@ -217,12 +229,18 @@ try {
       throw 'The default native spike did not expose its expected main window within 20 seconds.'
     }
     $defaultStartup.Stop()
+    if ($defaultStartup.ElapsedMilliseconds -gt $performanceBudgets.defaultWindowReadyMilliseconds) {
+      throw "The default native spike took $($defaultStartup.ElapsedMilliseconds) ms to expose its window, exceeding the $($performanceBudgets.defaultWindowReadyMilliseconds)-ms budget."
+    }
     if (Test-InspectionListener) {
       throw 'The default native spike exposed the custom inspection listener.'
     }
     Start-Sleep -Seconds 2
     $defaultProcess.Refresh()
     $defaultWorkingSet = $defaultProcess.WorkingSet64
+    if ($defaultWorkingSet -gt $performanceBudgets.defaultIdleWorkingSetBytes) {
+      throw "The default native spike idle working set $defaultWorkingSet exceeded the $($performanceBudgets.defaultIdleWorkingSetBytes)-byte budget."
+    }
   }
 } finally {
   Stop-TestProcess -Process $defaultProcess
@@ -340,14 +358,14 @@ try {
     throw 'The automation probe did not report scrolling latency.'
   }
   $scrollMilliseconds = [long]$Matches.scroll
-  if ($scrollMilliseconds -ge 1000) {
+  if ($scrollMilliseconds -gt $performanceBudgets.tenThousandEntryScrollMilliseconds) {
     throw "The 10,000-entry scroll took $scrollMilliseconds ms."
   }
   if ($probeOutput -notmatch 'filter_ms=(?<filter>[0-9]+)') {
     throw 'The automation probe did not report filtering latency.'
   }
   $filterMilliseconds = [long]$Matches.filter
-  if ($filterMilliseconds -ge 1000) {
+  if ($filterMilliseconds -gt $performanceBudgets.tenThousandEntryFilterMilliseconds) {
     throw "The 10,000-entry filter took $filterMilliseconds ms."
   }
   if (-not (Test-Path -LiteralPath $screenshotPath -PathType Leaf)) {
@@ -375,6 +393,9 @@ $runtimeEvidence = [ordered]@{
   checks = [ordered]@{
     defaultStarted = $true
     defaultMainWindowReady = $true
+    defaultExecutableWithinBudget = $true
+    defaultWindowReadyWithinBudget = $true
+    defaultIdleWorkingSetWithinBudget = $true
     defaultInspectionListenerAbsent = $true
     automationStartedExplicitly = $true
     protocolVersion = 1
@@ -382,11 +403,12 @@ $runtimeEvidence = [ordered]@{
     automationBannerVisible = $true
     hangulDisplayVisible = $true
     applyDisabled = $true
-    tenThousandEntryScrollUnderOneSecond = $true
-    tenThousandEntryFilterUnderOneSecond = $true
+    tenThousandEntryScrollWithinBudget = $true
+    tenThousandEntryFilterWithinBudget = $true
     screenshotCaptured = $true
   }
   measurements = [ordered]@{
+    defaultExecutableBytes = $defaultExecutableBytes
     defaultStartupMilliseconds = $defaultStartup.ElapsedMilliseconds
     defaultWorkingSetBytes = $defaultWorkingSet
     automationListenerReadyMilliseconds = $automationListenerReadyMilliseconds
@@ -399,6 +421,7 @@ $runtimeEvidence = [ordered]@{
     screenshotHeight = 760
     screenshotSha256 = (Get-FileHash -LiteralPath $screenshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
   }
+  budgets = $performanceBudgets
 }
 $evidencePath = Join-Path $artifactRoot 'windows-runtime-evidence.json'
 $runtimeEvidence | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $evidencePath -Encoding utf8
