@@ -39,6 +39,35 @@ function Stop-TestProcess {
   }
 }
 
+function Get-ProcessFailureDetail {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Label,
+
+    [Parameter(Mandatory = $true)]
+    [int]$ExitCode,
+
+    [Parameter(Mandatory = $true)]
+    [string]$OutputPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ErrorPath
+  )
+
+  $standardOutput = if (Test-Path -LiteralPath $OutputPath) {
+    (Get-Content -LiteralPath $OutputPath -Raw).Trim()
+  } else {
+    '<missing>'
+  }
+  $standardError = if (Test-Path -LiteralPath $ErrorPath) {
+    (Get-Content -LiteralPath $ErrorPath -Raw).Trim()
+  } else {
+    '<missing>'
+  }
+
+  return "$Label exited during startup with code $ExitCode. stdout: $standardOutput stderr: $standardError"
+}
+
 function Test-InspectionListener {
   $client = [System.Net.Sockets.TcpClient]::new()
   try {
@@ -89,15 +118,28 @@ if ([string]$manifest.sourceSha -cne $SourceSha) {
   throw 'The native spike runtime artifact is not bound to the requested source SHA.'
 }
 
+$defaultOutputPath = Join-Path $artifactRoot 'default-process.stdout.txt'
+$defaultErrorPath = Join-Path $artifactRoot 'default-process.stderr.txt'
+$automationOutputPath = Join-Path $artifactRoot 'automation-process.stdout.txt'
+$automationErrorPath = Join-Path $artifactRoot 'automation-process.stderr.txt'
+
 $defaultProcess = $null
 $automationProcess = $null
 $defaultStartup = [System.Diagnostics.Stopwatch]::StartNew()
 try {
-  $defaultProcess = Start-Process -FilePath $defaultExecutable -PassThru
+  $defaultProcess = Start-Process `
+    -FilePath $defaultExecutable `
+    -RedirectStandardOutput $defaultOutputPath `
+    -RedirectStandardError $defaultErrorPath `
+    -PassThru
   Start-Sleep -Seconds 3
   $defaultProcess.Refresh()
   if ($defaultProcess.HasExited) {
-    throw "The default native spike exited during startup with code $($defaultProcess.ExitCode)."
+    throw (Get-ProcessFailureDetail `
+      -Label 'The default native spike' `
+      -ExitCode $defaultProcess.ExitCode `
+      -OutputPath $defaultOutputPath `
+      -ErrorPath $defaultErrorPath)
   }
   $defaultStartup.Stop()
   if (Test-InspectionListener) {
@@ -116,6 +158,8 @@ try {
   $automationProcess = Start-Process `
     -FilePath $automationExecutable `
     -ArgumentList @('--automation') `
+    -RedirectStandardOutput $automationOutputPath `
+    -RedirectStandardError $automationErrorPath `
     -PassThru
 
   $probeExitCode = $null
@@ -123,7 +167,11 @@ try {
   while ([DateTimeOffset]::UtcNow -lt $deadline) {
     $automationProcess.Refresh()
     if ($automationProcess.HasExited) {
-      throw "The automation native spike exited during startup with code $($automationProcess.ExitCode)."
+      throw (Get-ProcessFailureDetail `
+        -Label 'The automation native spike' `
+        -ExitCode $automationProcess.ExitCode `
+        -OutputPath $automationOutputPath `
+        -ErrorPath $automationErrorPath)
     }
     if (Test-InspectionListener) {
       $probeExitCode = Invoke-InspectionProbe `
