@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::convert::Infallible;
 use std::error::Error;
 use std::fs;
 use std::net::TcpStream;
@@ -12,8 +13,14 @@ fn request(stream: &mut TcpStream, request: &Request) -> Result<Response, Box<dy
     Ok(read_message(&mut *stream)?)
 }
 
+fn parse_screenshot_path(
+    mut arguments: pico_args::Arguments,
+) -> Result<Option<PathBuf>, pico_args::Error> {
+    arguments.opt_free_from_os_str(|argument| Ok::<_, Infallible>(PathBuf::from(argument)))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let screenshot_path: Option<PathBuf> = pico_args::Arguments::from_env().opt_free_from_str()?;
+    let screenshot_path = parse_screenshot_path(pico_args::Arguments::from_env())?;
     let mut stream = TcpStream::connect("127.0.0.1:45719")?;
     let version = egui_inspection::protocol::read_handshake(&mut stream)?;
     println!("protocol_version={version}");
@@ -59,4 +66,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    use super::parse_screenshot_path;
+
+    #[test]
+    fn screenshot_path_preserves_non_utf8_bytes() -> Result<(), pico_args::Error> {
+        let expected = b"capture-\xff.png";
+        let arguments = pico_args::Arguments::from_vec(vec![OsString::from_vec(expected.to_vec())]);
+
+        let Some(path) = parse_screenshot_path(arguments)? else {
+            return Err(pico_args::Error::MissingArgument);
+        };
+
+        assert_eq!(path.as_os_str().as_bytes(), expected);
+        Ok(())
+    }
 }

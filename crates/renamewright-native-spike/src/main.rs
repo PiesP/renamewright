@@ -37,8 +37,13 @@ fn install_korean_font(ctx: &egui::Context) -> Option<String> {
 }
 
 #[cfg(feature = "automation")]
+fn automation_requested_from(mut arguments: pico_args::Arguments) -> bool {
+    arguments.contains("--automation")
+}
+
+#[cfg(feature = "automation")]
 fn automation_requested() -> bool {
-    pico_args::Arguments::from_env().contains("--automation")
+    automation_requested_from(pico_args::Arguments::from_env())
 }
 
 #[cfg(not(feature = "automation"))]
@@ -85,4 +90,22 @@ fn main() -> eframe::Result {
             Ok(Box::new(NativeSpikeApp::new(automation_mode)))
         }),
     )
+}
+
+#[cfg(all(test, feature = "automation", unix))]
+mod tests {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    use super::automation_requested_from;
+
+    #[test]
+    fn automation_flag_survives_non_utf8_argument() {
+        let arguments = pico_args::Arguments::from_vec(vec![
+            OsString::from_vec(b"invalid-\xff".to_vec()),
+            OsString::from("--automation"),
+        ]);
+
+        assert!(automation_requested_from(arguments));
+    }
 }
