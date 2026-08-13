@@ -91,6 +91,8 @@ if (Test-Path -LiteralPath $output) {
 
 $automationMarkers = @(
   'AUTOMATION TEST MODE',
+  '--automation-root',
+  '--automation-fixture',
   '127.0.0.1:45719'
 )
 $defaultText = Read-BinaryText -Path $defaultSource
@@ -136,6 +138,7 @@ $manifest = [ordered]@{
     defaultExcludesAutomationMarkers = $true
     automationIncludesVisibleBanner = $true
     automationUsesLoopbackOnly = $true
+    automationRequiresExplicitRoot = $true
   }
   files = $files
 }

@@ -4,6 +4,12 @@ use std::fs;
 use std::path::Path;
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
+#[cfg(feature = "automation")]
+use renamewright_native_spike::automation::AutomationFixture;
+#[cfg(feature = "automation")]
+use renamewright_native_spike::automation::{
+    AUTOMATION_BIND_ADDRESS, AutomationRoot, serve_bounded,
+};
 use renamewright_native_spike::{NativePalette, NativeSpikeApp, install_theme};
 
 #[cfg(windows)]
@@ -57,18 +63,51 @@ fn install_korean_font(ctx: &egui::Context) -> Option<String> {
 }
 
 #[cfg(feature = "automation")]
-fn automation_requested_from(mut arguments: pico_args::Arguments) -> bool {
-    arguments.contains("--automation")
+struct AutomationLaunch {
+    root: AutomationRoot,
+    fixture: Option<AutomationFixture>,
 }
 
 #[cfg(feature = "automation")]
-fn automation_requested() -> bool {
-    automation_requested_from(pico_args::Arguments::from_env())
+fn automation_launch_from(
+    mut arguments: pico_args::Arguments,
+) -> Result<Option<AutomationLaunch>, String> {
+    use std::convert::Infallible;
+    use std::path::PathBuf;
+
+    let automation_requested = arguments.contains("--automation");
+    let root = arguments
+        .opt_value_from_os_str("--automation-root", |argument| {
+            Ok::<_, Infallible>(PathBuf::from(argument))
+        })
+        .map_err(|_| "the automation root argument was invalid".to_owned())?;
+    let fixture_path = arguments
+        .opt_value_from_os_str("--automation-fixture", |argument| {
+            Ok::<_, Infallible>(PathBuf::from(argument))
+        })
+        .map_err(|_| "the automation fixture argument was invalid".to_owned())?;
+    if !arguments.finish().is_empty() {
+        return Err("the native spike received an unsupported argument".to_owned());
+    }
+    match (automation_requested, root, fixture_path) {
+        (true, Some(root), fixture_path) => {
+            let root = AutomationRoot::open(&root).map_err(|error| error.to_string())?;
+            let fixture = fixture_path
+                .map(|path| root.load_fixture(&path))
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            Ok(Some(AutomationLaunch { root, fixture }))
+        }
+        (true, None, _) => Err("automation mode requires --automation-root".to_owned()),
+        (false, Some(_), _) => Err("--automation-root requires --automation".to_owned()),
+        (false, None, Some(_)) => Err("--automation-fixture requires --automation".to_owned()),
+        (false, None, None) => Ok(None),
+    }
 }
 
-#[cfg(not(feature = "automation"))]
-const fn automation_requested() -> bool {
-    false
+#[cfg(feature = "automation")]
+fn automation_launch() -> Result<Option<AutomationLaunch>, String> {
+    automation_launch_from(pico_args::Arguments::from_env())
 }
 
 #[cfg(feature = "automation")]
@@ -76,11 +115,14 @@ fn attach_automation(ctx: &egui::Context) -> Result<(), String> {
     ctx.add_plugin(egui_inspection::InspectionPlugin::new(Some(
         "Renamewright native spike".to_owned(),
     )));
-    egui_inspection::serve(ctx, "127.0.0.1:45719").map_err(|error| error.to_string())
+    serve_bounded(ctx, AUTOMATION_BIND_ADDRESS).map_err(|error| error.to_string())
 }
 
-fn main() -> eframe::Result {
-    let automation_mode = automation_requested();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "automation")]
+    let automation_launch = automation_launch()?;
+    #[cfg(feature = "automation")]
+    let automation_mode = automation_launch.is_some();
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
@@ -109,28 +151,86 @@ fn main() -> eframe::Result {
                     |error| -> Box<dyn std::error::Error + Send + Sync> { error.into() },
                 )?;
             }
-            Ok(Box::new(NativeSpikeApp::new_with_palette(
-                automation_mode,
-                palette,
-            )))
+            #[cfg(feature = "automation")]
+            if let Some(automation_launch) = automation_launch {
+                return Ok(Box::new(NativeSpikeApp::new_automated(
+                    palette,
+                    automation_launch.root,
+                    automation_launch.fixture.as_ref(),
+                )));
+            }
+            Ok(Box::new(NativeSpikeApp::new_with_palette(false, palette)))
         }),
-    )
+    )?;
+    Ok(())
 }
 
 #[cfg(all(test, feature = "automation", unix))]
 mod tests {
     use std::ffi::OsString;
+    use std::fs;
     use std::os::unix::ffi::OsStringExt;
 
-    use super::automation_requested_from;
+    use super::automation_launch_from;
 
     #[test]
-    fn automation_flag_survives_non_utf8_argument() {
+    fn automation_arguments_reject_non_utf8_input_without_panicking() {
         let arguments = pico_args::Arguments::from_vec(vec![
             OsString::from_vec(b"invalid-\xff".to_vec()),
             OsString::from("--automation"),
         ]);
 
-        assert!(automation_requested_from(arguments));
+        assert!(automation_launch_from(arguments).is_err());
+    }
+
+    #[test]
+    fn automation_mode_requires_an_explicit_root() {
+        let arguments = pico_args::Arguments::from_vec(vec![OsString::from("--automation")]);
+
+        assert_eq!(
+            automation_launch_from(arguments).err().as_deref(),
+            Some("automation mode requires --automation-root")
+        );
+    }
+
+    #[test]
+    fn automation_mode_accepts_an_existing_absolute_root() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let arguments = pico_args::Arguments::from_vec(vec![
+            OsString::from("--automation"),
+            OsString::from("--automation-root"),
+            directory.path().as_os_str().to_owned(),
+        ]);
+
+        assert!(automation_launch_from(arguments)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn automation_fixture_path_is_relative_to_the_explicit_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::create_dir(directory.path().join("fixtures"))?;
+        fs::write(
+            directory.path().join("fixtures/session.json"),
+            br#"{"schemaVersion":1,"prefix":"fixture_"}"#,
+        )?;
+        let arguments = pico_args::Arguments::from_vec(vec![
+            OsString::from("--automation"),
+            OsString::from("--automation-root"),
+            directory.path().as_os_str().to_owned(),
+            OsString::from("--automation-fixture"),
+            OsString::from("session.json"),
+        ]);
+
+        let Some(launch) = automation_launch_from(arguments)? else {
+            return Err("automation launch options were not retained".into());
+        };
+        assert_eq!(
+            launch.fixture.as_ref().and_then(|fixture| fixture.prefix()),
+            Some("fixture_")
+        );
+        Ok(())
     }
 }

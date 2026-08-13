@@ -274,6 +274,11 @@ if ($hostedRendererUnavailable) {
 
 $screenshotPath = Join-Path $artifactRoot 'windows-runtime-screenshot.png'
 $temporaryDirectory = Resolve-TemporaryDirectory
+$automationRoot = Join-Path `
+  $temporaryDirectory `
+  ("renamewright-automation-" + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $automationRoot | Out-Null
+$automationArguments = "--automation --automation-root `"$automationRoot`""
 $probeOutputPath = Join-Path $temporaryDirectory 'native-spike-probe.stdout.txt'
 $probeErrorPath = Join-Path $temporaryDirectory 'native-spike-probe.stderr.txt'
 $automationStartup = [System.Diagnostics.Stopwatch]::StartNew()
@@ -282,7 +287,7 @@ $automationListenerReadyMilliseconds = $null
 try {
   $automationProcess = Start-Process `
     -FilePath $automationExecutable `
-    -ArgumentList @('--automation') `
+    -ArgumentList $automationArguments `
     -RedirectStandardOutput $automationOutputPath `
     -RedirectStandardError $automationErrorPath `
     -PassThru
@@ -381,6 +386,9 @@ try {
   $automationWorkingSet = $automationProcess.WorkingSet64
 } finally {
   Stop-TestProcess -Process $automationProcess
+  if (Test-Path -LiteralPath $automationRoot) {
+    Remove-Item -LiteralPath $automationRoot -Recurse -Force
+  }
 }
 
 $runtimeEvidence = [ordered]@{
@@ -398,6 +406,7 @@ $runtimeEvidence = [ordered]@{
     defaultIdleWorkingSetWithinBudget = $true
     defaultInspectionListenerAbsent = $true
     automationStartedExplicitly = $true
+    isolatedAutomationRoot = $true
     protocolVersion = 1
     accessKitTreeBounded = $true
     automationBannerVisible = $true

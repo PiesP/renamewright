@@ -4121,6 +4121,9 @@ dependencies = [
  "pico-args",
  "renamewright-windows-native",
  "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

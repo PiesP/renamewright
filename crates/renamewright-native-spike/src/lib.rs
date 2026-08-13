@@ -10,6 +10,564 @@ use eframe::egui::{
 const SAMPLE_COUNT: usize = 10_000;
 const PREVIEW_ROW_HEIGHT: f32 = 28.0;
 
+pub mod semantics {
+    pub const PRODUCT_NAME: &str = "Renamewright";
+    pub const TAGLINE: &str = "Plan every rename.";
+    pub const ADD_FOLDER: &str = "Add folder";
+    pub const ADD_FILES: &str = "Add files";
+    pub const RULES_HEADING: &str = "Rules";
+    pub const RULES_ORDER_HELP: &str = "Applied in order";
+    pub const RULE_PREFIX: &str = "Prefix";
+    pub const RULE_SEQUENCE: &str = "Sequence";
+    pub const RULE_EXTENSION: &str = "Extension";
+    pub const PREFIX_LABEL: &str = "Prefix text";
+    pub const HANGUL_IME_HELP: &str = "한글 IME 입력 확인";
+    pub const PREVIEW_HEADING: &str = "Preview";
+    pub const FILTER_ALL: &str = "All";
+    pub const FILTER_CHANGED: &str = "Changed";
+    pub const FILTER_BLOCKED: &str = "Blocked";
+    pub const SOURCE_QUERY_LABEL: &str = "Filter names";
+    pub const APPLY: &str = "Apply";
+    pub const APPLY_LOCKED: &str = "Apply locked";
+    pub const AUTOMATION_BANNER: &str = "AUTOMATION TEST MODE";
+    pub const HIGH_CONTRAST_ACTIVE: &str = "Windows high contrast palette active";
+}
+
+#[cfg(feature = "automation")]
+pub mod automation {
+    use std::fmt::{Display, Formatter};
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream, ToSocketAddrs as _};
+    use std::path::{Component, Path, PathBuf};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use eframe::egui;
+    use egui_inspection::{InspectionPlugin, Request, Response};
+    use serde::Deserialize;
+
+    pub const AUTOMATION_BIND_ADDRESS: &str = "127.0.0.1:45719";
+    pub const MAX_AUTOMATION_FIXTURE_BYTES: u64 = 256 * 1024;
+    pub const MAX_AUTOMATION_MESSAGE_BYTES: usize = 1024 * 1024;
+    pub const MAX_AUTOMATION_TEXT_BYTES: usize = 4 * 1024;
+    pub const MAX_AUTOMATION_EVENTS: usize = 256;
+    pub const MAX_AUTOMATION_REQUESTS_PER_CONNECTION: usize = 128;
+    const MAX_AUTOMATION_RELATIVE_PATH_BYTES: usize = 4 * 1024;
+    const MAX_AUTOMATION_CONNECTION_DURATION: Duration = Duration::from_secs(120);
+    const AUTOMATION_IO_TIMEOUT: Duration = Duration::from_secs(5);
+    const AUTOMATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+    const MAX_AUTOMATION_VIEWPORT_WIDTH: u32 = 3_840;
+    const MAX_AUTOMATION_VIEWPORT_HEIGHT: u32 = 2_160;
+    const LOCK_FILE_NAME: &str = ".renamewright-automation.lock";
+    const FIXTURE_DIRECTORY_NAME: &str = "fixtures";
+    const STATE_DIRECTORY_NAME: &str = "state";
+    const JOURNAL_DIRECTORY_NAME: &str = "journals";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AutomationRootErrorKind {
+        RootMustBeAbsolute,
+        RootUnavailable,
+        RootNotDirectory,
+        ReparsePointRejected,
+        ConcurrentSession,
+        InvalidRelativePath,
+        RelativePathTooLong,
+        FixtureUnavailable,
+        FixtureTooLarge,
+        InvalidFixture,
+        FixtureEscapedRoot,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct AutomationRootError {
+        kind: AutomationRootErrorKind,
+    }
+
+    impl AutomationRootError {
+        const fn new(kind: AutomationRootErrorKind) -> Self {
+            Self { kind }
+        }
+
+        #[must_use]
+        pub const fn kind(self) -> AutomationRootErrorKind {
+            self.kind
+        }
+    }
+
+    impl Display for AutomationRootError {
+        fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "the automation root was rejected ({:?})",
+                self.kind
+            )
+        }
+    }
+
+    impl std::error::Error for AutomationRootError {}
+
+    #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "camelCase")]
+    pub enum AutomationFilter {
+        All,
+        Changed,
+        Blocked,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct AutomationFixture {
+        schema_version: u16,
+        #[serde(default)]
+        prefix: Option<String>,
+        #[serde(default)]
+        source_query: Option<String>,
+        #[serde(default)]
+        filter: Option<AutomationFilter>,
+    }
+
+    impl AutomationFixture {
+        pub fn parse(bytes: &[u8]) -> Result<Self, AutomationRootError> {
+            let fixture: Self = serde_json::from_slice(bytes)
+                .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::InvalidFixture))?;
+            if fixture.schema_version != 1
+                || fixture
+                    .prefix
+                    .as_ref()
+                    .is_some_and(|value| value.len() > MAX_AUTOMATION_TEXT_BYTES)
+                || fixture
+                    .source_query
+                    .as_ref()
+                    .is_some_and(|value| value.len() > MAX_AUTOMATION_TEXT_BYTES)
+            {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::InvalidFixture,
+                ));
+            }
+            Ok(fixture)
+        }
+
+        #[must_use]
+        pub fn prefix(&self) -> Option<&str> {
+            self.prefix.as_deref()
+        }
+
+        #[must_use]
+        pub fn source_query(&self) -> Option<&str> {
+            self.source_query.as_deref()
+        }
+
+        #[must_use]
+        pub const fn filter(&self) -> Option<AutomationFilter> {
+            self.filter
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct AutomationRoot {
+        canonical_root: PathBuf,
+        fixture_root: PathBuf,
+        state_root: PathBuf,
+        journal_root: PathBuf,
+        lock_path: PathBuf,
+        _lock: File,
+    }
+
+    impl AutomationRoot {
+        pub fn open(root: &Path) -> Result<Self, AutomationRootError> {
+            if !root.is_absolute() {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::RootMustBeAbsolute,
+                ));
+            }
+            let metadata = fs::symlink_metadata(root)
+                .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
+            if !metadata.is_dir() {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::RootNotDirectory,
+                ));
+            }
+            if metadata_is_reparse_point(&metadata) {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::ReparsePointRejected,
+                ));
+            }
+            let canonical_root = fs::canonicalize(root)
+                .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
+            let lock_path = canonical_root.join(LOCK_FILE_NAME);
+            let mut lock = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+                .map_err(|_| {
+                    AutomationRootError::new(AutomationRootErrorKind::ConcurrentSession)
+                })?;
+            if writeln!(lock, "{}", std::process::id()).is_err() || lock.sync_all().is_err() {
+                let _ = fs::remove_file(&lock_path);
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::RootUnavailable,
+                ));
+            }
+
+            let result = Self::prepare(canonical_root, lock_path, lock);
+            if result.is_err() {
+                let _ = fs::remove_file(root.join(LOCK_FILE_NAME));
+            }
+            result
+        }
+
+        fn prepare(
+            canonical_root: PathBuf,
+            lock_path: PathBuf,
+            lock: File,
+        ) -> Result<Self, AutomationRootError> {
+            let fixture_root = prepare_child_directory(&canonical_root, FIXTURE_DIRECTORY_NAME)?;
+            let state_root = prepare_child_directory(&canonical_root, STATE_DIRECTORY_NAME)?;
+            let journal_root = prepare_child_directory(&canonical_root, JOURNAL_DIRECTORY_NAME)?;
+            Ok(Self {
+                canonical_root,
+                fixture_root,
+                state_root,
+                journal_root,
+                lock_path,
+                _lock: lock,
+            })
+        }
+
+        #[must_use]
+        pub fn root(&self) -> &Path {
+            &self.canonical_root
+        }
+
+        #[must_use]
+        pub fn state_root(&self) -> &Path {
+            &self.state_root
+        }
+
+        #[must_use]
+        pub fn journal_root(&self) -> &Path {
+            &self.journal_root
+        }
+
+        pub fn read_fixture(&self, relative: &Path) -> Result<Vec<u8>, AutomationRootError> {
+            validate_relative_path(relative)?;
+            let candidate = self.fixture_root.join(relative);
+            verify_existing_path(&self.fixture_root, &candidate)?;
+            let metadata = fs::metadata(&candidate).map_err(|_| {
+                AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+            })?;
+            if !metadata.is_file() {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::FixtureUnavailable,
+                ));
+            }
+            if metadata.len() > MAX_AUTOMATION_FIXTURE_BYTES {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::FixtureTooLarge,
+                ));
+            }
+            let file = File::open(&candidate).map_err(|_| {
+                AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+            })?;
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            file.take(MAX_AUTOMATION_FIXTURE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| {
+                    AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+                })?;
+            if bytes.len() as u64 > MAX_AUTOMATION_FIXTURE_BYTES {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::FixtureTooLarge,
+                ));
+            }
+            Ok(bytes)
+        }
+
+        pub fn load_fixture(
+            &self,
+            relative: &Path,
+        ) -> Result<AutomationFixture, AutomationRootError> {
+            AutomationFixture::parse(&self.read_fixture(relative)?)
+        }
+    }
+
+    impl Drop for AutomationRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.lock_path);
+        }
+    }
+
+    pub fn serve_bounded(ctx: &egui::Context, address: &str) -> std::io::Result<()> {
+        let resolved = address
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| std::io::Error::other("the automation address did not resolve"))?;
+        if !resolved.ip().is_loopback() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the automation listener must use loopback",
+            ));
+        }
+        let listener = TcpListener::bind(resolved)?;
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("renamewright_automation_accept".to_owned())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else {
+                        continue;
+                    };
+                    let _ = serve_connection(stream, &ctx);
+                }
+            })?;
+        Ok(())
+    }
+
+    fn serve_connection(stream: TcpStream, ctx: &egui::Context) -> std::io::Result<()> {
+        stream.set_read_timeout(Some(AUTOMATION_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(AUTOMATION_IO_TIMEOUT))?;
+        let mut reader = std::io::BufReader::new(stream.try_clone()?);
+        let mut writer = std::io::BufWriter::new(stream);
+        egui_inspection::protocol::write_handshake(&mut writer)?;
+        let started = Instant::now();
+
+        for _ in 0..MAX_AUTOMATION_REQUESTS_PER_CONNECTION {
+            if started.elapsed() > MAX_AUTOMATION_CONNECTION_DURATION {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the automation connection exceeded its runtime bound",
+                ));
+            }
+            let request: Request = match read_bounded_message(&mut reader) {
+                Ok(request) => request,
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            if !request_is_bounded(&request) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the automation request exceeded a semantic bound",
+                ));
+            }
+
+            let (sender, receiver) = mpsc::channel();
+            let registered = ctx
+                .with_plugin::<InspectionPlugin, _>(|plugin| {
+                    plugin.submit(request, move |response| {
+                        let _ = sender.send(response);
+                    });
+                })
+                .is_some();
+            if !registered {
+                return egui_inspection::write_message(
+                    &mut writer,
+                    &Response::Error {
+                        message: "the automation inspection plugin is unavailable".to_owned(),
+                    },
+                );
+            }
+            ctx.request_repaint();
+            let response = receiver
+                .recv_timeout(AUTOMATION_REQUEST_TIMEOUT)
+                .unwrap_or_else(|_| Response::Error {
+                    message: "the automation request timed out".to_owned(),
+                });
+            egui_inspection::write_message(&mut writer, &response)?;
+        }
+        Ok(())
+    }
+
+    fn read_bounded_message<R, T>(reader: &mut R) -> std::io::Result<T>
+    where
+        R: std::io::Read,
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let mut header = [0_u8; 4];
+        reader.read_exact(&mut header)?;
+        let length = u32::from_be_bytes(header) as usize;
+        if length > MAX_AUTOMATION_MESSAGE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the automation message exceeded its byte bound",
+            ));
+        }
+        let mut body = vec![0_u8; length];
+        reader.read_exact(&mut body)?;
+        egui_inspection::protocol::decode_frame_body(&body)
+    }
+
+    const fn request_is_bounded(request: &Request) -> bool {
+        match request {
+            Request::GetInfo | Request::GetTree => true,
+            Request::GetScreenshot { pixels_per_point } => match pixels_per_point {
+                Some(value) => value.is_finite() && *value > 0.0 && *value <= 4.0,
+                None => true,
+            },
+            Request::ApplyEvents { events } => events.len() <= MAX_AUTOMATION_EVENTS,
+            Request::Resize { width, height } => {
+                *width > 0
+                    && *height > 0
+                    && *width <= MAX_AUTOMATION_VIEWPORT_WIDTH
+                    && *height <= MAX_AUTOMATION_VIEWPORT_HEIGHT
+            }
+        }
+    }
+
+    fn validate_relative_path(path: &Path) -> Result<(), AutomationRootError> {
+        if path.as_os_str().as_encoded_bytes().len() > MAX_AUTOMATION_RELATIVE_PATH_BYTES {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::RelativePathTooLong,
+            ));
+        }
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::InvalidRelativePath,
+            ));
+        }
+        Ok(())
+    }
+
+    fn prepare_child_directory(root: &Path, name: &str) -> Result<PathBuf, AutomationRootError> {
+        let path = root.join(name);
+        match fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::RootUnavailable,
+                ));
+            }
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
+        if !metadata.is_dir() {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::RootNotDirectory,
+            ));
+        }
+        if metadata_is_reparse_point(&metadata) {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::ReparsePointRejected,
+            ));
+        }
+        let canonical = fs::canonicalize(&path)
+            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
+        if !canonical.starts_with(root) {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::FixtureEscapedRoot,
+            ));
+        }
+        Ok(canonical)
+    }
+
+    fn verify_existing_path(root: &Path, candidate: &Path) -> Result<(), AutomationRootError> {
+        let relative = candidate
+            .strip_prefix(root)
+            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::FixtureEscapedRoot))?;
+        let mut current = root.to_path_buf();
+        for component in relative.components() {
+            let Component::Normal(component) = component else {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::InvalidRelativePath,
+                ));
+            };
+            current.push(component);
+            let metadata = fs::symlink_metadata(&current).map_err(|_| {
+                AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
+            })?;
+            if metadata_is_reparse_point(&metadata) {
+                return Err(AutomationRootError::new(
+                    AutomationRootErrorKind::ReparsePointRejected,
+                ));
+            }
+        }
+        let canonical = fs::canonicalize(candidate)
+            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable))?;
+        if !canonical.starts_with(root) {
+            return Err(AutomationRootError::new(
+                AutomationRootErrorKind::FixtureEscapedRoot,
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+        use std::os::windows::fs::MetadataExt as _;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+
+    #[cfg(not(windows))]
+    fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+        metadata.file_type().is_symlink()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io::Cursor;
+
+        use eframe::egui;
+        use egui_inspection::Request;
+
+        use super::{
+            MAX_AUTOMATION_EVENTS, MAX_AUTOMATION_MESSAGE_BYTES, read_bounded_message,
+            request_is_bounded, serve_bounded,
+        };
+
+        #[test]
+        fn framed_requests_are_rejected_before_oversized_allocation() {
+            let declared = u32::try_from(MAX_AUTOMATION_MESSAGE_BYTES + 1)
+                .unwrap_or(u32::MAX)
+                .to_be_bytes();
+            let mut input = Cursor::new(declared);
+
+            let error = read_bounded_message::<_, Request>(&mut input).err();
+            assert_eq!(
+                error.map(|error| error.kind()),
+                Some(std::io::ErrorKind::InvalidData)
+            );
+        }
+
+        #[test]
+        fn inspection_actions_have_event_viewport_and_scale_bounds() {
+            assert!(request_is_bounded(&Request::ApplyEvents {
+                events: vec![egui::Event::Copy; MAX_AUTOMATION_EVENTS],
+            }));
+            assert!(!request_is_bounded(&Request::ApplyEvents {
+                events: vec![egui::Event::Copy; MAX_AUTOMATION_EVENTS + 1],
+            }));
+            assert!(request_is_bounded(&Request::Resize {
+                width: 3_840,
+                height: 2_160,
+            }));
+            assert!(!request_is_bounded(&Request::Resize {
+                width: 3_841,
+                height: 2_160,
+            }));
+            assert!(!request_is_bounded(&Request::GetScreenshot {
+                pixels_per_point: Some(f32::NAN),
+            }));
+        }
+
+        #[test]
+        fn inspection_listener_rejects_non_loopback_binding() {
+            let error = serve_bounded(&egui::Context::default(), "0.0.0.0:0").err();
+            assert_eq!(
+                error.map(|error| error.kind()),
+                Some(std::io::ErrorKind::PermissionDenied)
+            );
+        }
+    }
+}
+
 const PAPER: Color32 = Color32::from_rgb(247, 248, 252);
 const PAPER_RAISED: Color32 = Color32::from_rgb(253, 253, 254);
 const PAPER_SOFT: Color32 = Color32::from_rgb(234, 238, 248);
@@ -107,9 +665,9 @@ impl PlanFilter {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::All => "All",
-            Self::Changed => "Changed",
-            Self::Blocked => "Blocked",
+            Self::All => semantics::FILTER_ALL,
+            Self::Changed => semantics::FILTER_CHANGED,
+            Self::Blocked => semantics::FILTER_BLOCKED,
         }
     }
 }
@@ -124,6 +682,8 @@ pub struct NativeSpikeApp {
     palette: NativePalette,
     #[cfg(feature = "automation")]
     automation_mode: bool,
+    #[cfg(feature = "automation")]
+    _automation_root: Option<automation::AutomationRoot>,
 }
 
 impl NativeSpikeApp {
@@ -143,7 +703,37 @@ impl NativeSpikeApp {
             palette,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
+            #[cfg(feature = "automation")]
+            _automation_root: None,
         }
+    }
+
+    #[cfg(feature = "automation")]
+    #[must_use]
+    pub fn new_automated(
+        palette: NativePalette,
+        automation_root: automation::AutomationRoot,
+        fixture: Option<&automation::AutomationFixture>,
+    ) -> Self {
+        let mut app = Self::new_with_palette(true, palette);
+        if let Some(fixture) = fixture {
+            if let Some(prefix) = fixture.prefix() {
+                app.prefix = prefix.to_owned();
+            }
+            if let Some(source_query) = fixture.source_query() {
+                app.source_query = source_query.to_owned();
+            }
+            if let Some(filter) = fixture.filter() {
+                app.filter = match filter {
+                    automation::AutomationFilter::All => PlanFilter::All,
+                    automation::AutomationFilter::Changed => PlanFilter::Changed,
+                    automation::AutomationFilter::Blocked => PlanFilter::Blocked,
+                };
+            }
+            app.status = "Automation fixture loaded".to_owned();
+        }
+        app._automation_root = Some(automation_root);
+        app
     }
 
     fn row_is_blocked(index: usize) -> bool {
@@ -171,10 +761,10 @@ impl NativeSpikeApp {
 
     fn show_source_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Renamewright").color(self.palette.ink));
-            ui.label(RichText::new("Plan every rename.").color(self.palette.ink_soft));
+            ui.heading(RichText::new(semantics::PRODUCT_NAME).color(self.palette.ink));
+            ui.label(RichText::new(semantics::TAGLINE).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Add folder").clicked() {
+                if ui.button(semantics::ADD_FOLDER).clicked() {
                     self.status = match rfd::FileDialog::new()
                         .set_title("Add a directory entry to Renamewright")
                         .pick_folder()
@@ -183,7 +773,7 @@ impl NativeSpikeApp {
                         None => "Directory selection cancelled".to_owned(),
                     };
                 }
-                if ui.button("Add files").clicked() {
+                if ui.button(semantics::ADD_FILES).clicked() {
                     self.status = match rfd::FileDialog::new()
                         .set_title("Add files to Renamewright")
                         .pick_files()
@@ -199,11 +789,18 @@ impl NativeSpikeApp {
     }
 
     fn show_rule_rail(&mut self, ui: &mut egui::Ui) {
-        ui.heading(RichText::new("Rules").color(self.palette.ink));
-        ui.label(RichText::new("Applied in order").color(self.palette.ink_soft));
+        ui.heading(RichText::new(semantics::RULES_HEADING).color(self.palette.ink));
+        ui.label(RichText::new(semantics::RULES_ORDER_HELP).color(self.palette.ink_soft));
         ui.add_space(8.0);
 
-        for (index, label) in ["Prefix", "Sequence", "Extension"].iter().enumerate() {
+        for (index, label) in [
+            semantics::RULE_PREFIX,
+            semantics::RULE_SEQUENCE,
+            semantics::RULE_EXTENSION,
+        ]
+        .iter()
+        .enumerate()
+        {
             let selected = self.selected_rule == index;
             if ui.selectable_label(selected, *label).clicked() {
                 self.selected_rule = index;
@@ -213,23 +810,24 @@ impl NativeSpikeApp {
         ui.add_space(16.0);
         ui.separator();
         ui.add_space(12.0);
-        ui.label(
-            RichText::new("Prefix text")
+        let prefix_label = ui.label(
+            RichText::new(semantics::PREFIX_LABEL)
                 .strong()
                 .color(self.palette.ink),
         );
         ui.add(
             egui::TextEdit::singleline(&mut self.prefix)
                 .id_salt("rule.prefix.value")
-                .hint_text("Prefix"),
-        );
-        ui.label(RichText::new("한글 IME 입력 확인").color(self.palette.ink_soft));
+                .hint_text(semantics::RULE_PREFIX),
+        )
+        .labelled_by(prefix_label.id);
+        ui.label(RichText::new(semantics::HANGUL_IME_HELP).color(self.palette.ink_soft));
     }
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
         let visible = self.visible_indices();
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Preview").color(self.palette.ink));
+            ui.heading(RichText::new(semantics::PREVIEW_HEADING).color(self.palette.ink));
             ui.label(
                 RichText::new(format!("{} shown", visible.len())).color(self.palette.ink_soft),
             );
@@ -245,11 +843,13 @@ impl NativeSpikeApp {
                 }
             }
             ui.separator();
+            let source_query_label = ui.label(semantics::SOURCE_QUERY_LABEL);
             ui.add(
                 egui::TextEdit::singleline(&mut self.source_query)
                     .id_salt("preview.source-query")
-                    .hint_text("Filter names"),
-            );
+                    .hint_text("Name contains"),
+            )
+            .labelled_by(source_query_label.id);
         });
         ui.add_space(8.0);
 
@@ -304,14 +904,14 @@ impl NativeSpikeApp {
             ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let apply_text = if self.palette.high_contrast {
-                    RichText::new("Apply").color(self.palette.disabled)
+                    RichText::new(semantics::APPLY).color(self.palette.disabled)
                 } else {
-                    RichText::new("Apply")
+                    RichText::new(semantics::APPLY)
                 };
                 ui.add_enabled(false, egui::Button::new(apply_text))
                     .on_disabled_hover_text("The native spike never mutates the filesystem");
                 ui.label(
-                    RichText::new("Apply locked")
+                    RichText::new(semantics::APPLY_LOCKED)
                         .color(self.palette.blocked)
                         .strong(),
                 );
@@ -340,7 +940,7 @@ impl NativeSpikeApp {
                 .show(ui, |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            RichText::new("AUTOMATION TEST MODE")
+                            RichText::new(semantics::AUTOMATION_BANNER)
                                 .color(self.palette.accent_text)
                                 .strong(),
                         );
@@ -359,7 +959,7 @@ impl NativeSpikeApp {
                 .show(ui, |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            RichText::new("Windows high contrast palette active")
+                            RichText::new(semantics::HIGH_CONTRAST_ACTIVE)
                                 .color(self.palette.ink)
                                 .strong(),
                         );
@@ -490,11 +1090,22 @@ pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "automation")]
+    use std::error::Error;
+    #[cfg(feature = "automation")]
+    use std::fs;
+    #[cfg(feature = "automation")]
+    use std::path::Path;
+
     use eframe::egui;
     use egui_kittest::Harness;
     use kittest::{NodeT as _, Queryable as _};
 
-    use super::{NativePalette, NativeSpikeApp, install_theme};
+    #[cfg(feature = "automation")]
+    use super::automation::{
+        AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
+    };
+    use super::{NativePalette, NativeSpikeApp, install_theme, semantics};
 
     #[test]
     fn accesskit_exposes_primary_workbench_controls() {
@@ -502,11 +1113,33 @@ mod tests {
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), NativeSpikeApp::new(false));
 
-        harness.get_by_label("Add files");
-        harness.get_by_label("Add folder");
-        harness.get_by_label("Prefix text");
-        harness.get_by_label("한글 IME 입력 확인");
-        let apply = harness.get_by_label("Apply");
+        let add_files = harness.get_by_label(semantics::ADD_FILES);
+        let add_folder = harness.get_by_label(semantics::ADD_FOLDER);
+        let prefix = harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, semantics::PREFIX_LABEL);
+        harness.get_by_label(semantics::HANGUL_IME_HELP);
+        let source_query = harness.get_by_role_and_label(
+            egui::accesskit::Role::TextInput,
+            semantics::SOURCE_QUERY_LABEL,
+        );
+        let apply = harness.get_by_label(semantics::APPLY);
+        assert_eq!(
+            add_files.accesskit_node().role(),
+            egui::accesskit::Role::Button
+        );
+        assert_eq!(
+            add_folder.accesskit_node().role(),
+            egui::accesskit::Role::Button
+        );
+        assert_eq!(
+            prefix.accesskit_node().role(),
+            egui::accesskit::Role::TextInput
+        );
+        assert_eq!(
+            source_query.accesskit_node().role(),
+            egui::accesskit::Role::TextInput
+        );
+        assert_eq!(apply.accesskit_node().role(), egui::accesskit::Role::Button);
         assert!(apply.accesskit_node().is_disabled());
     }
 
@@ -516,7 +1149,7 @@ mod tests {
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), NativeSpikeApp::new(false));
 
-        harness.get_by_label("Blocked").click();
+        harness.get_by_label(semantics::FILTER_BLOCKED).click();
         harness.run_ok();
         harness.get_by_label("10 shown");
     }
@@ -538,8 +1171,8 @@ mod tests {
             );
 
         assert!(palette.is_high_contrast());
-        harness.get_by_label("Windows high contrast palette active");
-        let apply = harness.get_by_label("Apply");
+        harness.get_by_label(semantics::HIGH_CONTRAST_ACTIVE);
+        let apply = harness.get_by_label(semantics::APPLY);
         assert!(apply.accesskit_node().is_disabled());
     }
 
@@ -577,7 +1210,7 @@ mod tests {
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), NativeSpikeApp::new(true));
 
-        harness.get_by_label("AUTOMATION TEST MODE");
+        harness.get_by_label(semantics::AUTOMATION_BANNER);
     }
 
     #[test]
@@ -589,5 +1222,99 @@ mod tests {
         assert!(harness.query_by_label("IMG_00000.jpg").is_some());
         assert!(harness.query_by_label("IMG_09999.jpg").is_none());
         assert!(harness.query_all_by(|_| true).count() < 500);
+    }
+
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_root_is_exclusive_and_prepares_isolated_state() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = AutomationRoot::open(directory.path())?;
+
+        assert_eq!(root.root(), fs::canonicalize(directory.path())?);
+        assert!(root.state_root().is_dir());
+        assert!(root.journal_root().is_dir());
+        let Err(error) = AutomationRoot::open(directory.path()) else {
+            return Err("a concurrent automation session acquired the same root".into());
+        };
+        assert_eq!(error.kind(), AutomationRootErrorKind::ConcurrentSession);
+        Ok(())
+    }
+
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_fixture_reads_are_relative_and_bounded() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let fixture_directory = directory.path().join("fixtures").join("nested");
+        fs::create_dir_all(&fixture_directory)?;
+        let fixture_json = br#"{"schemaVersion":1,"prefix":"fixture_","filter":"blocked"}"#;
+        fs::write(fixture_directory.join("fixture.json"), fixture_json)?;
+        let oversized = fixture_directory.join("oversized.json");
+        fs::File::create(&oversized)?.set_len(MAX_AUTOMATION_FIXTURE_BYTES + 1)?;
+        let root = AutomationRoot::open(directory.path())?;
+
+        assert_eq!(
+            root.read_fixture(Path::new("nested/fixture.json"))?,
+            fixture_json
+        );
+        let fixture = root.load_fixture(Path::new("nested/fixture.json"))?;
+        assert_eq!(fixture.prefix(), Some("fixture_"));
+        assert_eq!(
+            fixture.filter(),
+            Some(super::automation::AutomationFilter::Blocked)
+        );
+        for rejected in [Path::new("../fixture.json"), directory.path()] {
+            let Err(error) = root.read_fixture(rejected) else {
+                return Err("an invalid automation fixture path was accepted".into());
+            };
+            assert_eq!(error.kind(), AutomationRootErrorKind::InvalidRelativePath);
+        }
+        let Err(error) = root.read_fixture(Path::new("nested/oversized.json")) else {
+            return Err("an oversized automation fixture was accepted".into());
+        };
+        assert_eq!(error.kind(), AutomationRootErrorKind::FixtureTooLarge);
+        Ok(())
+    }
+
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_fixture_initializes_a_deterministic_ui_state() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::create_dir(directory.path().join("fixtures"))?;
+        fs::write(
+            directory.path().join("fixtures/session.json"),
+            br#"{"schemaVersion":1,"prefix":"fixture_","filter":"blocked"}"#,
+        )?;
+        let root = AutomationRoot::open(directory.path())?;
+        let fixture = root.load_fixture(Path::new("session.json"))?;
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                NativeSpikeApp::new_automated(NativePalette::default(), root, Some(&fixture)),
+            );
+
+        harness.get_by_label("Automation fixture loaded");
+        harness.get_by_label("10 shown");
+        harness.get_by_label("fixture_IMG_00997.jpg");
+        Ok(())
+    }
+
+    #[cfg(all(feature = "automation", unix))]
+    #[test]
+    fn automation_fixture_rejects_symlink_escape() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        fs::write(outside.path().join("secret.json"), b"secret")?;
+        fs::create_dir(directory.path().join("fixtures"))?;
+        symlink(outside.path(), directory.path().join("fixtures/escape"))?;
+        let root = AutomationRoot::open(directory.path())?;
+
+        let Err(error) = root.read_fixture(Path::new("escape/secret.json")) else {
+            return Err("a symlink escaped the automation root".into());
+        };
+        assert_eq!(error.kind(), AutomationRootErrorKind::ReparsePointRejected);
+        Ok(())
     }
 }
