@@ -109,6 +109,9 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain("-Title 'Add files to Renamewright'");
   expect(interactive).toContain("-Title 'Add a directory entry to Renamewright'");
   expect(interactive).toContain('GetDpiForWindow');
+  expect(interactive).toContain('SetForegroundWindow');
+  expect(interactive).toContain('Save-WindowScreenshot');
+  expect(interactive).toContain('GetWindowRect');
   expect(interactive).toContain("status = 'partial'");
   expect(interactive).toContain('nativeDragDropExercised = $false');
   expect(interactive).toContain('focusVisibilityReview = $true');
