@@ -176,6 +176,11 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('tenThousandEntryFilterWithinBudget = $true');
   expect(interactive).toContain('GetDpiForWindow');
   expect(interactive).toContain('SetForegroundWindow');
+  expect(interactive).toContain('GetGUIThreadInfo');
+  expect(interactive).toContain('Set-And-VerifySourceBoundFocus');
+  expect(interactive).toContain('$targetProcessId -ne $OwnerProcessId');
+  expect(interactive).toContain('sourceBoundGuiThreadFocus = $true');
+  expect(matrixMerger).toContain("'sourceBoundGuiThreadFocus'");
   expect(interactive).toContain('Save-WindowScreenshot');
   expect(interactive).toContain('PrintWindow');
   expect(interactive).toContain('GetWindowRect');

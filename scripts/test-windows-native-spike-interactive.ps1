@@ -51,6 +51,20 @@ public struct RenamewrightWindowRect
     public int Bottom;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+public struct RenamewrightGuiThreadInfo
+{
+    public int cbSize;
+    public uint flags;
+    public IntPtr hwndActive;
+    public IntPtr hwndFocus;
+    public IntPtr hwndCapture;
+    public IntPtr hwndMenuOwner;
+    public IntPtr hwndMoveSize;
+    public IntPtr hwndCaret;
+    public RenamewrightWindowRect rcCaret;
+}
+
 public static class RenamewrightAcceptanceNativeMethods
 {
     public static readonly IntPtr PerMonitorAwareV2 = new IntPtr(-4);
@@ -77,6 +91,13 @@ public static class RenamewrightAcceptanceNativeMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetGUIThreadInfo(
+        uint threadId,
+        ref RenamewrightGuiThreadInfo info
+    );
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -153,6 +174,68 @@ function Find-Element {
     }
   }
   throw "Windows UI Automation did not expose the expected control named '$Name'."
+}
+
+function Set-And-VerifySourceBoundFocus {
+  param(
+    [Parameter(Mandatory = $true)]
+    [System.Windows.Automation.AutomationElement]$Element,
+    [Parameter(Mandatory = $true)] [IntPtr]$Window,
+    [Parameter(Mandatory = $true)] [uint32]$OwnerProcessId,
+    [Parameter(Mandatory = $true)] [string]$Context
+  )
+
+  # Windows can reject SetForegroundWindow for a process launched through WSL
+  # even when UI Automation assigns focus to the correct interactive GUI thread.
+  # Accept that focus only after Win32 proves the active and focused HWND are the
+  # exact source-bound application window.
+  [void][RenamewrightAcceptanceNativeMethods]::SetForegroundWindow($Window)
+  $Element.SetFocus()
+  Start-Sleep -Milliseconds 300
+  if (-not $Element.Current.HasKeyboardFocus) {
+    throw "Windows UI Automation could not assign keyboard focus to $Context."
+  }
+
+  [uint32]$windowProcessId = 0
+  $windowThreadId = [RenamewrightAcceptanceNativeMethods]::GetWindowThreadProcessId(
+    $Window,
+    [ref]$windowProcessId
+  )
+  if ($windowThreadId -eq 0 -or $windowProcessId -ne $OwnerProcessId) {
+    throw "$Context was not owned by the source-bound test process."
+  }
+
+  $guiThreadInfo = New-Object RenamewrightGuiThreadInfo
+  $guiThreadInfo.cbSize = [Runtime.InteropServices.Marshal]::SizeOf(
+    [type][RenamewrightGuiThreadInfo]
+  )
+  if (-not [RenamewrightAcceptanceNativeMethods]::GetGUIThreadInfo(
+    $windowThreadId,
+    [ref]$guiThreadInfo
+  )) {
+    $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    throw "Windows could not inspect the source-bound GUI thread for $Context ($errorCode)."
+  }
+
+  foreach ($target in @(
+    [ordered]@{ name = 'active'; window = $guiThreadInfo.hwndActive },
+    [ordered]@{ name = 'focused'; window = $guiThreadInfo.hwndFocus }
+  )) {
+    [uint32]$targetProcessId = 0
+    if (
+      $target.window -eq [IntPtr]::Zero -or
+      $target.window -ne $Window -or
+      [RenamewrightAcceptanceNativeMethods]::GetWindowThreadProcessId(
+        $target.window,
+        [ref]$targetProcessId
+      ) -eq 0 -or
+      $targetProcessId -ne $OwnerProcessId
+    ) {
+      throw "The $($target.name) GUI target for $Context was not the source-bound window."
+    }
+  }
+
+  return $windowThreadId
 }
 
 function Wait-ForExplorerDropStatus {
@@ -434,33 +517,22 @@ try {
     -Elements $elements `
     -Name 'Changed' `
     -ControlType ([System.Windows.Automation.ControlType]::Button)
-  if (-not [RenamewrightAcceptanceNativeMethods]::SetForegroundWindow($windowHandle)) {
-    throw 'Windows could not activate the source-bound native spike window.'
-  }
-  $changedButton.SetFocus()
-  Start-Sleep -Milliseconds 300
-  if (-not $changedButton.Current.HasKeyboardFocus) {
-    throw 'Windows UI Automation could not assign keyboard focus to Changed.'
-  }
+  Set-And-VerifySourceBoundFocus `
+    -Element $changedButton `
+    -Window $windowHandle `
+    -OwnerProcessId $application.Id `
+    -Context 'Changed' | Out-Null
   Save-WindowScreenshot -Window $windowHandle -Path $focusScreenshotPath
 
   $prefixEdit = Find-Element `
     -Elements $elements `
     -Name 'Prefix text' `
     -ControlType ([System.Windows.Automation.ControlType]::Edit)
-  $prefixEdit.SetFocus()
-  Start-Sleep -Milliseconds 200
-  if (-not $prefixEdit.Current.HasKeyboardFocus) {
-    throw 'Windows UI Automation could not assign keyboard focus to the prefix editor.'
-  }
-  [uint32]$windowProcessId = 0
-  $windowThreadId = [RenamewrightAcceptanceNativeMethods]::GetWindowThreadProcessId(
-    $windowHandle,
-    [ref]$windowProcessId
-  )
-  if ($windowProcessId -ne $application.Id) {
-    throw 'The IME target window was not owned by the source-bound test process.'
-  }
+  $windowThreadId = Set-And-VerifySourceBoundFocus `
+    -Element $prefixEdit `
+    -Window $windowHandle `
+    -OwnerProcessId $application.Id `
+    -Context 'the prefix editor'
   $originalKeyboardLayout = [RenamewrightAcceptanceNativeMethods]::GetKeyboardLayout($windowThreadId)
   $koreanKeyboardLayout = [RenamewrightAcceptanceNativeMethods]::LoadKeyboardLayout('00000412', 1)
   if ($koreanKeyboardLayout -eq [IntPtr]::Zero) {
@@ -537,9 +609,11 @@ try {
   $nativeDragDropExercised = $false
   $nativeDragDropStatus = ''
   if ($RequireExplorerDragDrop) {
-    if (-not [RenamewrightAcceptanceNativeMethods]::SetForegroundWindow($windowHandle)) {
-      throw 'Windows could not activate the native spike for the Explorer drag/drop check.'
-    }
+    Set-And-VerifySourceBoundFocus `
+      -Element $changedButton `
+      -Window $windowHandle `
+      -OwnerProcessId $application.Id `
+      -Context 'the Explorer drag/drop target' | Out-Null
     Write-Host (
       'Drag one or more disposable files from the current-session Explorer ' +
       "window into Renamewright within $ExplorerDragDropTimeoutSeconds seconds."
@@ -599,6 +673,7 @@ try {
       applyDisabled = $true
       virtualizedScrollBarExposed = $true
       changedControlReceivedKeyboardFocus = $true
+      sourceBoundGuiThreadFocus = $true
       focusScreenshotCaptured = $true
       koreanImeComposition = $true
       nativeFileDialogOpened = $true

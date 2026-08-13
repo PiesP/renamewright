@@ -19,6 +19,7 @@ $requiredRunChecks = @(
   'applyDisabled',
   'virtualizedScrollBarExposed',
   'changedControlReceivedKeyboardFocus',
+  'sourceBoundGuiThreadFocus',
   'focusScreenshotCaptured',
   'koreanImeComposition',
   'nativeFileDialogOpened',
