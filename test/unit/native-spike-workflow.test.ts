@@ -124,6 +124,10 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain("$EvidenceLabel -cnotmatch '^[a-z0-9][a-z0-9-]{0,47}$'");
   expect(interactive).toContain('$ExpectedDpiPercent -ne 0');
   expect(interactive).toContain('$RequireHighContrast -and -not $highContrastObserved');
+  expect(interactive).toContain("'Windows high contrast palette active'");
+  expect(interactive).toContain('$highContrastPaletteActive -ne [bool]$highContrastObserved');
+  expect(interactive).toContain('highContrastPaletteMatchesSystem = $true');
+  expect(interactive).toContain('visualReviewConfirmed = [bool]$ConfirmVisualReview');
   expect(interactive).toContain('Wait-ForExplorerDropStatus');
   expect(interactive).toContain('$RequireExplorerDragDrop');
   expect(interactive).toContain('disposable files or folders');
@@ -147,7 +151,7 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('GetWindowRect');
   expect(interactive).toContain("status = 'partial'");
   expect(interactive).toContain('nativeDragDropExercised = $false');
-  expect(interactive).toContain('focusVisibilityReview = $true');
+  expect(interactive).toContain('focusVisibilityReview = (-not [bool]$ConfirmVisualReview)');
   expect(interactive).toContain('Update-ArtifactChecksums');
   expect(interactive).not.toContain('Invoke-Expression');
   expect(interactive).not.toContain('DownloadString');
@@ -157,7 +161,10 @@ test('merges only intentional source-bound Windows acceptance configurations', (
   expect(matrixMerger).toContain('$requiredDpiPercent = @(100, 125, 150, 200, 250)');
   expect(matrixMerger).toContain("'windows-interactive-evidence*.json'");
   expect(matrixMerger).toContain('$expectedDpiPercent -eq $dpiPercent');
-  expect(matrixMerger).toContain('$highContrastRequired -and $highContrastObserved');
+  expect(matrixMerger).toContain('$highContrastRequired -and');
+  expect(matrixMerger).toContain('$highContrastObserved -and');
+  expect(matrixMerger).toContain('$highContrastPaletteActive');
+  expect(matrixMerger).toContain("'visualReviewConfirmed'");
   expect(matrixMerger).toContain('$explorerDragDropRequired -and');
   expect(matrixMerger).toContain("native shell$'");
   expect(matrixMerger).toContain('Assert-Screenshot');

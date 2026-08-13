@@ -8,6 +8,7 @@ param(
   [int]$ExpectedDpiPercent = 0,
   [switch]$RequireHighContrast,
   [switch]$RequireExplorerDragDrop,
+  [switch]$ConfirmVisualReview,
   [ValidateRange(5, 300)] [int]$ExplorerDragDropTimeoutSeconds = 60
 )
 
@@ -448,6 +449,17 @@ try {
   if ($RequireHighContrast -and -not $highContrastObserved) {
     throw 'Windows high contrast was required but was not active for the native spike run.'
   }
+  $elements = Get-Descendants -Root $applicationRoot
+  $highContrastPaletteActive = $false
+  foreach ($element in $elements) {
+    if ($element.Current.Name -ceq 'Windows high contrast palette active') {
+      $highContrastPaletteActive = $true
+      break
+    }
+  }
+  if ($highContrastPaletteActive -ne [bool]$highContrastObserved) {
+    throw 'The native spike high-contrast palette did not match the observed Windows state.'
+  }
 
   $nativeDragDropExercised = $false
   $nativeDragDropStatus = ''
@@ -518,6 +530,9 @@ try {
       observedDpiSupported = $true
       tenThousandEntryScrollWithinBudget = $true
       tenThousandEntryFilterWithinBudget = $true
+      visualReviewConfirmed = [bool]$ConfirmVisualReview
+      highContrastPaletteMatchesSystem = $true
+      highContrastPaletteActive = $highContrastPaletteActive
       highContrastModeExercised = [bool]$highContrastObserved
       nativeDragDropExercised = $nativeDragDropExercised
       fullDpiMatrixExercised = ($remainingDpi.Count -eq 0)
@@ -530,6 +545,7 @@ try {
       windowDpi = $dpi
       windowDpiPercent = $dpiPercent
       highContrastObserved = [bool]$highContrastObserved
+      highContrastPaletteActive = $highContrastPaletteActive
       nativeDragDropStatus = $nativeDragDropStatus
       scrollMilliseconds = $scrollMilliseconds
       filterMilliseconds = $filterMilliseconds
@@ -547,13 +563,14 @@ try {
       expectedDpiPercent = $ExpectedDpiPercent
       requireHighContrast = [bool]$RequireHighContrast
       requireExplorerDragDrop = [bool]$RequireExplorerDragDrop
+      confirmVisualReview = [bool]$ConfirmVisualReview
     }
     budgets = $performanceBudgets
     remaining = [ordered]@{
       dpiPercent = $remainingDpi
       highContrast = (-not [bool]$highContrastObserved)
       nativeDragDrop = (-not $nativeDragDropExercised)
-      focusVisibilityReview = $true
+      focusVisibilityReview = (-not [bool]$ConfirmVisualReview)
     }
   }
   $evidence | ConvertTo-Json -Depth 8 |
