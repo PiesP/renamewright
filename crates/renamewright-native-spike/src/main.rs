@@ -4,7 +4,27 @@ use std::fs;
 use std::path::Path;
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
-use renamewright_native_spike::{NativeSpikeApp, install_theme};
+use renamewright_native_spike::{NativePalette, NativeSpikeApp, install_theme};
+
+#[cfg(windows)]
+fn native_palette() -> Result<NativePalette, std::io::Error> {
+    renamewright_windows_native::high_contrast_palette().map(|palette| {
+        palette.map_or_else(NativePalette::default, |palette| {
+            NativePalette::high_contrast(
+                palette.window,
+                palette.window_text,
+                palette.highlight,
+                palette.highlight_text,
+                palette.gray_text,
+            )
+        })
+    })
+}
+
+#[cfg(not(windows))]
+fn native_palette() -> Result<NativePalette, std::io::Error> {
+    Ok(NativePalette::default())
+}
 
 fn install_korean_font(ctx: &egui::Context) -> Option<String> {
     const CANDIDATES: [&str; 4] = [
@@ -74,7 +94,9 @@ fn main() -> eframe::Result {
         "Renamewright native Rust spike",
         options,
         Box::new(move |creation_context| {
-            install_theme(&creation_context.egui_ctx);
+            let palette = native_palette()
+                .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
+            install_theme(&creation_context.egui_ctx, palette);
             let font = install_korean_font(&creation_context.egui_ctx);
             if let Some(font) = font {
                 eprintln!("loaded Korean fallback font: {font}");
@@ -87,7 +109,10 @@ fn main() -> eframe::Result {
                     |error| -> Box<dyn std::error::Error + Send + Sync> { error.into() },
                 )?;
             }
-            Ok(Box::new(NativeSpikeApp::new(automation_mode)))
+            Ok(Box::new(NativeSpikeApp::new_with_palette(
+                automation_mode,
+                palette,
+            )))
         }),
     )
 }

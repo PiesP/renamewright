@@ -28,6 +28,9 @@ egui_inspection = { version = "0.35.0", optional = true, features = ["plugin"] }
 pico-args = { version = "0.5.0", optional = true }
 rfd = "0.17.2"
 
+[target.'cfg(windows)'.dependencies]
+renamewright-windows-native = { path = "../renamewright-windows-native" }
+
 [dev-dependencies]
 egui_kittest = "0.35.0"
 kittest = "0.4.0"
