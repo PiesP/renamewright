@@ -50,8 +50,12 @@ fn is_reserved(name: &str) -> bool {
 }
 
 fn numbered_device(name: &str, prefix: &str) -> bool {
-    name.strip_prefix(prefix)
-        .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+    name.strip_prefix(prefix).is_some_and(|suffix| {
+        matches!(
+            suffix,
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -64,6 +68,9 @@ mod tests {
     fn device_names_are_reserved_with_extensions() {
         assert!(is_reserved("con.txt"));
         assert!(is_reserved("LPT9.log"));
+        assert!(is_reserved("com¹.txt"));
+        assert!(is_reserved("LPT².log"));
+        assert!(is_reserved("COM³"));
         assert!(!is_reserved("LPT10.log"));
     }
 

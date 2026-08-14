@@ -2105,7 +2105,8 @@ impl RenamewrightApp {
         let application = Arc::new(ApplicationService::default());
         let journal_status = journal_root
             .as_ref()
-            .and_then(|root| application.initialize(root).err());
+            .and_then(|root| application.initialize(root).err())
+            .map(|error| error.to_string());
         let ledger = if journal_status.is_none() {
             application.ledger_snapshot().unwrap_or_default()
         } else {
@@ -2527,7 +2528,7 @@ impl RenamewrightApp {
                 }
                 self.ledger = ledger;
             }
-            Err(error) => self.status = error,
+            Err(error) => self.status = error.to_string(),
         }
     }
 
@@ -2543,7 +2544,7 @@ impl RenamewrightApp {
                 self.recovery_inspection = Some(inspection);
                 self.undo_inspection = None;
             }
-            Err(error) => self.status = error,
+            Err(error) => self.status = error.to_string(),
         }
     }
 
@@ -3946,7 +3947,7 @@ impl RenamewrightApp {
                     Locale::Korean => format!("계획 {extension}을 내보냈습니다"),
                 };
             }
-            Err(error) => self.status = error,
+            Err(error) => self.status = error.to_string(),
         }
     }
 

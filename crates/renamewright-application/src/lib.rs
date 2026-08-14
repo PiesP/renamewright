@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
+use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,47 @@ pub struct ApplicationService {
     ledger: Mutex<RenameLedger>,
     journal_root: Mutex<Option<PathBuf>>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplicationServiceErrorKind {
+    JournalPreparationFailed,
+    JournalResolutionFailed,
+    LedgerLoadFailed,
+    PlanSequenceExhausted,
+    StateUnavailable,
+    LedgerRefreshFailed,
+    RecoveryInspectionFailed,
+    PlanInspectionFailed,
+    PlanExportFailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationServiceError {
+    kind: ApplicationServiceErrorKind,
+    message: String,
+}
+
+impl ApplicationServiceError {
+    fn new(kind: ApplicationServiceErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ApplicationServiceErrorKind {
+        self.kind
+    }
+}
+
+impl Display for ApplicationServiceError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApplicationServiceError {}
 
 #[derive(Debug, Default)]
 struct RecoveryControl {
@@ -1166,35 +1208,55 @@ impl ApplicationService {
         prefix_rule_request(prefix)
     }
 
-    pub fn initialize(&self, journal_root: &Path) -> Result<(), String> {
-        std::fs::create_dir_all(journal_root)
-            .map_err(|_| "the journal directory could not be prepared".to_owned())?;
-        let journal_root = journal_root
-            .canonicalize()
-            .map_err(|_| "the journal directory could not be resolved".to_owned())?;
-        let ledger = RenameLedger::discover(&journal_root)
-            .map_err(|_| "the rename ledger could not be loaded".to_owned())?;
+    pub fn initialize(&self, journal_root: &Path) -> Result<(), ApplicationServiceError> {
+        std::fs::create_dir_all(journal_root).map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::JournalPreparationFailed,
+                "the journal directory could not be prepared",
+            )
+        })?;
+        let journal_root = journal_root.canonicalize().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::JournalResolutionFailed,
+                "the journal directory could not be resolved",
+            )
+        })?;
+        let ledger = RenameLedger::discover(&journal_root).map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::LedgerLoadFailed,
+                "the rename ledger could not be loaded",
+            )
+        })?;
         let latest_plan_id = ledger
             .entries()
             .filter_map(LedgerEntry::plan_id)
             .map(PlanId::value)
             .max()
             .unwrap_or(0);
-        let next_plan_id = latest_plan_id
-            .checked_add(1)
-            .ok_or_else(|| "the plan sequence is exhausted".to_owned())?;
-        *self
-            .next_plan_id
-            .lock()
-            .map_err(|_| "the plan sequence is unavailable".to_owned())? = next_plan_id;
-        *self
-            .ledger
-            .lock()
-            .map_err(|_| "the rename ledger is unavailable".to_owned())? = ledger;
-        *self
-            .journal_root
-            .lock()
-            .map_err(|_| "the journal location is unavailable".to_owned())? = Some(journal_root);
+        let next_plan_id = latest_plan_id.checked_add(1).ok_or_else(|| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::PlanSequenceExhausted,
+                "the plan sequence is exhausted",
+            )
+        })?;
+        *self.next_plan_id.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the plan sequence is unavailable",
+            )
+        })? = next_plan_id;
+        *self.ledger.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the rename ledger is unavailable",
+            )
+        })? = ledger;
+        *self.journal_root.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the journal location is unavailable",
+            )
+        })? = Some(journal_root);
         Ok(())
     }
 
@@ -1237,9 +1299,8 @@ impl ApplicationService {
         admit_dropped_sources(self, paths);
     }
 
-    pub fn preview_prefix(&self, prefix: String) -> Result<PlanDto, String> {
+    pub fn preview_prefix(&self, prefix: String) -> Result<PlanDto, PlanningCommandErrorDto> {
         self.preview_rules(prefix_rule_request(prefix))
-            .map_err(|error| error.code().to_owned())
     }
 
     pub fn preview_rules(
@@ -1253,11 +1314,16 @@ impl ApplicationService {
         plan_from_registry(&mut registry, request, self)
     }
 
-    pub fn poll_source_changes(&self, since: u64) -> Result<Option<SourceChangeDto>, String> {
-        let changes = self
-            .source_changes
-            .lock()
-            .map_err(|_| "the source change tracker is unavailable".to_owned())?;
+    pub fn poll_source_changes(
+        &self,
+        since: u64,
+    ) -> Result<Option<SourceChangeDto>, ApplicationServiceError> {
+        let changes = self.source_changes.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the source change tracker is unavailable",
+            )
+        })?;
         if changes.revision <= since {
             return Ok(None);
         }
@@ -1267,22 +1333,29 @@ impl ApplicationService {
         }))
     }
 
-    pub fn list_ledger(&self) -> Result<Vec<LedgerEntryDto>, String> {
-        let mut ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| "the rename ledger is unavailable".to_owned())?;
-        ledger
-            .refresh()
-            .map_err(|_| "the rename ledger could not be refreshed".to_owned())?;
+    pub fn list_ledger(&self) -> Result<Vec<LedgerEntryDto>, ApplicationServiceError> {
+        let mut ledger = self.ledger.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the rename ledger is unavailable",
+            )
+        })?;
+        ledger.refresh().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::LedgerRefreshFailed,
+                "the rename ledger could not be refreshed",
+            )
+        })?;
         Ok(ledger.entries().map(LedgerEntryDto::from).collect())
     }
 
-    pub fn ledger_snapshot(&self) -> Result<Vec<LedgerEntryDto>, String> {
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| "the rename ledger is unavailable".to_owned())?;
+    pub fn ledger_snapshot(&self) -> Result<Vec<LedgerEntryDto>, ApplicationServiceError> {
+        let ledger = self.ledger.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the rename ledger is unavailable",
+            )
+        })?;
         Ok(ledger.entries().map(LedgerEntryDto::from).collect())
     }
 
@@ -1290,20 +1363,30 @@ impl ApplicationService {
         &self,
         ledger_id: u64,
         filesystem: &F,
-    ) -> Result<RecoveryInspectionDto, String>
+    ) -> Result<RecoveryInspectionDto, ApplicationServiceError>
     where
         F: ExecutionFileSystem + ?Sized,
     {
-        let mut ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| "the rename ledger is unavailable".to_owned())?;
-        ledger
-            .refresh()
-            .map_err(|_| "the rename ledger could not be refreshed".to_owned())?;
+        let mut ledger = self.ledger.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the rename ledger is unavailable",
+            )
+        })?;
+        ledger.refresh().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::LedgerRefreshFailed,
+                "the rename ledger could not be refreshed",
+            )
+        })?;
         inspect_recovery_transaction(&ledger, LedgerId::from_value(ledger_id), filesystem)
             .map(RecoveryInspectionDto::from)
-            .map_err(|_| "the recovery state could not be inspected".to_owned())
+            .map_err(|_| {
+                ApplicationServiceError::new(
+                    ApplicationServiceErrorKind::RecoveryInspectionFailed,
+                    "the recovery state could not be inspected",
+                )
+            })
     }
 
     pub fn inspect_undo<F>(
@@ -1377,30 +1460,58 @@ impl ApplicationService {
         request_confirmed_cancellation(self, confirm).map_err(RecoveryCommandErrorDto::from)
     }
 
-    pub fn inspect_plan_json(&self, plan_id: u64) -> Result<String, String> {
-        plan_document_json(plan_id, self)
+    pub fn inspect_plan_json(&self, plan_id: u64) -> Result<String, ApplicationServiceError> {
+        plan_document_json(plan_id, self).map_err(|message| {
+            ApplicationServiceError::new(ApplicationServiceErrorKind::PlanInspectionFailed, message)
+        })
     }
 
-    pub fn inspect_plan_csv(&self, plan_id: u64) -> Result<String, String> {
-        plan_document_csv(plan_id, self)
+    pub fn inspect_plan_csv(&self, plan_id: u64) -> Result<String, ApplicationServiceError> {
+        plan_document_csv(plan_id, self).map_err(|message| {
+            ApplicationServiceError::new(ApplicationServiceErrorKind::PlanInspectionFailed, message)
+        })
     }
 
-    pub fn export_plan_json(&self, plan_id: u64, path: &Path) -> Result<(), String> {
-        let latest_plan = self
-            .latest_plan
-            .lock()
-            .map_err(|_| "the latest plan is unavailable".to_owned())?;
-        let stored = current_plan(plan_id, &latest_plan)?;
-        write_new_serialized_document(path, |writer| write_plan_json(stored, writer))
+    pub fn export_plan_json(
+        &self,
+        plan_id: u64,
+        path: &Path,
+    ) -> Result<(), ApplicationServiceError> {
+        let latest_plan = self.latest_plan.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the latest plan is unavailable",
+            )
+        })?;
+        let stored = current_plan(plan_id, &latest_plan).map_err(|message| {
+            ApplicationServiceError::new(ApplicationServiceErrorKind::PlanExportFailed, message)
+        })?;
+        write_new_serialized_document(path, |writer| write_plan_json(stored, writer)).map_err(
+            |message| {
+                ApplicationServiceError::new(ApplicationServiceErrorKind::PlanExportFailed, message)
+            },
+        )
     }
 
-    pub fn export_plan_csv(&self, plan_id: u64, path: &Path) -> Result<(), String> {
-        let latest_plan = self
-            .latest_plan
-            .lock()
-            .map_err(|_| "the latest plan is unavailable".to_owned())?;
-        let stored = current_plan(plan_id, &latest_plan)?;
-        write_new_serialized_document(path, |writer| write_plan_csv(stored, writer))
+    pub fn export_plan_csv(
+        &self,
+        plan_id: u64,
+        path: &Path,
+    ) -> Result<(), ApplicationServiceError> {
+        let latest_plan = self.latest_plan.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the latest plan is unavailable",
+            )
+        })?;
+        let stored = current_plan(plan_id, &latest_plan).map_err(|message| {
+            ApplicationServiceError::new(ApplicationServiceErrorKind::PlanExportFailed, message)
+        })?;
+        write_new_serialized_document(path, |writer| write_plan_csv(stored, writer)).map_err(
+            |message| {
+                ApplicationServiceError::new(ApplicationServiceErrorKind::PlanExportFailed, message)
+            },
+        )
     }
 }
 
@@ -2619,7 +2730,7 @@ struct InspectionWriter {
 impl InspectionWriter {
     fn new() -> Self {
         Self {
-            bytes: Vec::with_capacity(MAX_PLAN_INSPECTION_BYTES),
+            bytes: Vec::new(),
             truncated: false,
         }
     }
@@ -2930,14 +3041,15 @@ mod tests {
     };
 
     use super::{
-        ApplicationService, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
-        ExtensionOperationDto, FilenamePartDto, InspectionWriter, LedgerEntryDto,
-        MAX_PLAN_INSPECTION_BYTES, MAX_PRESET_DOCUMENT_BYTES, PlanDto, PresetDocumentDto,
-        PresetDocumentError, PresetDocumentErrorKind, RULE_PIPELINE_SCHEMA_VERSION,
-        RangeOperationDto, RangeOriginDto, RulePipelineRequestDto, RuleRequestDto,
-        RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto,
-        SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto, admit_dropped_sources,
-        compile_rule_request, csv_cell, plan_document_csv, plan_document_json, plan_from_registry,
+        ApplicationService, ApplicationServiceErrorKind, CaseModeDto, CharacterClassDto,
+        CharacterClassOperationDto, ExtensionOperationDto, FilenamePartDto, InspectionWriter,
+        LedgerEntryDto, MAX_PLAN_INSPECTION_BYTES, MAX_PRESET_DOCUMENT_BYTES, PlanDto,
+        PresetDocumentDto, PresetDocumentError, PresetDocumentErrorKind,
+        RULE_PIPELINE_SCHEMA_VERSION, RangeOperationDto, RangeOriginDto, RulePipelineRequestDto,
+        RuleRequestDto, RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto,
+        SequenceScopeDto, SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto,
+        admit_dropped_sources, compile_rule_request, csv_cell, plan_document_csv,
+        plan_document_json, plan_from_registry,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -3723,9 +3835,10 @@ mod tests {
             return Err("create-new must reject reuse".into());
         };
         assert_eq!(
-            error,
+            error.to_string(),
             "the export file already exists; choose a new file name"
         );
+        assert_eq!(error.kind(), ApplicationServiceErrorKind::PlanExportFailed);
         assert_eq!(fs::read_to_string(json_export)?, expected_json);
         assert_eq!(fs::read_to_string(csv_export)?, expected_csv);
         Ok(())
@@ -3750,7 +3863,11 @@ mod tests {
             return Err("an exhausted journal plan ID must fail closed".into());
         };
 
-        assert_eq!(error, "the plan sequence is exhausted");
+        assert_eq!(error.to_string(), "the plan sequence is exhausted");
+        assert_eq!(
+            error.kind(),
+            ApplicationServiceErrorKind::PlanSequenceExhausted
+        );
         Ok(())
     }
 
