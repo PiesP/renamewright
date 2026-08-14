@@ -142,6 +142,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let automation_launch = automation_launch()?;
     #[cfg(feature = "automation")]
     let automation_mode = automation_launch.is_some();
+    #[cfg(not(feature = "automation"))]
+    let automation_mode = false;
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../resources/app-icon.png"))?;
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
@@ -150,6 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_icon(Arc::new(icon))
             .with_inner_size([1_180.0, 760.0])
             .with_min_inner_size([820.0, 560.0]),
+        persist_window: !automation_mode,
         ..Default::default()
     };
 

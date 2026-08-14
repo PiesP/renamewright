@@ -86,6 +86,16 @@ pub mod semantics {
     pub const THEME_SYSTEM: &str = "System";
     pub const THEME_LIGHT: &str = "Light";
     pub const THEME_DARK: &str = "Dark";
+    pub const ADVANCED_APPEARANCE: &str = "Advanced appearance";
+    pub const CLOSE_APPEARANCE: &str = "Close appearance settings";
+    pub const ACCENT_COLOR: &str = "Accent color";
+    pub const DENSITY: &str = "Density";
+    pub const DENSITY_STANDARD: &str = "Standard";
+    pub const DENSITY_COMPACT: &str = "Compact";
+    pub const PREVIEW_COLUMNS: &str = "Preview columns";
+    pub const SHOW_KIND: &str = "Show entry kind";
+    pub const SHOW_DIAGNOSTICS: &str = "Show all diagnostic details";
+    pub const RESET_APPEARANCE: &str = "Reset advanced appearance";
     pub const HIGH_CONTRAST_OVERRIDES_APPEARANCE: &str =
         "Windows high contrast overrides appearance colors";
     pub const DIAGNOSTIC_FILTER: &str = "Diagnostic filter";
@@ -811,9 +821,6 @@ const DARK_PAPER_SOFT: Color32 = Color32::from_rgb(34, 41, 57);
 const DARK_INK: Color32 = Color32::from_rgb(236, 239, 248);
 const DARK_INK_SOFT: Color32 = Color32::from_rgb(172, 181, 202);
 const DARK_RULE: Color32 = Color32::from_rgb(68, 78, 103);
-const DARK_ACCENT: Color32 = Color32::from_rgb(153, 174, 255);
-const DARK_ACCENT_FILL: Color32 = Color32::from_rgb(72, 99, 201);
-const DARK_ACCENT_SOFT: Color32 = Color32::from_rgb(43, 54, 88);
 const DARK_BLOCKED: Color32 = Color32::from_rgb(255, 154, 157);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,6 +830,107 @@ enum AppearanceTheme {
     System,
     Light,
     Dark,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum AccentChoice {
+    #[default]
+    Cobalt,
+    Teal,
+    Violet,
+    Amber,
+}
+
+impl AccentChoice {
+    const ALL: [Self; 4] = [Self::Cobalt, Self::Teal, Self::Violet, Self::Amber];
+
+    const fn label(self, locale: Locale) -> &'static str {
+        match self {
+            Self::Cobalt => locale.text("Cobalt", "코발트"),
+            Self::Teal => locale.text("Teal", "틸"),
+            Self::Violet => locale.text("Violet", "바이올렛"),
+            Self::Amber => locale.text("Amber", "앰버"),
+        }
+    }
+
+    const fn tokens(self, theme: egui::Theme) -> AccentTokens {
+        match (theme, self) {
+            (egui::Theme::Light, Self::Cobalt) => AccentTokens {
+                foreground: Color32::from_rgb(42, 75, 183),
+                fill: Color32::from_rgb(42, 75, 183),
+                soft: Color32::from_rgb(222, 230, 255),
+            },
+            (egui::Theme::Dark, Self::Cobalt) => AccentTokens {
+                foreground: Color32::from_rgb(153, 174, 255),
+                fill: Color32::from_rgb(72, 99, 201),
+                soft: Color32::from_rgb(43, 54, 88),
+            },
+            (egui::Theme::Light, Self::Teal) => AccentTokens {
+                foreground: Color32::from_rgb(0, 105, 99),
+                fill: Color32::from_rgb(0, 105, 99),
+                soft: Color32::from_rgb(211, 242, 238),
+            },
+            (egui::Theme::Dark, Self::Teal) => AccentTokens {
+                foreground: Color32::from_rgb(94, 214, 202),
+                fill: Color32::from_rgb(0, 111, 104),
+                soft: Color32::from_rgb(24, 67, 64),
+            },
+            (egui::Theme::Light, Self::Violet) => AccentTokens {
+                foreground: Color32::from_rgb(99, 63, 174),
+                fill: Color32::from_rgb(99, 63, 174),
+                soft: Color32::from_rgb(235, 226, 255),
+            },
+            (egui::Theme::Dark, Self::Violet) => AccentTokens {
+                foreground: Color32::from_rgb(199, 170, 255),
+                fill: Color32::from_rgb(112, 72, 181),
+                soft: Color32::from_rgb(62, 43, 88),
+            },
+            (egui::Theme::Light, Self::Amber) => AccentTokens {
+                foreground: Color32::from_rgb(137, 84, 0),
+                fill: Color32::from_rgb(137, 84, 0),
+                soft: Color32::from_rgb(255, 235, 190),
+            },
+            (egui::Theme::Dark, Self::Amber) => AccentTokens {
+                foreground: Color32::from_rgb(255, 194, 91),
+                fill: Color32::from_rgb(142, 88, 0),
+                soft: Color32::from_rgb(76, 53, 22),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AccentTokens {
+    foreground: Color32,
+    fill: Color32,
+    soft: Color32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum InterfaceDensity {
+    #[default]
+    Standard,
+    Compact,
+}
+
+impl InterfaceDensity {
+    const ALL: [Self; 2] = [Self::Standard, Self::Compact];
+
+    const fn label(self, locale: Locale) -> &'static str {
+        match self {
+            Self::Standard => locale.text(semantics::DENSITY_STANDARD, "표준"),
+            Self::Compact => locale.text(semantics::DENSITY_COMPACT, "컴팩트"),
+        }
+    }
+
+    const fn preview_row_height(self) -> f32 {
+        match self {
+            Self::Standard => PREVIEW_ROW_HEIGHT,
+            Self::Compact => 24.0,
+        }
+    }
 }
 
 impl AppearanceTheme {
@@ -858,6 +966,10 @@ impl AppearanceTheme {
 struct AppearancePreferences {
     schema_version: u8,
     theme: AppearanceTheme,
+    accent: AccentChoice,
+    density: InterfaceDensity,
+    show_kind: bool,
+    show_diagnostics: bool,
 }
 
 impl Default for AppearancePreferences {
@@ -865,6 +977,10 @@ impl Default for AppearancePreferences {
         Self {
             schema_version: 1,
             theme: AppearanceTheme::System,
+            accent: AccentChoice::Cobalt,
+            density: InterfaceDensity::Standard,
+            show_kind: true,
+            show_diagnostics: true,
         }
     }
 }
@@ -875,6 +991,12 @@ impl AppearancePreferences {
             .and_then(|storage| eframe::get_value(storage, APPEARANCE_STORAGE_KEY))
             .filter(|preferences: &Self| preferences.schema_version == 1)
             .unwrap_or_default()
+    }
+
+    fn reset_advanced(&mut self) {
+        let theme = self.theme;
+        *self = Self::default();
+        self.theme = theme;
     }
 }
 
@@ -917,7 +1039,8 @@ impl Default for NativePalette {
 
 impl NativePalette {
     #[must_use]
-    const fn for_theme(theme: egui::Theme) -> Self {
+    fn for_theme(theme: egui::Theme, accent: AccentChoice) -> Self {
+        let accent = accent.tokens(theme);
         match theme {
             egui::Theme::Light => Self {
                 paper: PAPER,
@@ -926,9 +1049,9 @@ impl NativePalette {
                 ink: INK,
                 ink_soft: INK_SOFT,
                 rule: RULE,
-                accent: ACCENT,
-                accent_fill: ACCENT,
-                accent_soft: ACCENT_SOFT,
+                accent: accent.foreground,
+                accent_fill: accent.fill,
+                accent_soft: accent.soft,
                 accent_text: Color32::WHITE,
                 blocked: BLOCKED,
                 disabled: INK_SOFT,
@@ -941,9 +1064,9 @@ impl NativePalette {
                 ink: DARK_INK,
                 ink_soft: DARK_INK_SOFT,
                 rule: DARK_RULE,
-                accent: DARK_ACCENT,
-                accent_fill: DARK_ACCENT_FILL,
-                accent_soft: DARK_ACCENT_SOFT,
+                accent: accent.foreground,
+                accent_fill: accent.fill,
+                accent_soft: accent.soft,
                 accent_text: Color32::WHITE,
                 blocked: DARK_BLOCKED,
                 disabled: DARK_INK_SOFT,
@@ -1880,6 +2003,7 @@ pub struct RenamewrightApp {
     palette: NativePalette,
     appearance: AppearancePreferences,
     appearance_applied: bool,
+    appearance_advanced_open: bool,
     #[cfg(feature = "automation")]
     automation_mode: bool,
     #[cfg(feature = "automation")]
@@ -2037,6 +2161,7 @@ impl RenamewrightApp {
             palette,
             appearance,
             appearance_applied: false,
+            appearance_advanced_open: false,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
             #[cfg(feature = "automation")]
@@ -2778,19 +2903,20 @@ impl RenamewrightApp {
         if self.native_palette.high_contrast {
             if !self.appearance_applied || self.palette != self.native_palette {
                 self.palette = self.native_palette;
-                install_theme(context, self.palette);
+                install_theme_with_density(context, self.palette, self.appearance.density);
                 self.appearance_applied = true;
             }
             return;
         }
 
         let theme = self.appearance.theme.effective(context);
-        let palette = NativePalette::for_theme(theme);
+        let palette = NativePalette::for_theme(theme, self.appearance.accent);
         if !self.appearance_applied || self.palette != palette {
             self.palette = palette;
-            install_theme(context, palette);
+            install_theme_with_density(context, palette, self.appearance.density);
             self.appearance_applied = true;
         }
+        context.options_mut(|options| options.fallback_theme = egui::Theme::Light);
         context.set_theme(self.appearance.theme.preference());
     }
 
@@ -2824,38 +2950,213 @@ impl RenamewrightApp {
                     .color(self.palette.ink),
                 );
             }
+            ui.separator();
+            if ui
+                .button(
+                    self.locale
+                        .text(semantics::ADVANCED_APPEARANCE, "고급 모양 설정"),
+                )
+                .clicked()
+            {
+                self.appearance_advanced_open = true;
+                self.ledger_open = false;
+                ui.close();
+            }
         });
         changed
     }
 
-    fn show_source_bar(&mut self, ui: &mut egui::Ui) {
-        let mut appearance_changed = false;
+    fn show_advanced_appearance(&mut self, ui: &mut egui::Ui, scroll_id: &'static str) {
         ui.horizontal(|ui| {
-            ui.heading(RichText::new(semantics::PRODUCT_NAME).color(self.palette.ink));
-            ui.label(
+            ui.heading(
                 RichText::new(
                     self.locale
-                        .text(semantics::TAGLINE, "모든 이름 변경을 계획하세요."),
+                        .text(semantics::ADVANCED_APPEARANCE, "고급 모양 설정"),
                 )
-                .color(self.palette.ink_soft),
+                .color(self.palette.ink),
             );
-            let source_count = self.plan.as_ref().map_or_else(
-                || {
-                    if self.synthetic_fixture {
-                        SAMPLE_COUNT
-                    } else {
-                        0
-                    }
-                },
-                |plan| plan.rows().len(),
-            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .button(
+                        self.locale
+                            .text(semantics::CLOSE_APPEARANCE, "모양 설정 닫기"),
+                    )
+                    .clicked()
+                {
+                    self.appearance_advanced_open = false;
+                }
+            });
+        });
+        ui.label(
+            RichText::new(self.locale.text(
+                "These settings change the workbench view, never the rename plan.",
+                "이 설정은 작업대 표시만 바꾸며 이름 변경 계획에는 영향을 주지 않습니다.",
+            ))
+            .color(self.palette.ink_soft),
+        );
+
+        ScrollArea::vertical()
+            .id_salt(scroll_id)
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.show_advanced_appearance_options(ui));
+    }
+
+    fn show_advanced_appearance_options(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(
+            RichText::new(self.locale.text(semantics::ACCENT_COLOR, "강조 색상"))
+                .strong()
+                .color(self.palette.ink),
+        );
+        ui.add_enabled_ui(!self.native_palette.high_contrast, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for accent in AccentChoice::ALL {
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.appearance.accent,
+                            accent,
+                            accent.label(self.locale),
+                        )
+                        .changed();
+                }
+            });
+        });
+        if self.native_palette.high_contrast {
             ui.label(
-                RichText::new(match self.locale {
-                    Locale::English => format!("{source_count} entries"),
-                    Locale::Korean => format!("항목 {source_count}개"),
-                })
-                .color(self.palette.ink_soft),
+                RichText::new(self.locale.text(
+                    semantics::HIGH_CONTRAST_OVERRIDES_APPEARANCE,
+                    "Windows 고대비가 모양 색상을 우선합니다",
+                ))
+                .color(self.palette.ink),
             );
+        }
+
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(self.locale.text(semantics::DENSITY, "밀도"))
+                .strong()
+                .color(self.palette.ink),
+        );
+        ui.horizontal(|ui| {
+            for density in InterfaceDensity::ALL {
+                changed |= ui
+                    .selectable_value(
+                        &mut self.appearance.density,
+                        density,
+                        density.label(self.locale),
+                    )
+                    .changed();
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(self.locale.text(semantics::PREVIEW_COLUMNS, "미리보기 열"))
+                .strong()
+                .color(self.palette.ink),
+        );
+        changed |= ui
+            .checkbox(
+                &mut self.appearance.show_kind,
+                self.locale.text(semantics::SHOW_KIND, "항목 종류 표시"),
+            )
+            .changed();
+        changed |= ui
+            .checkbox(
+                &mut self.appearance.show_diagnostics,
+                self.locale
+                    .text(semantics::SHOW_DIAGNOSTICS, "모든 진단 세부 정보 표시"),
+            )
+            .changed();
+        ui.label(
+            RichText::new(self.locale.text(
+                "Source, proposed name, status, and blocker reasons always remain visible.",
+                "원본, 변경안, 상태, 차단 사유는 항상 표시됩니다.",
+            ))
+            .color(self.palette.ink_soft),
+        );
+
+        ui.add_space(10.0);
+        egui::Frame::new()
+            .fill(self.palette.paper_raised)
+            .stroke(Stroke::new(1.0, self.palette.rule))
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(self.locale.text("Live preview", "실시간 미리보기"))
+                        .strong()
+                        .color(self.palette.ink),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("IMG_00001.jpg").color(self.palette.ink));
+                    ui.label(RichText::new("→").color(self.palette.ink_soft));
+                    ui.label(RichText::new("Trip_0001.jpg").color(self.palette.accent));
+                    ui.label(
+                        RichText::new(self.locale.text("Changed", "변경됨"))
+                            .color(self.palette.accent)
+                            .strong(),
+                    );
+                    ui.label(
+                        RichText::new(self.locale.text("Blocked", "차단됨"))
+                            .color(self.palette.blocked)
+                            .strong(),
+                    );
+                });
+            });
+
+        ui.add_space(10.0);
+        if ui
+            .button(
+                self.locale
+                    .text(semantics::RESET_APPEARANCE, "고급 모양 초기화"),
+            )
+            .clicked()
+        {
+            self.appearance.reset_advanced();
+            changed = true;
+        }
+
+        if changed {
+            self.appearance_applied = false;
+            self.apply_appearance(ui.ctx());
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn show_source_bar(&mut self, ui: &mut egui::Ui) {
+        let mut appearance_changed = false;
+        let compact = ui.available_width() < 980.0;
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new(semantics::PRODUCT_NAME).color(self.palette.ink));
+            if !compact {
+                ui.label(
+                    RichText::new(
+                        self.locale
+                            .text(semantics::TAGLINE, "모든 이름 변경을 계획하세요."),
+                    )
+                    .color(self.palette.ink_soft),
+                );
+                let source_count = self.plan.as_ref().map_or_else(
+                    || {
+                        if self.synthetic_fixture {
+                            SAMPLE_COUNT
+                        } else {
+                            0
+                        }
+                    },
+                    |plan| plan.rows().len(),
+                );
+                ui.label(
+                    RichText::new(match self.locale {
+                        Locale::English => format!("{source_count} entries"),
+                        Locale::Korean => format!("항목 {source_count}개"),
+                    })
+                    .color(self.palette.ink_soft),
+                );
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 egui::ComboBox::from_id_salt("locale")
                     .selected_text(self.locale.label())
@@ -2876,6 +3177,9 @@ impl RenamewrightApp {
                 });
                 if history.clicked() {
                     self.ledger_open = !self.ledger_open;
+                    if self.ledger_open {
+                        self.appearance_advanced_open = false;
+                    }
                 }
                 if ui
                     .button(self.locale.text(semantics::ADD_FOLDER, "폴더 자체 추가"))
@@ -3228,11 +3532,19 @@ impl RenamewrightApp {
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
         let visible = self.visible_indices();
-        let available_for_names = (ui.available_width()
-            - PREVIEW_KIND_COLUMN_WIDTH
-            - PREVIEW_STATUS_COLUMN_WIDTH
-            - 260.0)
-            .max(PREVIEW_SOURCE_COLUMN_WIDTH + PREVIEW_PROPOSED_COLUMN_WIDTH);
+        let kind_width = if self.appearance.show_kind {
+            PREVIEW_KIND_COLUMN_WIDTH
+        } else {
+            0.0
+        };
+        let diagnostic_width = if self.appearance.show_diagnostics {
+            260.0
+        } else {
+            180.0
+        };
+        let available_for_names =
+            (ui.available_width() - kind_width - PREVIEW_STATUS_COLUMN_WIDTH - diagnostic_width)
+                .max(PREVIEW_SOURCE_COLUMN_WIDTH + PREVIEW_PROPOSED_COLUMN_WIDTH);
         let source_column_width = (available_for_names * 0.45).max(PREVIEW_SOURCE_COLUMN_WIDTH);
         let proposed_column_width =
             (available_for_names - source_column_width).max(PREVIEW_PROPOSED_COLUMN_WIDTH);
@@ -3291,13 +3603,15 @@ impl RenamewrightApp {
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    preview_column_label(
-                        ui,
-                        PREVIEW_KIND_COLUMN_WIDTH,
-                        RichText::new(self.locale.text("Kind", "종류"))
-                            .strong()
-                            .color(self.palette.ink),
-                    );
+                    if self.appearance.show_kind {
+                        preview_column_label(
+                            ui,
+                            PREVIEW_KIND_COLUMN_WIDTH,
+                            RichText::new(self.locale.text("Kind", "종류"))
+                                .strong()
+                                .color(self.palette.ink),
+                        );
+                    }
                     preview_column_label(
                         ui,
                         source_column_width,
@@ -3320,9 +3634,13 @@ impl RenamewrightApp {
                             .color(self.palette.ink),
                     );
                     ui.label(
-                        RichText::new(self.locale.text("Diagnostics", "진단"))
-                            .strong()
-                            .color(self.palette.ink),
+                        RichText::new(if self.appearance.show_diagnostics {
+                            self.locale.text("Diagnostics", "진단")
+                        } else {
+                            self.locale.text("Blocker reasons", "차단 사유")
+                        })
+                        .strong()
+                        .color(self.palette.ink),
                     );
                 });
                 ui.separator();
@@ -3330,106 +3648,119 @@ impl RenamewrightApp {
                 ScrollArea::vertical()
                     .id_salt("preview.rows")
                     .auto_shrink([false, false])
-                    .show_rows(ui, PREVIEW_ROW_HEIGHT, visible.len(), |ui, row_range| {
-                        for visible_row in row_range {
-                            let index = visible[visible_row];
-                            let (
-                                source_id,
-                                entry_kind,
-                                source,
-                                proposed,
-                                status,
-                                diagnostics,
-                                blocked,
-                            ) = self.plan.as_ref().map_or_else(
-                                || {
-                                    let source = format!("IMG_{index:05}.jpg");
-                                    let proposed = format!("{}{source}", self.synthetic_prefix());
-                                    let blocked = Self::row_is_blocked(index);
-                                    let status = if blocked {
-                                        self.locale.text("Blocked", "차단됨")
-                                    } else {
-                                        self.locale.text("Changed", "변경됨")
-                                    };
-                                    (
-                                        None,
-                                        "file",
-                                        source,
-                                        proposed,
-                                        status,
-                                        if blocked {
-                                            self.locale.text("Sample conflict", "샘플 충돌")
-                                        } else {
-                                            ""
-                                        }
-                                        .to_owned(),
-                                        blocked,
-                                    )
-                                },
-                                |plan| {
-                                    let row = &plan.rows()[index];
-                                    (
-                                        Some(row.source_id()),
-                                        row.entry_kind(),
-                                        row.original_name().to_owned(),
-                                        row.proposed_name().to_owned(),
-                                        if row.status() == "blocked" {
+                    .show_rows(
+                        ui,
+                        self.appearance.density.preview_row_height(),
+                        visible.len(),
+                        |ui, row_range| {
+                            for visible_row in row_range {
+                                let index = visible[visible_row];
+                                let (
+                                    source_id,
+                                    entry_kind,
+                                    source,
+                                    proposed,
+                                    status,
+                                    diagnostics,
+                                    blocked,
+                                ) = self.plan.as_ref().map_or_else(
+                                    || {
+                                        let source = format!("IMG_{index:05}.jpg");
+                                        let proposed =
+                                            format!("{}{source}", self.synthetic_prefix());
+                                        let blocked = Self::row_is_blocked(index);
+                                        let status = if blocked {
                                             self.locale.text("Blocked", "차단됨")
-                                        } else if row.status() == "unchanged" {
-                                            self.locale.text("Unchanged", "변경 없음")
                                         } else {
                                             self.locale.text("Changed", "변경됨")
-                                        },
-                                        row.diagnostics()
-                                            .iter()
-                                            .map(|code| diagnostic_label(code, self.locale))
-                                            .collect::<Vec<_>>()
-                                            .join(", "),
-                                        row.status() == "blocked",
-                                    )
-                                },
-                            );
-                            ui.push_id(index, |ui| {
-                                ui.horizontal(|ui| {
-                                    preview_column_label(
-                                        ui,
-                                        PREVIEW_KIND_COLUMN_WIDTH,
-                                        match entry_kind {
-                                            "directory" => self.locale.text("Folder", "폴더"),
-                                            "symlink" => self.locale.text("Link", "링크"),
-                                            _ => self.locale.text("File", "파일"),
-                                        },
-                                    );
-                                    preview_column_label(ui, source_column_width, &source);
-                                    preview_column_label(ui, proposed_column_width, proposed);
-                                    let color = if blocked {
-                                        self.palette.blocked
-                                    } else {
-                                        self.palette.accent
-                                    };
-                                    preview_column_label(
-                                        ui,
-                                        PREVIEW_STATUS_COLUMN_WIDTH,
-                                        RichText::new(status).color(color).strong(),
-                                    );
-                                    ui.label(diagnostics);
-                                    if let Some(source_id) = source_id
-                                        && ui
-                                            .small_button(
-                                                if self.overrides.contains_key(&source_id) {
-                                                    self.locale.text("Edit override", "재정의 편집")
-                                                } else {
-                                                    self.locale.text("Override", "재정의")
+                                        };
+                                        (
+                                            None,
+                                            "file",
+                                            source,
+                                            proposed,
+                                            status,
+                                            if blocked {
+                                                self.locale.text("Sample conflict", "샘플 충돌")
+                                            } else {
+                                                ""
+                                            }
+                                            .to_owned(),
+                                            blocked,
+                                        )
+                                    },
+                                    |plan| {
+                                        let row = &plan.rows()[index];
+                                        (
+                                            Some(row.source_id()),
+                                            row.entry_kind(),
+                                            row.original_name().to_owned(),
+                                            row.proposed_name().to_owned(),
+                                            if row.status() == "blocked" {
+                                                self.locale.text("Blocked", "차단됨")
+                                            } else if row.status() == "unchanged" {
+                                                self.locale.text("Unchanged", "변경 없음")
+                                            } else {
+                                                self.locale.text("Changed", "변경됨")
+                                            },
+                                            row.diagnostics()
+                                                .iter()
+                                                .map(|code| diagnostic_label(code, self.locale))
+                                                .collect::<Vec<_>>()
+                                                .join(", "),
+                                            row.status() == "blocked",
+                                        )
+                                    },
+                                );
+                                ui.push_id(index, |ui| {
+                                    ui.horizontal(|ui| {
+                                        if self.appearance.show_kind {
+                                            preview_column_label(
+                                                ui,
+                                                PREVIEW_KIND_COLUMN_WIDTH,
+                                                match entry_kind {
+                                                    "directory" => {
+                                                        self.locale.text("Folder", "폴더")
+                                                    }
+                                                    "symlink" => self.locale.text("Link", "링크"),
+                                                    _ => self.locale.text("File", "파일"),
                                                 },
-                                            )
-                                            .clicked()
-                                    {
-                                        requested_override = Some((source_id, source));
-                                    }
+                                            );
+                                        }
+                                        preview_column_label(ui, source_column_width, &source);
+                                        preview_column_label(ui, proposed_column_width, proposed);
+                                        let color = if blocked {
+                                            self.palette.blocked
+                                        } else {
+                                            self.palette.accent
+                                        };
+                                        preview_column_label(
+                                            ui,
+                                            PREVIEW_STATUS_COLUMN_WIDTH,
+                                            RichText::new(status).color(color).strong(),
+                                        );
+                                        if self.appearance.show_diagnostics || blocked {
+                                            ui.label(diagnostics);
+                                        }
+                                        if let Some(source_id) = source_id
+                                            && ui
+                                                .small_button(
+                                                    if self.overrides.contains_key(&source_id) {
+                                                        self.locale
+                                                            .text("Edit override", "재정의 편집")
+                                                    } else {
+                                                        self.locale.text("Override", "재정의")
+                                                    },
+                                                )
+                                                .clicked()
+                                        {
+                                            requested_override = Some((source_id, source));
+                                        }
+                                    });
                                 });
-                            });
-                        }
-                    });
+                            }
+                        },
+                    );
                 if let Some((source_id, original_name)) = requested_override {
                     let value = self
                         .overrides
@@ -3866,18 +4197,23 @@ impl RenamewrightApp {
             )
             .show(ui, |ui| self.show_source_bar(ui));
 
-        egui::Panel::top("rule-command-bar")
-            .resizable(true)
-            .default_size(150.0)
-            .min_size(104.0)
-            .max_size(300.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(self.palette.paper_soft)
-                    .stroke(Stroke::new(1.0, self.palette.rule))
-                    .inner_margin(10.0),
-            )
-            .show(ui, |ui| self.show_rule_command_bar(ui));
+        let appearance_replaces_workbench =
+            self.appearance_advanced_open && ui.available_width() < 1_040.0;
+
+        if !appearance_replaces_workbench {
+            egui::Panel::top("rule-command-bar")
+                .resizable(true)
+                .default_size(150.0)
+                .min_size(104.0)
+                .max_size(300.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(self.palette.paper_soft)
+                        .stroke(Stroke::new(1.0, self.palette.rule))
+                        .inner_margin(10.0),
+                )
+                .show(ui, |ui| self.show_rule_command_bar(ui));
+        }
 
         if self.ledger_open {
             egui::Panel::right("ledger")
@@ -3890,6 +4226,23 @@ impl RenamewrightApp {
                         .inner_margin(12.0),
                 )
                 .show(ui, |ui| self.show_ledger(ui));
+        }
+
+        if self.appearance_advanced_open && !appearance_replaces_workbench {
+            egui::Panel::right("advanced-appearance")
+                .resizable(true)
+                .default_size(320.0)
+                .min_size(280.0)
+                .max_size(420.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(self.palette.paper_soft)
+                        .stroke(Stroke::new(1.0, self.palette.rule))
+                        .inner_margin(12.0),
+                )
+                .show(ui, |ui| {
+                    self.show_advanced_appearance(ui, "advanced-appearance-wide-options");
+                });
         }
 
         egui::Panel::bottom("review-bar")
@@ -3907,7 +4260,13 @@ impl RenamewrightApp {
                     .fill(self.palette.paper)
                     .inner_margin(12.0),
             )
-            .show(ui, |ui| self.show_preview(ui));
+            .show(ui, |ui| {
+                if appearance_replaces_workbench {
+                    self.show_advanced_appearance(ui, "advanced-appearance-compact-options");
+                } else {
+                    self.show_preview(ui);
+                }
+            });
 
         self.show_transient_windows(ui.ctx());
     }
@@ -3919,6 +4278,10 @@ impl eframe::App for RenamewrightApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        #[cfg(feature = "automation")]
+        if self.automation_mode {
+            return;
+        }
         eframe::set_value(storage, APPEARANCE_STORAGE_KEY, &self.appearance);
     }
 }
@@ -3935,9 +4298,17 @@ impl Drop for RenamewrightApp {
 }
 
 pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
+    install_theme_with_density(ctx, palette, InterfaceDensity::Standard);
+}
+
+fn install_theme_with_density(
+    ctx: &egui::Context,
+    palette: NativePalette,
+    density: InterfaceDensity,
+) {
     let theme = palette.theme();
     ctx.set_theme(theme);
-    let mut style = (*ctx.style_of(theme)).clone();
+    let mut style = theme.default_style();
     style.visuals = if theme == egui::Theme::Dark {
         egui::Visuals::dark()
     } else {
@@ -3997,6 +4368,20 @@ pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
         egui::TextStyle::Heading,
         FontId::new(22.0, FontFamily::Proportional),
     );
+    match density {
+        InterfaceDensity::Standard => {
+            style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            style.spacing.button_padding = egui::vec2(8.0, 4.0);
+            style.spacing.interact_size.y = 30.0;
+            style.spacing.indent = 18.0;
+        }
+        InterfaceDensity::Compact => {
+            style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+            style.spacing.button_padding = egui::vec2(6.0, 3.0);
+            style.spacing.interact_size.y = 26.0;
+            style.spacing.indent = 16.0;
+        }
+    }
     ctx.set_style_of(theme, style);
 }
 
@@ -4019,9 +4404,10 @@ mod tests {
         AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
     };
     use super::{
-        AppearanceTheme, Locale, MutationTask, NativePalette, PREVIEW_PROPOSED_COLUMN_WIDTH,
-        PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, RenamewrightApp, RuleKind,
-        RuleRequestDto, install_theme, preview_column_label, semantics,
+        AccentChoice, AppearanceTheme, InterfaceDensity, Locale, MutationTask, NativePalette,
+        PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
+        PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, install_theme,
+        install_theme_with_density, preview_column_label, semantics,
     };
 
     #[derive(Default)]
@@ -4043,6 +4429,25 @@ mod tests {
         }
 
         fn flush(&mut self) {}
+    }
+
+    fn relative_luminance(color: egui::Color32) -> f32 {
+        fn channel(value: u8) -> f32 {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        0.212_6 * channel(color.r()) + 0.715_2 * channel(color.g()) + 0.072_2 * channel(color.b())
+    }
+
+    fn contrast_ratio(left: egui::Color32, right: egui::Color32) -> f32 {
+        let left = relative_luminance(left);
+        let right = relative_luminance(right);
+        (left.max(right) + 0.05) / (left.min(right) + 0.05)
     }
 
     #[test]
@@ -4175,6 +4580,10 @@ mod tests {
         let mut storage = MemoryStorage::default();
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.appearance.theme = AppearanceTheme::Dark;
+        app.appearance.accent = AccentChoice::Teal;
+        app.appearance.density = InterfaceDensity::Compact;
+        app.appearance.show_kind = false;
+        app.appearance.show_diagnostics = false;
         eframe::App::save(&mut app, &mut storage);
 
         let restored = RenamewrightApp::new_product_with_persistence(
@@ -4184,8 +4593,149 @@ mod tests {
             Some(&storage),
         );
         assert_eq!(restored.appearance.theme, AppearanceTheme::Dark);
+        assert_eq!(restored.appearance.accent, AccentChoice::Teal);
+        assert_eq!(restored.appearance.density, InterfaceDensity::Compact);
+        assert!(!restored.appearance.show_kind);
+        assert!(!restored.appearance.show_diagnostics);
         assert!(restored.plan.is_none());
         assert!(restored.pending_confirmation.is_none());
+    }
+
+    #[test]
+    fn advanced_appearance_stays_hidden_behind_the_simple_theme_menu() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                RenamewrightApp::new_product(NativePalette::default(), None),
+            );
+
+        assert!(
+            harness
+                .query_by_label(semantics::ADVANCED_APPEARANCE)
+                .is_none()
+        );
+        harness.get_by_label(semantics::APPEARANCE).click();
+        harness.run_ok();
+        harness.get_by_label(semantics::ADVANCED_APPEARANCE).click();
+        harness.run_ok();
+
+        harness.get_by_label(semantics::CLOSE_APPEARANCE);
+        harness.get_by_label(semantics::ACCENT_COLOR);
+        harness.get_by_label(semantics::DENSITY);
+        harness.get_by_label(semantics::SHOW_KIND);
+        harness.get_by_label(semantics::SHOW_DIAGNOSTICS);
+        assert!(harness.state().appearance_advanced_open);
+    }
+
+    #[test]
+    fn advanced_appearance_changes_view_without_rebuilding_the_plan() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+        let plan_id = app.plan.as_ref().map(PlanDto::plan_id);
+        let changed_count = app.plan.as_ref().map(PlanDto::changed_count);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        harness.get_by_label(semantics::APPEARANCE).click();
+        harness.run_ok();
+        harness.get_by_label(semantics::ADVANCED_APPEARANCE).click();
+        harness.run_ok();
+        harness.get_by_label("Teal").click();
+        harness.run_ok();
+        harness.get_by_label(semantics::DENSITY_COMPACT).click();
+        harness.run_ok();
+        harness.get_by_label(semantics::SHOW_KIND).click();
+        harness.run_ok();
+        harness.get_by_label(semantics::SHOW_DIAGNOSTICS).click();
+        harness.run_ok();
+
+        assert_eq!(harness.state().appearance.accent, AccentChoice::Teal);
+        assert_eq!(
+            harness.state().appearance.density,
+            InterfaceDensity::Compact
+        );
+        assert!(!harness.state().appearance.show_kind);
+        assert!(!harness.state().appearance.show_diagnostics);
+        assert_eq!(harness.state().plan.as_ref().map(PlanDto::plan_id), plan_id);
+        assert_eq!(
+            harness.state().plan.as_ref().map(PlanDto::changed_count),
+            changed_count
+        );
+        assert!(harness.query_by_label("Kind").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn hidden_diagnostic_details_keep_blocker_reasons_visible() {
+        let mut app = RenamewrightApp::new(false);
+        app.appearance.show_diagnostics = false;
+        app.filter = PlanFilter::Blocked;
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        harness.get_by_label("Blocker reasons");
+        assert!(harness.query_all_by_label("Sample conflict").count() > 0);
+        harness.get_by_label(semantics::APPLY_LOCKED);
+    }
+
+    #[test]
+    fn compact_window_replaces_preview_with_a_closeable_appearance_panel() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(820.0, 560.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                RenamewrightApp::new_product(NativePalette::default(), None),
+            );
+
+        harness.get_by_label(semantics::APPEARANCE).click();
+        harness.run_ok();
+        harness.get_by_label(semantics::ADVANCED_APPEARANCE).click();
+        harness.run_ok();
+        assert!(harness.query_by_label(semantics::RULES_HEADING).is_none());
+        harness.get_by_label(semantics::CLOSE_APPEARANCE).click();
+        harness.run_ok();
+
+        harness.get_by_label(semantics::RULES_HEADING);
+        harness.get_by_label(semantics::PREVIEW_HEADING);
+        harness.get_by_label(semantics::APPLY_LOCKED);
+        assert!(!harness.state().appearance_advanced_open);
+
+        harness.get_by_label(semantics::APPEARANCE).click();
+        harness.run_ok();
+        harness.get_by_label(semantics::ADVANCED_APPEARANCE).click();
+        harness.run_ok();
+        harness
+            .get_by_label(semantics::RESET_APPEARANCE)
+            .scroll_to_me();
+        harness.run_ok();
+        harness.get_by_label(semantics::RESET_APPEARANCE);
+        harness.get_by_label(semantics::APPLY_LOCKED);
+        assert!(harness.state().appearance_advanced_open);
+    }
+
+    #[test]
+    fn compact_source_bar_prioritizes_actions_over_supporting_copy() {
+        let harness = Harness::builder()
+            .with_size(egui::vec2(820.0, 560.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                RenamewrightApp::new_product(NativePalette::default(), None),
+            );
+
+        harness.get_by_label(semantics::PRODUCT_NAME);
+        harness.get_by_label(semantics::ADD_FILES);
+        harness.get_by_label(semantics::ADD_FOLDER);
+        harness.get_by_label(semantics::APPEARANCE);
+        assert!(harness.query_by_label(semantics::TAGLINE).is_none());
+        assert!(harness.query_by_label("0 entries").is_none());
     }
 
     #[test]
@@ -4274,6 +4824,38 @@ mod tests {
         );
         assert_eq!(style.visuals.selection.stroke.color, egui::Color32::BLACK);
         assert_eq!(style.visuals.disabled_alpha, 1.0);
+    }
+
+    #[test]
+    fn every_advanced_accent_keeps_text_and_fill_contrast() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            for accent in AccentChoice::ALL {
+                let palette = NativePalette::for_theme(theme, accent);
+                assert!(
+                    contrast_ratio(palette.accent, palette.paper) >= 4.5,
+                    "{theme:?} {accent:?} foreground contrast was too low"
+                );
+                assert!(
+                    contrast_ratio(palette.accent_text, palette.accent_fill) >= 4.5,
+                    "{theme:?} {accent:?} fill contrast was too low"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn density_presets_apply_distinct_bounded_native_spacing() {
+        let context = egui::Context::default();
+        let palette = NativePalette::for_theme(egui::Theme::Light, AccentChoice::Cobalt);
+        install_theme_with_density(&context, palette, InterfaceDensity::Standard);
+        let standard = context.style_of(egui::Theme::Light);
+        assert_eq!(standard.spacing.interact_size.y, 30.0);
+        assert_eq!(standard.spacing.item_spacing, egui::vec2(8.0, 6.0));
+
+        install_theme_with_density(&context, palette, InterfaceDensity::Compact);
+        let compact = context.style_of(egui::Theme::Light);
+        assert_eq!(compact.spacing.interact_size.y, 26.0);
+        assert_eq!(compact.spacing.item_spacing, egui::vec2(6.0, 4.0));
     }
 
     #[cfg(feature = "automation")]
@@ -4634,6 +5216,22 @@ mod tests {
         assert_eq!(restored.rules[0].rule_id(), 4);
         assert_eq!(restored.rules[1].rule_id(), 8);
         assert_eq!(restored.next_rule_id, 9);
+        Ok(())
+    }
+
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_mode_does_not_persist_appearance_in_product_storage() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let root = AutomationRoot::open(directory.path())?;
+        let mut app = RenamewrightApp::new_automated(NativePalette::default(), root, None);
+        app.appearance.theme = AppearanceTheme::Dark;
+        let mut storage = MemoryStorage::default();
+
+        eframe::App::save(&mut app, &mut storage);
+
+        assert!(storage.values.is_empty());
         Ok(())
     }
 
