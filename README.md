@@ -54,6 +54,12 @@ surfaces so the preview retains the majority of the window. A disabled Apply
 action always has persistent explanatory text; safety information never depends
 on hover or colour alone.
 
+Appearance keeps System, Light, and Dark in one short source-bar menu. Accent
+presets, Standard or Compact density, and optional preview details remain behind
+Advanced appearance. These settings persist locally as view preferences only;
+they never change or authorize the rename plan, and Windows high contrast
+continues to own application colours when active.
+
 The design direction is an **instrumented direct-manipulation workbench**:
 labelled commands and continuously visible names provide immediate proposal
 feedback, required inputs appear progressively, and filesystem mutation remains

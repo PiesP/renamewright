@@ -10,7 +10,7 @@ use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 use renamewright_app::automation::AutomationFixture;
 #[cfg(feature = "automation")]
 use renamewright_app::automation::{AUTOMATION_BIND_ADDRESS, AutomationRoot, serve_bounded};
-use renamewright_app::{NativePalette, RenamewrightApp, install_theme};
+use renamewright_app::{NativePalette, RenamewrightApp};
 
 #[cfg(windows)]
 fn native_data_root() -> Option<PathBuf> {
@@ -142,6 +142,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let automation_launch = automation_launch()?;
     #[cfg(feature = "automation")]
     let automation_mode = automation_launch.is_some();
+    #[cfg(not(feature = "automation"))]
+    let automation_mode = false;
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../resources/app-icon.png"))?;
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
@@ -150,6 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_icon(Arc::new(icon))
             .with_inner_size([1_180.0, 760.0])
             .with_min_inner_size([820.0, 560.0]),
+        persist_window: !automation_mode,
         ..Default::default()
     };
 
@@ -159,7 +162,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(move |creation_context| {
             let palette = native_palette()
                 .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
-            install_theme(&creation_context.egui_ctx, palette);
             let font = install_korean_font(&creation_context.egui_ctx);
             if let Some(font) = font {
                 eprintln!("loaded Korean fallback font: {font}");
@@ -183,10 +185,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let data_root = native_data_root();
             let preset_path = data_root.as_ref().map(|root| root.join("presets.json"));
             let journal_root = data_root.as_ref().map(|root| root.join("journals"));
-            Ok(Box::new(RenamewrightApp::new_product_with_data(
+            Ok(Box::new(RenamewrightApp::new_product_with_persistence(
                 palette,
                 preset_path,
                 journal_root,
+                creation_context.storage,
             )))
         }),
     )?;

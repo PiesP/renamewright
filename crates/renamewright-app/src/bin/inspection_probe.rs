@@ -13,6 +13,11 @@ use egui_inspection::{Request, Response, read_message, write_message};
 struct ProbeArguments {
     screenshot_path: Option<PathBuf>,
     exercise_performance: bool,
+    select_theme: Option<String>,
+    open_advanced_appearance: bool,
+    wide_viewport: bool,
+    compact_viewport: bool,
+    scroll_appearance_bottom: bool,
 }
 
 fn request(stream: &mut TcpStream, request: &Request) -> Result<Response, Box<dyn Error>> {
@@ -24,11 +29,21 @@ fn parse_screenshot_path(
     mut arguments: pico_args::Arguments,
 ) -> Result<ProbeArguments, pico_args::Error> {
     let exercise_performance = arguments.contains("--exercise-performance");
+    let select_theme = arguments.opt_value_from_str("--select-theme")?;
+    let open_advanced_appearance = arguments.contains("--open-advanced-appearance");
+    let wide_viewport = arguments.contains("--wide-viewport");
+    let compact_viewport = arguments.contains("--compact-viewport");
+    let scroll_appearance_bottom = arguments.contains("--scroll-appearance-bottom");
     let screenshot_path =
         arguments.opt_free_from_os_str(|argument| Ok::<_, Infallible>(PathBuf::from(argument)))?;
     Ok(ProbeArguments {
         screenshot_path,
         exercise_performance,
+        select_theme,
+        open_advanced_appearance,
+        wide_viewport,
+        compact_viewport,
+        scroll_appearance_bottom,
     })
 }
 
@@ -50,6 +65,114 @@ fn apply_events(stream: &mut TcpStream, events: Vec<Event>) -> Result<(), Box<dy
         Response::Done => Ok(()),
         response => Err(format!("unexpected event response: {response:?}").into()),
     }
+}
+
+fn label_center(stream: &mut TcpStream, label: &str) -> Result<egui::Pos2, Box<dyn Error>> {
+    let tree = tree(stream)?;
+    let node = tree
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(label) || node.value() == Some(label))
+        .map(|(_, node)| node)
+        .ok_or_else(|| format!("the inspection tree did not contain {label:?}"))?;
+    let bounds = node
+        .bounds()
+        .ok_or_else(|| format!("the inspection node {label:?} did not expose bounds"))?;
+    Ok(egui::pos2(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    ))
+}
+
+fn click_label(stream: &mut TcpStream, label: &str) -> Result<(), Box<dyn Error>> {
+    let point = label_center(stream, label)?;
+    apply_events(
+        stream,
+        vec![
+            Event::PointerMoved(point),
+            Event::PointerButton {
+                pos: point,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::default(),
+            },
+            Event::PointerButton {
+                pos: point,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::default(),
+            },
+        ],
+    )
+}
+
+fn scroll_label_to_bottom(stream: &mut TcpStream, label: &str) -> Result<(), Box<dyn Error>> {
+    let point = label_center(stream, label)?;
+    apply_events(
+        stream,
+        vec![
+            Event::PointerMoved(point),
+            Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -240.0),
+                phase: TouchPhase::Move,
+                modifiers: Modifiers::default(),
+            },
+        ],
+    )?;
+    settle(stream)
+}
+
+fn settle(stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
+    match request(stream, &Request::Settle { max_steps: 32 })? {
+        Response::Settled { settled: true, .. } => Ok(()),
+        Response::Settled {
+            settled: false,
+            steps,
+        } => Err(format!("the inspected application did not settle in {steps} steps").into()),
+        response => Err(format!("unexpected settle response: {response:?}").into()),
+    }
+}
+
+fn resize(stream: &mut TcpStream, width: u32, height: u32) -> Result<(), Box<dyn Error>> {
+    match request(stream, &Request::Resize { width, height })? {
+        Response::Done => settle(stream),
+        response => Err(format!("unexpected resize response: {response:?}").into()),
+    }
+}
+
+fn prepare_visual_state(
+    stream: &mut TcpStream,
+    arguments: &ProbeArguments,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(theme) = &arguments.select_theme {
+        let label = match theme.as_str() {
+            "system" => "System",
+            "light" => "Light",
+            "dark" => "Dark",
+            _ => return Err(format!("unsupported theme {theme:?}").into()),
+        };
+        click_label(stream, "Appearance")?;
+        click_label(stream, label)?;
+        settle(stream)?;
+    }
+    if arguments.open_advanced_appearance {
+        click_label(stream, "Appearance")?;
+        click_label(stream, "Advanced appearance")?;
+        settle(stream)?;
+    }
+    if arguments.wide_viewport && arguments.compact_viewport {
+        return Err("wide and compact viewports are mutually exclusive".into());
+    }
+    if arguments.wide_viewport {
+        resize(stream, 1_180, 760)?;
+    } else if arguments.compact_viewport {
+        resize(stream, 820, 560)?;
+    }
+    if arguments.scroll_appearance_bottom {
+        scroll_label_to_bottom(stream, "Accent color")?;
+    }
+    Ok(())
 }
 
 fn contains_text(tree: &egui::accesskit::TreeUpdate, expected: &str) -> bool {
@@ -212,6 +335,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         response => return Err(format!("unexpected tree response: {response:?}").into()),
     };
+
+    prepare_visual_state(&mut stream, &arguments)?;
 
     if let Some(path) = arguments.screenshot_path {
         match request(
