@@ -1277,6 +1277,14 @@ impl ApplicationService {
         Ok(ledger.entries().map(LedgerEntryDto::from).collect())
     }
 
+    pub fn ledger_snapshot(&self) -> Result<Vec<LedgerEntryDto>, String> {
+        let ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| "the rename ledger is unavailable".to_owned())?;
+        Ok(ledger.entries().map(LedgerEntryDto::from).collect())
+    }
+
     pub fn inspect_recovery<F>(
         &self,
         ledger_id: u64,
@@ -3688,6 +3696,22 @@ mod tests {
         };
 
         assert_eq!(error, "the plan sequence is exhausted");
+        Ok(())
+    }
+
+    #[test]
+    fn ledger_snapshot_reuses_initial_discovery_until_an_explicit_refresh()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let state = ApplicationService::default();
+        state.initialize(directory.path())?;
+        assert!(state.ledger_snapshot()?.is_empty());
+
+        fs::write(directory.path().join("late.rwj"), b"not-a-journal")?;
+
+        assert!(state.ledger_snapshot()?.is_empty());
+        assert_eq!(state.list_ledger()?.len(), 1);
+        assert_eq!(state.ledger_snapshot()?.len(), 1);
         Ok(())
     }
 

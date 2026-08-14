@@ -2105,7 +2105,7 @@ impl RenamewrightApp {
             .as_ref()
             .and_then(|root| application.initialize(root).err());
         let ledger = if journal_status.is_none() {
-            application.list_ledger().unwrap_or_default()
+            application.ledger_snapshot().unwrap_or_default()
         } else {
             Vec::new()
         };
