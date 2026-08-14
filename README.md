@@ -54,6 +54,19 @@ surfaces so the preview retains the majority of the window. A disabled Apply
 action always has persistent explanatory text; safety information never depends
 on hover or colour alone.
 
+The design direction is an **instrumented direct-manipulation workbench**:
+labelled commands and continuously visible names provide immediate proposal
+feedback, required inputs appear progressively, and filesystem mutation remains
+a separate inspect-and-commit step. It adapts the Windows
+[command-bar](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/command-bar),
+[keyboard](https://learn.microsoft.com/en-us/windows/apps/develop/input/keyboard-interactions),
+and
+[confirm-or-undo](https://learn.microsoft.com/en-us/windows/apps/design/basics/commanding-basics)
+principles to `eframe`/`egui` without pretending to be a WinUI application.
+Future visual work should strengthen the single source → rule → preview → Apply
+task spine, contextual diagnostics, and adaptive list/details layout rather than
+introducing a wizard, ribbon, dashboard, or modal rule editor.
+
 ## Development
 
 Install the stable Rust version pinned by `rust-toolchain.toml`, then use Cargo:
