@@ -14,6 +14,11 @@ external action regardless of which tools helped produce it.
 4. Use a pull request for external contributions. Maintainer integrations use
    an explicit merge commit so the reviewed branch remains visible in history.
 
+Optional Codex Security checks are documented in
+[the security policy](.github/SECURITY.md). They are advisory, keep private
+results outside the checkout, and do not replace deterministic Cargo, CodeQL,
+OSV, Semgrep, Windows, or packaged-runtime validation.
+
 Source, comments, documentation, commit messages, and pull requests are written
 in English. User-facing strings must keep the native Korean/English catalog
 complete.
