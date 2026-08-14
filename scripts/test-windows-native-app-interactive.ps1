@@ -194,9 +194,20 @@ function Assert-ManifestArtifactInput {
 
 function Stop-TestProcess {
   param([System.Diagnostics.Process]$Process)
-  if ($null -ne $Process -and -not $Process.HasExited) {
-    Stop-Process -Id $Process.Id -Force
-    $Process.WaitForExit(5000) | Out-Null
+  if ($null -eq $Process) {
+    return
+  }
+  try {
+    if (-not $Process.HasExited) {
+      Stop-Process -Id $Process.Id -Force
+      if (-not $Process.WaitForExit(5000)) {
+        throw "The test process $($Process.Id) did not exit within five seconds."
+      }
+    }
+    # Flush Start-Process redirection before checksums read the evidence files.
+    $Process.WaitForExit()
+  } finally {
+    $Process.Dispose()
   }
 }
 

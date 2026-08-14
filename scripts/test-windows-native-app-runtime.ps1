@@ -52,9 +52,21 @@ function Stop-TestProcess {
     [System.Diagnostics.Process]$Process
   )
 
-  if ($null -ne $Process -and -not $Process.HasExited) {
-    Stop-Process -Id $Process.Id -Force
-    $Process.WaitForExit(5000) | Out-Null
+  if ($null -eq $Process) {
+    return
+  }
+  try {
+    if (-not $Process.HasExited) {
+      Stop-Process -Id $Process.Id -Force
+      if (-not $Process.WaitForExit(5000)) {
+        throw "The test process $($Process.Id) did not exit within five seconds."
+      }
+    }
+    # Start-Process owns the redirected stream handles until WaitForExit without
+    # a timeout completes, including when the child exited before cleanup began.
+    $Process.WaitForExit()
+  } finally {
+    $Process.Dispose()
   }
 }
 
