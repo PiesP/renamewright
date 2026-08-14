@@ -1173,13 +1173,15 @@ impl ApplicationService {
             .map_err(|_| "the journal directory could not be resolved".to_owned())?;
         let ledger = RenameLedger::discover(&journal_root)
             .map_err(|_| "the rename ledger could not be loaded".to_owned())?;
-        let next_plan_id = ledger
+        let latest_plan_id = ledger
             .entries()
             .filter_map(LedgerEntry::plan_id)
             .map(PlanId::value)
             .max()
-            .unwrap_or(0)
-            .saturating_add(1);
+            .unwrap_or(0);
+        let next_plan_id = latest_plan_id
+            .checked_add(1)
+            .ok_or_else(|| "the plan sequence is exhausted".to_owned())?;
         *self
             .next_plan_id
             .lock()
@@ -1486,6 +1488,7 @@ impl UndoCommandResultDto {
 pub enum UndoCommandErrorKind {
     Busy,
     StateUnavailable,
+    PlanSequenceExhausted,
     InspectionChanged,
     ActionUnavailable,
     UndoFailed,
@@ -1497,6 +1500,7 @@ impl UndoCommandErrorKind {
         match self {
             Self::Busy => "busy",
             Self::StateUnavailable => "stateUnavailable",
+            Self::PlanSequenceExhausted => "planSequenceExhausted",
             Self::InspectionChanged => "inspectionChanged",
             Self::ActionUnavailable => "actionUnavailable",
             Self::UndoFailed => "undoFailed",
@@ -1915,8 +1919,12 @@ fn plan_from_registry_with_compiled(
         .next_plan_id
         .lock()
         .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
-    let plan_id = PlanId::new(*next_plan_id);
-    *next_plan_id = next_plan_id.saturating_add(1);
+    let plan_id_value = *next_plan_id;
+    let following_plan_id = plan_id_value
+        .checked_add(1)
+        .ok_or_else(|| PlanningCommandErrorDto::new("planSequenceExhausted"))?;
+    let plan_id = PlanId::new(plan_id_value);
+    *next_plan_id = following_plan_id;
     let environment = registry.validation_environment();
     let plan = build_plan_with_rule_pipeline_overrides_and_environment(
         plan_id,
@@ -2441,19 +2449,23 @@ fn allocate_transaction_plan_id(
     state: &ApplicationService,
     ledger: &RenameLedger,
 ) -> Result<PlanId, UndoCommandErrorKind> {
-    let after_ledger = ledger
+    let latest_ledger_plan_id = ledger
         .entries()
         .filter_map(LedgerEntry::plan_id)
         .map(PlanId::value)
         .max()
-        .unwrap_or(0)
-        .saturating_add(1);
+        .unwrap_or(0);
+    let after_ledger = latest_ledger_plan_id
+        .checked_add(1)
+        .ok_or(UndoCommandErrorKind::PlanSequenceExhausted)?;
     let mut next = state
         .next_plan_id
         .lock()
         .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
     let value = (*next).max(after_ledger);
-    *next = value.saturating_add(1);
+    *next = value
+        .checked_add(1)
+        .ok_or(UndoCommandErrorKind::PlanSequenceExhausted)?;
     Ok(PlanId::new(value))
 }
 
@@ -3578,6 +3590,46 @@ mod tests {
             "the export file already exists; choose a new file name"
         );
         assert_eq!(fs::read_to_string(export)?, "first");
+        Ok(())
+    }
+
+    #[test]
+    fn initialization_rejects_an_exhausted_untrusted_journal_plan_id() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let record = renamewright_core::JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(u64::MAX),
+            source_generation: 1,
+            step_count: 0,
+            entries: Vec::new(),
+        };
+        fs::write(
+            directory.path().join("untrusted.rwj"),
+            renamewright_platform::encode_journal(&[record])?,
+        )?;
+
+        let error = ApplicationService::default()
+            .initialize(directory.path())
+            .expect_err("an exhausted journal plan ID must fail closed");
+
+        assert_eq!(error, "the plan sequence is exhausted");
+        Ok(())
+    }
+
+    #[test]
+    fn planning_refuses_to_reuse_an_exhausted_plan_id() -> Result<(), Box<dyn Error>> {
+        let state = ApplicationService::default();
+        *state
+            .next_plan_id
+            .lock()
+            .map_err(|_| "plan sequence lock failed")? = u64::MAX;
+
+        for _ in 0..2 {
+            let error = state
+                .preview_rules(RulePipelineRequestDto::new(Vec::new(), Vec::new()))
+                .expect_err("an exhausted plan ID must never be reused");
+            assert_eq!(error.code(), "planSequenceExhausted");
+        }
         Ok(())
     }
 
