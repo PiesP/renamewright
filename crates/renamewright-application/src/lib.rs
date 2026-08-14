@@ -122,6 +122,7 @@ const PRESET_DOCUMENT_SCHEMA_VERSION: u16 = 2;
 const MAX_PRESETS: usize = 32;
 const MAX_PRESET_NAME_BYTES: usize = 256;
 const MAX_PRESET_DOCUMENT_BYTES: u64 = 512 * 1_024;
+const MAX_PLAN_INSPECTION_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_SEQUENCE_INPUT: u64 = 9_007_199_254_740_991;
 const MAX_RANGE_INPUT: u64 = u32::MAX as u64;
 
@@ -2577,8 +2578,9 @@ fn plan_document_json(plan_id: u64, state: &ApplicationService) -> Result<String
         .lock()
         .map_err(|_| "the latest plan is unavailable".to_owned())?;
     let stored = current_plan(plan_id, &latest_plan)?;
-    serde_json::to_string_pretty(&PlanDocument::from(stored))
-        .map_err(|error| format!("the plan could not be serialized: {error}"))
+    let mut writer = InspectionWriter::new();
+    write_plan_json(stored, &mut writer)?;
+    writer.finish()
 }
 
 fn plan_document_csv(plan_id: u64, state: &ApplicationService) -> Result<String, String> {
@@ -2603,9 +2605,48 @@ fn write_plan_json(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), S
 }
 
 fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
-    let mut csv = Vec::new();
-    write_plan_csv(stored, &mut csv)?;
-    String::from_utf8(csv).map_err(|_| "the plan CSV was not valid UTF-8".to_owned())
+    let mut writer = InspectionWriter::new();
+    write_plan_csv(stored, &mut writer)?;
+    writer.finish()
+}
+
+struct InspectionWriter {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl InspectionWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::with_capacity(MAX_PLAN_INSPECTION_BYTES),
+            truncated: false,
+        }
+    }
+
+    fn finish(self) -> Result<String, String> {
+        let mut document = String::from_utf8(self.bytes)
+            .map_err(|_| "the plan inspection was not valid UTF-8".to_owned())?;
+        if self.truncated {
+            document.push_str(
+                "\n\n[Inspection truncated at 2 MiB. Export the plan for the complete document.]",
+            );
+        }
+        Ok(document)
+    }
+}
+
+impl Write for InspectionWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let remaining = MAX_PLAN_INSPECTION_BYTES.saturating_sub(self.bytes.len());
+        let retained = remaining.min(buffer.len());
+        self.bytes.extend_from_slice(&buffer[..retained]);
+        self.truncated |= retained < buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn write_plan_csv(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), String> {
@@ -2889,13 +2930,13 @@ mod tests {
 
     use super::{
         ApplicationService, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
-        ExtensionOperationDto, FilenamePartDto, LedgerEntryDto, MAX_PRESET_DOCUMENT_BYTES, PlanDto,
-        PresetDocumentDto, PresetDocumentError, PresetDocumentErrorKind,
-        RULE_PIPELINE_SCHEMA_VERSION, RangeOperationDto, RangeOriginDto, RulePipelineRequestDto,
-        RuleRequestDto, RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto,
-        SequenceScopeDto, SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto,
-        admit_dropped_sources, compile_rule_request, csv_cell, plan_document_csv,
-        plan_document_json, plan_from_registry,
+        ExtensionOperationDto, FilenamePartDto, InspectionWriter, LedgerEntryDto,
+        MAX_PLAN_INSPECTION_BYTES, MAX_PRESET_DOCUMENT_BYTES, PlanDto, PresetDocumentDto,
+        PresetDocumentError, PresetDocumentErrorKind, RULE_PIPELINE_SCHEMA_VERSION,
+        RangeOperationDto, RangeOriginDto, RulePipelineRequestDto, RuleRequestDto,
+        RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto,
+        SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto, admit_dropped_sources,
+        compile_rule_request, csv_cell, plan_document_csv, plan_document_json, plan_from_registry,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -3313,6 +3354,19 @@ mod tests {
         assert_eq!(csv_cell("  @command"), "\"'  @command\"");
         assert_eq!(csv_cell("\tcommand"), "\"'\tcommand\"");
         assert_eq!(csv_cell("safe-leading text"), "\"safe-leading text\"");
+    }
+
+    #[test]
+    fn plan_inspection_is_bounded_and_points_to_full_export() -> Result<(), Box<dyn Error>> {
+        let mut writer = InspectionWriter::new();
+        std::io::Write::write_all(&mut writer, &vec![b'x'; MAX_PLAN_INSPECTION_BYTES + 1])?;
+
+        let document = writer.finish()?;
+
+        assert!(document.starts_with(&"x".repeat(MAX_PLAN_INSPECTION_BYTES)));
+        assert!(document.ends_with("Export the plan for the complete document.]"));
+        assert!(document.len() < MAX_PLAN_INSPECTION_BYTES + 128);
+        Ok(())
     }
 
     #[test]
