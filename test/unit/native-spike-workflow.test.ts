@@ -131,7 +131,7 @@ test('exercises the exact Windows executables before uploading runtime evidence'
 });
 
 test('keeps interactive Windows acceptance source-bound, scoped, and honest about gaps', () => {
-  expect(interactive).toContain('manifest.sourceSha -cne $SourceSha');
+  expect(interactive).toContain("-Name 'sourceSha' -Context 'native spike manifest'");
   expect(interactive).toContain('$automationArguments = "--automation --automation-root');
   expect(interactive).toContain('-ArgumentList $automationArguments');
   expect(interactive).toContain('isolatedAutomationRoot = $true');
@@ -181,13 +181,16 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('$targetProcessId -ne $OwnerProcessId');
   expect(interactive).toContain('sourceBoundGuiThreadFocus = $true');
   expect(matrixMerger).toContain("'sourceBoundGuiThreadFocus'");
-  expect(interactive).toContain('Save-WindowScreenshot');
-  expect(interactive).toContain('PrintWindow');
-  expect(interactive).toContain('GetWindowRect');
-  expect(interactive).toContain('SetThreadDpiAwarenessContext');
-  expect(interactive).toContain('PerMonitorAwareV2');
-  expect(interactive).toContain('$previousDpiContext');
-  expect(interactive).toContain('SetThreadDpiAwarenessContext($previousDpiContext)');
+  expect(interactive).toContain('-Arguments @($focusScreenshotPath)');
+  expect(interactive).toContain("'screenshot=1180x760'");
+  expect(interactive).not.toContain('CopyFromScreen');
+  expect(interactive).not.toContain('PrintWindow');
+  expect(interactive).toContain('Read-ArtifactChecksums');
+  expect(interactive).toContain('Assert-ChecksumCoveredArtifactFile');
+  expect(interactive).toContain('Assert-ManifestArtifactInput');
+  expect(interactive).toContain("-Role 'automation'");
+  expect(interactive).toContain("-Role 'inspectionProbe'");
+  expect(interactive).toContain('was not the source-bound artifact file');
   expect(interactive).toContain("status = 'partial'");
   expect(interactive).toContain('nativeDragDropExercised = $false');
   expect(interactive).toContain('focusVisibilityReview = $true');
@@ -195,12 +198,19 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('Update-ArtifactChecksums');
   expect(interactive).not.toContain('Invoke-Expression');
   expect(interactive).not.toContain('DownloadString');
+
+  const performanceProbeIndex = interactive.indexOf('$performanceProbeOutput = Invoke-Probe');
+  const explorerDropIndex = interactive.indexOf('$nativeDragDropExercised = $false');
+  expect(performanceProbeIndex).toBeGreaterThan(-1);
+  expect(explorerDropIndex).toBeGreaterThan(-1);
+  expect(performanceProbeIndex).toBeLessThan(explorerDropIndex);
 });
 
 test('confirms visual review only after binding both captured screenshots', () => {
   expect(visualReviewer).toContain('[switch]$ConfirmReadableContrast');
   expect(visualReviewer).toContain('[switch]$ConfirmVisibleKeyboardFocus');
   expect(visualReviewer).toContain('[switch]$ConfirmUnclippedLayout');
+  expect(visualReviewer).toContain('ConvertFrom-Json -DateKind String');
   expect(visualReviewer).toContain("schemaVersion' -Context $evidenceFileName) -ne 2");
   expect(visualReviewer).toContain("capturedAtUtc' -Context $evidenceFileName");
   expect(visualReviewer).toContain('$confirmedAt -le $capturedAt');
@@ -225,6 +235,10 @@ test('merges only intentional source-bound Windows acceptance configurations', (
   expect(matrixMerger).toContain('$highContrastObserved -and');
   expect(matrixMerger).toContain('$highContrastPaletteActive');
   expect(matrixMerger).toContain("'visualReviewConfirmed'");
+  expect(matrixMerger).toContain('Get-RequiredBooleanProperty');
+  expect(matrixMerger).toContain('must be a JSON boolean');
+  expect(matrixMerger).toContain('ConvertFrom-Json -DateKind String');
+  expect(matrixMerger).not.toContain('[bool](Get-RequiredProperty');
   expect(matrixMerger).toContain('$confirmedAt -le $capturedAt');
   expect(matrixMerger).toContain(
     "@('readableContrast', 'visibleKeyboardFocus', 'unclippedLayout')"
@@ -237,6 +251,16 @@ test('merges only intentional source-bound Windows acceptance configurations', (
   expect(matrixMerger).toContain('sources · [0-9]+ changed · [0-9]+ blocked');
   expect(matrixMerger).toContain('Assert-Screenshot');
   expect(matrixMerger).toContain('checksumsVerified = $true');
+  expect(matrixMerger).toContain('[switch]$SkipDpiMatrix');
+  expect(matrixMerger).toContain('[switch]$SkipHighContrast');
+  expect(matrixMerger).toContain('$SkipDpiMatrix -or $remainingDpi.Count -eq 0');
+  expect(matrixMerger).toContain('$SkipHighContrast -or $highContrastComplete');
+  expect(matrixMerger).toContain("dpiMatrix = if ($SkipDpiMatrix) { 'skipped' }");
+  expect(matrixMerger).toContain("highContrast = if ($SkipHighContrast) { 'skipped' }");
+  expect(matrixMerger).toContain("explorerDragDrop = 'required'");
+  expect(matrixMerger).toContain('dpiPercent = $remainingDpi');
+  expect(matrixMerger).toContain('highContrast = (-not $highContrastComplete)');
+  expect(matrixMerger).toContain('schemaVersion = 3');
   expect(matrixMerger).toContain("status = if ($complete) { 'complete' } else { 'partial' }");
   expect(matrixMerger).toContain('$RequireComplete -and -not $complete');
   expect(matrixMerger).not.toContain('Set-ItemProperty');
