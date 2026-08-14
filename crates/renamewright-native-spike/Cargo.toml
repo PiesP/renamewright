@@ -35,7 +35,7 @@ serde_json = { version = "1.0.151", optional = true }
 renamewright-windows-native = { path = "../renamewright-windows-native" }
 
 [dev-dependencies]
-egui_kittest = "0.35.0"
+egui_kittest = "0.36.1"
 kittest = "0.4.0"
 tempfile = "3.27.0"
 
