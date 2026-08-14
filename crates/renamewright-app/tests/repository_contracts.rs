@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 
 use std::path::Path;
+use std::process::Command;
 
 const ROOT_MANIFEST: &str = include_str!("../../../Cargo.toml");
 const APP_MANIFEST: &str = include_str!("../Cargo.toml");
 const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yaml");
 const REPOSITORY_SETTINGS: &str = include_str!("../../../.github/settings.yaml");
 const SECURITY_WORKFLOW: &str = include_str!("../../../.github/workflows/security.yaml");
+const CHANGE_CLASSIFIER: &str = include_str!("../../../scripts/ci/classify-workflow-changes.sh");
 const CODEX_SECURITY_WORKFLOW: &str =
     include_str!("../../../.github/workflows/codex-security.yaml");
 const ACCEPTANCE_WORKFLOW: &str =
@@ -74,6 +76,83 @@ fn hosted_gates_are_cargo_only() {
     assert!(CI_WORKFLOW.contains("--package renamewright-app"));
     assert!(CI_WORKFLOW.contains("--example large_batch_budget"));
     assert!(SECURITY_WORKFLOW.contains("language: [actions, rust]"));
+}
+
+#[test]
+fn hosted_gates_scope_expensive_work_without_hiding_required_checks()
+-> Result<(), Box<dyn std::error::Error>> {
+    for required in [
+        "name: pr-gate/quality",
+        "name: pr-gate/unit",
+        "name: pr-gate/e2e",
+        "name: pr-gate/performance",
+        "name: pr-gate/windows",
+        "name: pr-gate/osv",
+        "name: pr-gate/semgrep",
+    ] {
+        assert!(
+            CI_WORKFLOW.contains(required) || SECURITY_WORKFLOW.contains(required),
+            "required check name changed or disappeared: {required}"
+        );
+    }
+
+    for workflow in [CI_WORKFLOW, SECURITY_WORKFLOW] {
+        assert!(
+            workflow.contains("workflow/change-scope")
+                || workflow.contains("workflow/security-scope")
+        );
+        assert!(workflow.contains("needs.changes.result != 'success'"));
+        assert!(workflow.contains("No relevant"));
+        assert!(workflow.contains("fetch-depth: 0"));
+    }
+
+    assert!(CHANGE_CLASSIFIER.contains("select_all"));
+    assert!(CHANGE_CLASSIFIER.contains("New or unclassified project inputs"));
+    assert!(CHANGE_CLASSIFIER.contains("workflow_dispatch"));
+    assert!(CHANGE_CLASSIFIER.contains("schedule"));
+
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let classifier = repository_root.join("scripts/ci/classify-workflow-changes.sh");
+
+    let docs = Command::new("bash")
+        .arg(&classifier)
+        .arg("docs/product-design.md")
+        .output()?;
+    assert!(docs.status.success());
+    let docs = String::from_utf8(docs.stdout)?;
+    assert!(docs.contains("quality=false"));
+    assert!(docs.contains("unit=false"));
+    assert!(docs.contains("semgrep=true"));
+
+    let rust = Command::new("bash")
+        .arg(&classifier)
+        .arg("crates/renamewright-app/src/main.rs")
+        .output()?;
+    assert!(rust.status.success());
+    let rust = String::from_utf8(rust.stdout)?;
+    for selected in [
+        "quality",
+        "unit",
+        "e2e",
+        "performance",
+        "windows",
+        "codeql_rust",
+    ] {
+        assert!(rust.contains(&format!("{selected}=true")));
+    }
+    assert!(rust.contains("osv=false"));
+
+    let unknown = Command::new("bash")
+        .arg(&classifier)
+        .arg("new-project-input.bin")
+        .output()?;
+    assert!(unknown.status.success());
+    let unknown = String::from_utf8(unknown.stdout)?;
+    for selected in ["quality", "osv", "semgrep", "codeql_actions", "codeql_rust"] {
+        assert!(unknown.contains(&format!("{selected}=true")));
+    }
+
+    Ok(())
 }
 
 #[test]
