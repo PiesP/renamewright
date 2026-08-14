@@ -105,6 +105,13 @@ fn hosted_gates_scope_expensive_work_without_hiding_required_checks()
         assert!(workflow.contains("needs.changes.result != 'success'"));
         assert!(workflow.contains("No relevant"));
         assert!(workflow.contains("fetch-depth: 0"));
+        assert!(workflow.contains("pull_request | merge_group"));
+        assert!(
+            workflow.contains(
+                "git show \"$WORKFLOW_BASE_SHA:scripts/ci/classify-workflow-changes.sh\""
+            )
+        );
+        assert!(workflow.contains("bash \"$classifier\""));
     }
 
     assert!(CHANGE_CLASSIFIER.contains("select_all"));
