@@ -23,6 +23,7 @@ use renamewright_application::{
     UnicodeNormalizationFormDto,
 };
 use renamewright_platform::NativeExecutionFileSystem;
+use serde::{Deserialize, Serialize};
 
 const SAMPLE_COUNT: usize = 10_000;
 const SAMPLE_BLOCKED_COUNT: usize = (SAMPLE_COUNT - 1) / 997;
@@ -32,6 +33,7 @@ const PREVIEW_KIND_COLUMN_WIDTH: f32 = 70.0;
 const PREVIEW_SOURCE_COLUMN_WIDTH: f32 = 130.0;
 const PREVIEW_PROPOSED_COLUMN_WIDTH: f32 = 180.0;
 const PREVIEW_STATUS_COLUMN_WIDTH: f32 = 80.0;
+const APPEARANCE_STORAGE_KEY: &str = "renamewright.appearance.v1";
 
 fn preview_column_label(
     ui: &mut egui::Ui,
@@ -80,6 +82,12 @@ pub mod semantics {
     pub const REMOVE_RULE: &str = "Remove rule";
     pub const ENABLE_RULE: &str = "Enable rule";
     pub const LANGUAGE: &str = "Language";
+    pub const APPEARANCE: &str = "Appearance";
+    pub const THEME_SYSTEM: &str = "System";
+    pub const THEME_LIGHT: &str = "Light";
+    pub const THEME_DARK: &str = "Dark";
+    pub const HIGH_CONTRAST_OVERRIDES_APPEARANCE: &str =
+        "Windows high contrast overrides appearance colors";
     pub const DIAGNOSTIC_FILTER: &str = "Diagnostic filter";
     pub const INSPECT_JSON: &str = "Inspect JSON";
     pub const INSPECT_CSV: &str = "Inspect CSV";
@@ -797,6 +805,78 @@ const RULE: Color32 = Color32::from_rgb(199, 207, 226);
 const ACCENT: Color32 = Color32::from_rgb(42, 75, 183);
 const ACCENT_SOFT: Color32 = Color32::from_rgb(222, 230, 255);
 const BLOCKED: Color32 = Color32::from_rgb(166, 45, 48);
+const DARK_PAPER: Color32 = Color32::from_rgb(18, 22, 31);
+const DARK_PAPER_RAISED: Color32 = Color32::from_rgb(25, 30, 42);
+const DARK_PAPER_SOFT: Color32 = Color32::from_rgb(34, 41, 57);
+const DARK_INK: Color32 = Color32::from_rgb(236, 239, 248);
+const DARK_INK_SOFT: Color32 = Color32::from_rgb(172, 181, 202);
+const DARK_RULE: Color32 = Color32::from_rgb(68, 78, 103);
+const DARK_ACCENT: Color32 = Color32::from_rgb(153, 174, 255);
+const DARK_ACCENT_FILL: Color32 = Color32::from_rgb(72, 99, 201);
+const DARK_ACCENT_SOFT: Color32 = Color32::from_rgb(43, 54, 88);
+const DARK_BLOCKED: Color32 = Color32::from_rgb(255, 154, 157);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum AppearanceTheme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl AppearanceTheme {
+    const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    const fn label(self, locale: Locale) -> &'static str {
+        match self {
+            Self::System => locale.text(semantics::THEME_SYSTEM, "시스템"),
+            Self::Light => locale.text(semantics::THEME_LIGHT, "라이트"),
+            Self::Dark => locale.text(semantics::THEME_DARK, "다크"),
+        }
+    }
+
+    const fn preference(self) -> egui::ThemePreference {
+        match self {
+            Self::System => egui::ThemePreference::System,
+            Self::Light => egui::ThemePreference::Light,
+            Self::Dark => egui::ThemePreference::Dark,
+        }
+    }
+
+    fn effective(self, context: &egui::Context) -> egui::Theme {
+        match self {
+            Self::System => context.system_theme().unwrap_or(egui::Theme::Light),
+            Self::Light => egui::Theme::Light,
+            Self::Dark => egui::Theme::Dark,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct AppearancePreferences {
+    schema_version: u8,
+    theme: AppearanceTheme,
+}
+
+impl Default for AppearancePreferences {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            theme: AppearanceTheme::System,
+        }
+    }
+}
+
+impl AppearancePreferences {
+    fn load(storage: Option<&dyn eframe::Storage>) -> Self {
+        storage
+            .and_then(|storage| eframe::get_value(storage, APPEARANCE_STORAGE_KEY))
+            .filter(|preferences: &Self| preferences.schema_version == 1)
+            .unwrap_or_default()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativePalette {
@@ -836,6 +916,50 @@ impl Default for NativePalette {
 }
 
 impl NativePalette {
+    #[must_use]
+    const fn for_theme(theme: egui::Theme) -> Self {
+        match theme {
+            egui::Theme::Light => Self {
+                paper: PAPER,
+                paper_raised: PAPER_RAISED,
+                paper_soft: PAPER_SOFT,
+                ink: INK,
+                ink_soft: INK_SOFT,
+                rule: RULE,
+                accent: ACCENT,
+                accent_fill: ACCENT,
+                accent_soft: ACCENT_SOFT,
+                accent_text: Color32::WHITE,
+                blocked: BLOCKED,
+                disabled: INK_SOFT,
+                high_contrast: false,
+            },
+            egui::Theme::Dark => Self {
+                paper: DARK_PAPER,
+                paper_raised: DARK_PAPER_RAISED,
+                paper_soft: DARK_PAPER_SOFT,
+                ink: DARK_INK,
+                ink_soft: DARK_INK_SOFT,
+                rule: DARK_RULE,
+                accent: DARK_ACCENT,
+                accent_fill: DARK_ACCENT_FILL,
+                accent_soft: DARK_ACCENT_SOFT,
+                accent_text: Color32::WHITE,
+                blocked: DARK_BLOCKED,
+                disabled: DARK_INK_SOFT,
+                high_contrast: false,
+            },
+        }
+    }
+
+    fn theme(self) -> egui::Theme {
+        if u16::from(self.paper.r()) + u16::from(self.paper.g()) + u16::from(self.paper.b()) < 384 {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        }
+    }
+
     #[must_use]
     pub fn high_contrast(
         window: [u8; 3],
@@ -1752,7 +1876,10 @@ pub struct RenamewrightApp {
     undo_inspection: Option<UndoInspectionDto>,
     pending_confirmation: Option<PendingConfirmation>,
     mutation_task: Option<MutationTask>,
+    native_palette: NativePalette,
     palette: NativePalette,
+    appearance: AppearancePreferences,
+    appearance_applied: bool,
     #[cfg(feature = "automation")]
     automation_mode: bool,
     #[cfg(feature = "automation")]
@@ -1776,12 +1903,26 @@ impl RenamewrightApp {
         palette: NativePalette,
         preset_path: Option<PathBuf>,
     ) -> Self {
-        Self::new_configured(_automation_mode, palette, preset_path, None, true)
+        Self::new_configured(
+            _automation_mode,
+            palette,
+            preset_path,
+            None,
+            true,
+            AppearancePreferences::default(),
+        )
     }
 
     #[must_use]
     pub fn new_product(palette: NativePalette, preset_path: Option<PathBuf>) -> Self {
-        Self::new_configured(false, palette, preset_path, None, false)
+        Self::new_configured(
+            false,
+            palette,
+            preset_path,
+            None,
+            false,
+            AppearancePreferences::default(),
+        )
     }
 
     #[must_use]
@@ -1790,7 +1931,31 @@ impl RenamewrightApp {
         preset_path: Option<PathBuf>,
         journal_root: Option<PathBuf>,
     ) -> Self {
-        Self::new_configured(false, palette, preset_path, journal_root, false)
+        Self::new_configured(
+            false,
+            palette,
+            preset_path,
+            journal_root,
+            false,
+            AppearancePreferences::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn new_product_with_persistence(
+        palette: NativePalette,
+        preset_path: Option<PathBuf>,
+        journal_root: Option<PathBuf>,
+        storage: Option<&dyn eframe::Storage>,
+    ) -> Self {
+        Self::new_configured(
+            false,
+            palette,
+            preset_path,
+            journal_root,
+            false,
+            AppearancePreferences::load(storage),
+        )
     }
 
     fn new_configured(
@@ -1799,6 +1964,7 @@ impl RenamewrightApp {
         preset_path: Option<PathBuf>,
         journal_root: Option<PathBuf>,
         synthetic_fixture: bool,
+        appearance: AppearancePreferences,
     ) -> Self {
         let (presets, preset_status) = preset_path.as_ref().map_or_else(
             || (PresetDocumentDto::default(), None),
@@ -1867,7 +2033,10 @@ impl RenamewrightApp {
             undo_inspection: None,
             pending_confirmation: None,
             mutation_task: None,
+            native_palette: palette,
             palette,
+            appearance,
+            appearance_applied: false,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
             #[cfg(feature = "automation")]
@@ -1884,8 +2053,14 @@ impl RenamewrightApp {
     ) -> Self {
         let preset_path = automation_root.state_root().join("presets.json");
         let journal_root = automation_root.journal_root().to_path_buf();
-        let mut app =
-            Self::new_configured(true, palette, Some(preset_path), Some(journal_root), true);
+        let mut app = Self::new_configured(
+            true,
+            palette,
+            Some(preset_path),
+            Some(journal_root),
+            true,
+            AppearancePreferences::default(),
+        );
         if let Some(fixture) = fixture {
             if let Some(prefix) = fixture.prefix() {
                 app.set_prefix(prefix);
@@ -2599,7 +2774,62 @@ impl RenamewrightApp {
         }
     }
 
+    fn apply_appearance(&mut self, context: &egui::Context) {
+        if self.native_palette.high_contrast {
+            if !self.appearance_applied || self.palette != self.native_palette {
+                self.palette = self.native_palette;
+                install_theme(context, self.palette);
+                self.appearance_applied = true;
+            }
+            return;
+        }
+
+        let theme = self.appearance.theme.effective(context);
+        let palette = NativePalette::for_theme(theme);
+        if !self.appearance_applied || self.palette != palette {
+            self.palette = palette;
+            install_theme(context, palette);
+            self.appearance_applied = true;
+        }
+        context.set_theme(self.appearance.theme.preference());
+    }
+
+    fn show_appearance_menu(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        ui.menu_button(self.locale.text(semantics::APPEARANCE, "모양"), |ui| {
+            ui.set_min_width(180.0);
+            ui.label(
+                RichText::new(self.locale.text("Theme", "테마"))
+                    .strong()
+                    .color(self.palette.ink),
+            );
+            ui.add_enabled_ui(!self.native_palette.high_contrast, |ui| {
+                for theme in AppearanceTheme::ALL {
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.appearance.theme,
+                            theme,
+                            theme.label(self.locale),
+                        )
+                        .changed();
+                }
+            });
+            if self.native_palette.high_contrast {
+                ui.separator();
+                ui.label(
+                    RichText::new(self.locale.text(
+                        semantics::HIGH_CONTRAST_OVERRIDES_APPEARANCE,
+                        "Windows 고대비가 모양 색상을 우선합니다",
+                    ))
+                    .color(self.palette.ink),
+                );
+            }
+        });
+        changed
+    }
+
     fn show_source_bar(&mut self, ui: &mut egui::Ui) {
+        let mut appearance_changed = false;
         ui.horizontal(|ui| {
             ui.heading(RichText::new(semantics::PRODUCT_NAME).color(self.palette.ink));
             ui.label(
@@ -2636,6 +2866,7 @@ impl RenamewrightApp {
                     })
                     .response
                     .on_hover_text(semantics::LANGUAGE);
+                appearance_changed |= self.show_appearance_menu(ui);
                 let history = ui.selectable_label(
                     self.ledger_open,
                     self.locale.text(semantics::HISTORY, "기록"),
@@ -2660,6 +2891,11 @@ impl RenamewrightApp {
                 }
             });
         });
+        if appearance_changed {
+            self.appearance_applied = false;
+            self.apply_appearance(ui.ctx());
+            ui.ctx().request_repaint();
+        }
     }
 
     fn show_rule_command_bar(&mut self, ui: &mut egui::Ui) {
@@ -3550,6 +3786,7 @@ impl RenamewrightApp {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        self.apply_appearance(ui.ctx());
         self.poll_mutation(ui.ctx());
         let add_folder_shortcut = egui::KeyboardShortcut::new(
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
@@ -3680,6 +3917,10 @@ impl eframe::App for RenamewrightApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, APPEARANCE_STORAGE_KEY, &self.appearance);
+    }
 }
 
 impl Drop for RenamewrightApp {
@@ -3694,36 +3935,7 @@ impl Drop for RenamewrightApp {
 }
 
 pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
-    if !palette.high_contrast {
-        ctx.set_theme(egui::Theme::Light);
-        let mut style = (*ctx.style_of(egui::Theme::Light)).clone();
-        style.visuals = egui::Visuals::light();
-        style.visuals.panel_fill = palette.paper;
-        style.visuals.window_fill = palette.paper_raised;
-        style.visuals.selection.bg_fill = palette.accent_soft;
-        style.visuals.selection.stroke = Stroke::new(1.0, palette.accent);
-        style.visuals.widgets.inactive.fg_stroke.color = palette.ink;
-        style.visuals.widgets.hovered.bg_fill = palette.accent_soft;
-        style.visuals.widgets.hovered.fg_stroke.color = palette.ink;
-        style.visuals.widgets.active.bg_fill = palette.accent_fill;
-        style.visuals.widgets.active.fg_stroke.color = palette.accent_text;
-        style.text_styles.insert(
-            egui::TextStyle::Heading,
-            FontId::new(22.0, FontFamily::Proportional),
-        );
-        ctx.set_style_of(egui::Theme::Light, style);
-        return;
-    }
-
-    let theme = if u16::from(palette.paper.r())
-        + u16::from(palette.paper.g())
-        + u16::from(palette.paper.b())
-        < 384
-    {
-        egui::Theme::Dark
-    } else {
-        egui::Theme::Light
-    };
+    let theme = palette.theme();
     ctx.set_theme(theme);
     let mut style = (*ctx.style_of(theme)).clone();
     style.visuals = if theme == egui::Theme::Dark {
@@ -3741,7 +3953,14 @@ pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
     style.visuals.extreme_bg_color = palette.paper_raised;
     style.visuals.text_edit_bg_color = Some(palette.paper_raised);
     style.visuals.selection.bg_fill = palette.accent_soft;
-    style.visuals.selection.stroke = Stroke::new(1.0, palette.accent_text);
+    style.visuals.selection.stroke = Stroke::new(
+        1.0,
+        if palette.high_contrast {
+            palette.accent_text
+        } else {
+            palette.accent
+        },
+    );
     style.visuals.hyperlink_color = palette.accent;
     style.visuals.warn_fg_color = palette.blocked;
     style.visuals.error_fg_color = palette.blocked;
@@ -3755,8 +3974,19 @@ pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
     style.visuals.widgets.inactive.fg_stroke.color = palette.ink;
     style.visuals.widgets.hovered.bg_fill = palette.accent_soft;
     style.visuals.widgets.hovered.weak_bg_fill = palette.accent_soft;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(2.0, palette.accent_text);
-    style.visuals.widgets.hovered.fg_stroke.color = palette.accent_text;
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(
+        2.0,
+        if palette.high_contrast {
+            palette.accent_text
+        } else {
+            palette.accent
+        },
+    );
+    style.visuals.widgets.hovered.fg_stroke.color = if palette.high_contrast {
+        palette.accent_text
+    } else {
+        palette.ink
+    };
     style.visuals.widgets.active.bg_fill = palette.accent_fill;
     style.visuals.widgets.active.weak_bg_fill = palette.accent_fill;
     style.visuals.widgets.active.bg_stroke = Stroke::new(2.0, palette.accent_text);
@@ -3772,6 +4002,7 @@ pub fn install_theme(ctx: &egui::Context, palette: NativePalette) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::error::Error;
     use std::fs;
     #[cfg(feature = "automation")]
@@ -3788,10 +4019,31 @@ mod tests {
         AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
     };
     use super::{
-        Locale, MutationTask, NativePalette, PREVIEW_PROPOSED_COLUMN_WIDTH,
+        AppearanceTheme, Locale, MutationTask, NativePalette, PREVIEW_PROPOSED_COLUMN_WIDTH,
         PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, RenamewrightApp, RuleKind,
         RuleRequestDto, install_theme, preview_column_label, semantics,
     };
+
+    #[derive(Default)]
+    struct MemoryStorage {
+        values: BTreeMap<String, String>,
+    }
+
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.values.get(key).cloned()
+        }
+
+        fn set_string(&mut self, key: &str, value: String) {
+            self.values.insert(key.to_owned(), value);
+        }
+
+        fn remove_string(&mut self, key: &str) {
+            self.values.remove(key);
+        }
+
+        fn flush(&mut self) {}
+    }
 
     #[test]
     fn confirmed_mutation_cannot_replace_the_tracked_task() -> Result<(), Box<dyn Error>> {
@@ -3894,6 +4146,74 @@ mod tests {
         harness.get_by_label(semantics::HISTORY).click();
         harness.run_ok();
         harness.get_by_label(semantics::REFRESH_LEDGER);
+    }
+
+    #[test]
+    fn appearance_keeps_theme_choices_disclosed_until_requested() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                RenamewrightApp::new_product(NativePalette::default(), None),
+            );
+
+        assert!(harness.query_by_label(semantics::THEME_SYSTEM).is_none());
+        harness.get_by_label(semantics::APPEARANCE).click();
+        harness.run_ok();
+        harness.get_by_label(semantics::THEME_SYSTEM);
+        harness.get_by_label(semantics::THEME_LIGHT);
+        harness.get_by_label(semantics::THEME_DARK).click();
+        harness.run_ok();
+
+        assert_eq!(harness.state().appearance.theme, AppearanceTheme::Dark);
+        assert_eq!(harness.state().palette.theme(), egui::Theme::Dark);
+        assert!(harness.state().plan.is_none());
+    }
+
+    #[test]
+    fn appearance_theme_persists_without_storing_a_plan() {
+        let mut storage = MemoryStorage::default();
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.appearance.theme = AppearanceTheme::Dark;
+        eframe::App::save(&mut app, &mut storage);
+
+        let restored = RenamewrightApp::new_product_with_persistence(
+            NativePalette::default(),
+            None,
+            None,
+            Some(&storage),
+        );
+        assert_eq!(restored.appearance.theme, AppearanceTheme::Dark);
+        assert!(restored.plan.is_none());
+        assert!(restored.pending_confirmation.is_none());
+    }
+
+    #[test]
+    fn high_contrast_disables_theme_choices_and_explains_the_override() {
+        let palette = NativePalette::high_contrast(
+            [0, 0, 0],
+            [255, 255, 255],
+            [255, 255, 0],
+            [0, 0, 0],
+            [0, 255, 0],
+        );
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                RenamewrightApp::new_product(palette, None),
+            );
+
+        harness.get_by_label(semantics::APPEARANCE).click();
+        harness.run_ok();
+        assert!(
+            harness
+                .get_by_label(semantics::THEME_LIGHT)
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label(semantics::HIGH_CONTRAST_OVERRIDES_APPEARANCE);
+        assert_eq!(harness.state().palette, palette);
     }
 
     #[test]
