@@ -7,6 +7,8 @@ const APP_MANIFEST: &str = include_str!("../Cargo.toml");
 const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yaml");
 const REPOSITORY_SETTINGS: &str = include_str!("../../../.github/settings.yaml");
 const SECURITY_WORKFLOW: &str = include_str!("../../../.github/workflows/security.yaml");
+const CODEX_SECURITY_WORKFLOW: &str =
+    include_str!("../../../.github/workflows/codex-security.yaml");
 const ACCEPTANCE_WORKFLOW: &str =
     include_str!("../../../.github/workflows/windows-acceptance.yaml");
 const RELEASE_WORKFLOW: &str = include_str!("../../../.github/workflows/release.yaml");
@@ -21,6 +23,7 @@ const CODEX_SECURITY_THREAT_MODEL: &str =
 const CODEX_SECURITY_SCAN_PROMPT: &str = include_str!("../../../.github/codex-security/scan.md");
 const CODEX_SECURITY_HELPER: &str = include_str!("../../../scripts/security/codex-security.sh");
 const PRE_COMMIT_HOOK: &str = include_str!("../../../.githooks/pre-commit");
+const DEPENDABOT_CONFIG: &str = include_str!("../../../.github/dependabot.yaml");
 
 #[test]
 fn repository_has_one_rust_owned_product_shell() {
@@ -120,6 +123,50 @@ fn codex_security_cli_is_locked_private_and_repository_specific() {
     }
     assert!(CODEX_SECURITY_SCAN_PROMPT.contains("source-to-sink"));
     assert!(CODEX_SECURITY_SCAN_PROMPT.contains("deferred runtime coverage"));
+}
+
+#[test]
+fn codex_security_ci_keeps_credentials_away_from_untrusted_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert!(CODEX_SECURITY_WORKFLOW.contains("vars.CODEX_SECURITY_ENABLED == 'true'"));
+    assert!(CODEX_SECURITY_WORKFLOW.contains("github.actor != 'dependabot[bot]'"));
+    assert!(!CODEX_SECURITY_WORKFLOW.contains("pull_request_target"));
+
+    let trusted_checkout = CODEX_SECURITY_WORKFLOW
+        .find("name: Check out trusted CLI lock and scan policy")
+        .ok_or("trusted Codex Security checkout is required")?;
+    let locked_install = CODEX_SECURITY_WORKFLOW
+        .find("name: Install locked Codex Security and preserve trusted policy")
+        .ok_or("locked Codex Security install is required")?;
+    let source_checkout = CODEX_SECURITY_WORKFLOW
+        .find("name: Check out exact source revision")
+        .ok_or("exact source checkout is required")?;
+    assert!(trusted_checkout < locked_install);
+    assert!(locked_install < source_checkout);
+
+    for required in [
+        "npm ci",
+        "--ignore-scripts",
+        "$RUNNER_TEMP/codex-security-policy",
+        "OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}",
+        "--auth api-key",
+        "git merge-base",
+        "--export-format sarif",
+        "security-events: write",
+        "scan-manifest.json",
+        "coverage.json",
+        "retention-days: 7",
+    ] {
+        assert!(
+            CODEX_SECURITY_WORKFLOW.contains(required),
+            "Codex Security workflow omitted {required}"
+        );
+    }
+    assert!(!CODEX_SECURITY_WORKFLOW.contains("npm install"));
+    assert!(!CODEX_SECURITY_WORKFLOW.contains("findings.json\n"));
+    assert!(DEPENDABOT_CONFIG.contains("directory: \"/.github/codex-security\""));
+    assert!(DEPENDABOT_CONFIG.contains("prefix: \"chore(deps-security)\""));
+    Ok(())
 }
 
 #[test]
