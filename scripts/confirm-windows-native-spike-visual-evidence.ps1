@@ -121,7 +121,7 @@ $evidencePath = Assert-ChecksumCoveredFile `
   -ExpectedChecksums $expectedChecksums `
   -FileName $evidenceFileName `
   -Context $evidenceFileName
-$evidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
+$evidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json -DateKind String
 
 if ([int](Get-RequiredProperty -Object $evidence -Name 'schemaVersion' -Context $evidenceFileName) -ne 2) {
   throw 'The interactive evidence used an unsupported schema version.'

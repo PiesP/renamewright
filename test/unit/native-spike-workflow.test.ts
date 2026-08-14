@@ -210,6 +210,7 @@ test('confirms visual review only after binding both captured screenshots', () =
   expect(visualReviewer).toContain('[switch]$ConfirmReadableContrast');
   expect(visualReviewer).toContain('[switch]$ConfirmVisibleKeyboardFocus');
   expect(visualReviewer).toContain('[switch]$ConfirmUnclippedLayout');
+  expect(visualReviewer).toContain('ConvertFrom-Json -DateKind String');
   expect(visualReviewer).toContain("schemaVersion' -Context $evidenceFileName) -ne 2");
   expect(visualReviewer).toContain("capturedAtUtc' -Context $evidenceFileName");
   expect(visualReviewer).toContain('$confirmedAt -le $capturedAt');
