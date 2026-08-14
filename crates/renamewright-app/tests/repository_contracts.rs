@@ -117,6 +117,7 @@ fn hosted_gates_scope_expensive_work_without_hiding_required_checks()
     let docs = Command::new("bash")
         .arg(&classifier)
         .arg("docs/product-design.md")
+        .env_remove("GITHUB_OUTPUT")
         .output()?;
     assert!(docs.status.success());
     let docs = String::from_utf8(docs.stdout)?;
@@ -127,6 +128,7 @@ fn hosted_gates_scope_expensive_work_without_hiding_required_checks()
     let rust = Command::new("bash")
         .arg(&classifier)
         .arg("crates/renamewright-app/src/main.rs")
+        .env_remove("GITHUB_OUTPUT")
         .output()?;
     assert!(rust.status.success());
     let rust = String::from_utf8(rust.stdout)?;
@@ -145,6 +147,7 @@ fn hosted_gates_scope_expensive_work_without_hiding_required_checks()
     let unknown = Command::new("bash")
         .arg(&classifier)
         .arg("new-project-input.bin")
+        .env_remove("GITHUB_OUTPUT")
         .output()?;
     assert!(unknown.status.success());
     let unknown = String::from_utf8(unknown.stdout)?;
