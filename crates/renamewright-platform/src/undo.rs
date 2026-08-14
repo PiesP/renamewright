@@ -33,6 +33,19 @@ pub struct UndoTransactionInspection {
     readiness: UndoReadiness,
 }
 
+#[derive(Debug)]
+pub struct UndoTransactionSnapshot {
+    inspection: UndoTransactionInspection,
+    records: Vec<JournalRecord>,
+}
+
+impl UndoTransactionSnapshot {
+    #[must_use]
+    pub const fn inspection(&self) -> UndoTransactionInspection {
+        self.inspection
+    }
+}
+
 impl UndoTransactionInspection {
     #[must_use]
     pub const fn ledger_id(self) -> LedgerId {
@@ -136,6 +149,15 @@ pub fn inspect_undo_transaction<F: ExecutionFileSystem + ?Sized>(
     ledger_id: LedgerId,
     filesystem: &F,
 ) -> Result<UndoTransactionInspection, UndoError> {
+    inspect_undo_transaction_snapshot(ledger, ledger_id, filesystem)
+        .map(|snapshot| snapshot.inspection())
+}
+
+pub fn inspect_undo_transaction_snapshot<F: ExecutionFileSystem + ?Sized>(
+    ledger: &RenameLedger,
+    ledger_id: LedgerId,
+    filesystem: &F,
+) -> Result<UndoTransactionSnapshot, UndoError> {
     let projection = ledger
         .entry(ledger_id)
         .ok_or_else(|| UndoError::new(None, UndoErrorKind::JournalUnavailable))?;
@@ -197,11 +219,14 @@ pub fn inspect_undo_transaction<F: ExecutionFileSystem + ?Sized>(
         }
     }
 
-    Ok(UndoTransactionInspection {
-        ledger_id,
-        original_plan_id,
-        source_count: entries.len(),
-        readiness,
+    Ok(UndoTransactionSnapshot {
+        inspection: UndoTransactionInspection {
+            ledger_id,
+            original_plan_id,
+            source_count: entries.len(),
+            readiness,
+        },
+        records,
     })
 }
 
@@ -211,20 +236,22 @@ pub fn prepare_undo_transaction<F: ExecutionFileSystem + ?Sized>(
     new_plan_id: PlanId,
     filesystem: &F,
 ) -> Result<PreparedUndo, UndoError> {
-    let inspection = inspect_undo_transaction(ledger, ledger_id, filesystem)?;
+    let snapshot = inspect_undo_transaction_snapshot(ledger, ledger_id, filesystem)?;
+    prepare_undo_transaction_from_snapshot(ledger, snapshot, new_plan_id, filesystem)
+}
+
+pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
+    ledger: &RenameLedger,
+    snapshot: UndoTransactionSnapshot,
+    new_plan_id: PlanId,
+    filesystem: &F,
+) -> Result<PreparedUndo, UndoError> {
+    let inspection = snapshot.inspection();
     if !inspection.undo_available() {
         return Err(UndoError::new(None, UndoErrorKind::ActionUnavailable));
     }
-    let (_, journal) = ledger
-        .item(ledger_id)
-        .ok_or_else(|| UndoError::new(None, UndoErrorKind::JournalUnavailable))?;
-    let records = journal
-        .frames()
-        .iter()
-        .map(|frame| frame.record().clone())
-        .collect::<Vec<_>>();
-    let (_, original_entries) = header(&records)?;
-    let source_generation = projection_generation(&records)?;
+    let (_, original_entries) = header(&snapshot.records)?;
+    let source_generation = projection_generation(&snapshot.records)?;
     let mut entries = Vec::with_capacity(original_entries.len());
     for original in original_entries {
         let parent = original.native_parent().ok_or_else(|| {

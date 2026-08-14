@@ -49,8 +49,9 @@ pub use recovery::{
 };
 pub use undo::{
     PreparedUndo, UndoBlockReason, UndoError, UndoErrorKind, UndoReadiness,
-    UndoTransactionInspection, execute_prepared_undo, inspect_undo_transaction,
-    prepare_undo_transaction,
+    UndoTransactionInspection, UndoTransactionSnapshot, execute_prepared_undo,
+    inspect_undo_transaction, inspect_undo_transaction_snapshot, prepare_undo_transaction,
+    prepare_undo_transaction_from_snapshot,
 };
 
 pub const MAX_ADMITTED_SOURCES: usize = 10_000;

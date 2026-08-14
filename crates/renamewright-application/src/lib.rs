@@ -20,8 +20,8 @@ use renamewright_platform::{
     PreparedStepDisposition, RecoveryAction, RecoveryReadiness, RecoveryTransactionInspection,
     RenameLedger, SourceRegistry, UndoBlockReason, UndoReadiness, UndoTransactionInspection,
     execute_frozen_plan, execute_prepared_undo, freeze_execution_plan,
-    inspect_recovery_transaction, inspect_undo_transaction, prepare_undo_transaction,
-    reconcile_prepared_step, recover_transaction,
+    inspect_recovery_transaction, inspect_undo_transaction, inspect_undo_transaction_snapshot,
+    prepare_undo_transaction_from_snapshot, reconcile_prepared_step, recover_transaction,
 };
 use serde::{Deserialize, Serialize};
 
@@ -2396,14 +2396,14 @@ where
         Err(TryLockError::Poisoned(_)) => return Err(UndoCommandErrorKind::StateUnavailable),
     };
     let ledger_id = LedgerId::from_value(request.inspection.ledger_id);
-    let inspection = {
+    let snapshot = {
         let mut ledger = state
             .ledger
             .lock()
             .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
         validate_undo_expectation(&mut ledger, request, ledger_id, filesystem)?
     };
-    if !confirm(inspection) {
+    if !confirm(snapshot.inspection()) {
         let mut ledger = state
             .ledger
             .lock()
@@ -2422,9 +2422,9 @@ where
         .ledger
         .lock()
         .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
-    validate_undo_expectation(&mut ledger, request, ledger_id, filesystem)?;
+    let snapshot = validate_undo_expectation(&mut ledger, request, ledger_id, filesystem)?;
     let plan_id = allocate_transaction_plan_id(state, &ledger)?;
-    let prepared = prepare_undo_transaction(&ledger, ledger_id, plan_id, filesystem)
+    let prepared = prepare_undo_transaction_from_snapshot(&ledger, snapshot, plan_id, filesystem)
         .map_err(|_| UndoCommandErrorKind::InspectionChanged)?;
     let recovery_session =
         RecoverySession::begin(&state.recovery_control, true).map_err(|kind| match kind {
@@ -2450,22 +2450,23 @@ fn validate_undo_expectation<F>(
     request: &UndoRequestDto,
     ledger_id: LedgerId,
     filesystem: &F,
-) -> Result<UndoTransactionInspection, UndoCommandErrorKind>
+) -> Result<renamewright_platform::UndoTransactionSnapshot, UndoCommandErrorKind>
 where
     F: ExecutionFileSystem + ?Sized,
 {
     ledger
         .refresh()
         .map_err(|_| UndoCommandErrorKind::LedgerRefreshFailed)?;
-    let inspection = inspect_undo_transaction(ledger, ledger_id, filesystem)
+    let snapshot = inspect_undo_transaction_snapshot(ledger, ledger_id, filesystem)
         .map_err(|_| UndoCommandErrorKind::InspectionChanged)?;
+    let inspection = snapshot.inspection();
     if UndoInspectionDto::from(inspection) != request.inspection {
         return Err(UndoCommandErrorKind::InspectionChanged);
     }
     if !inspection.undo_available() {
         return Err(UndoCommandErrorKind::ActionUnavailable);
     }
-    Ok(inspection)
+    Ok(snapshot)
 }
 
 fn allocate_transaction_plan_id(

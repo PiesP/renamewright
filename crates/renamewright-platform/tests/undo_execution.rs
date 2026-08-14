@@ -2,7 +2,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use renamewright_core::{
@@ -19,6 +19,51 @@ use renamewright_platform::{
 struct FaultingFileSystem {
     inner: LinuxExecutionFileSystem,
     rename_calls: AtomicUsize,
+}
+
+struct JournalSwappingFileSystem {
+    inner: LinuxExecutionFileSystem,
+    journal_path: PathBuf,
+    replacement: Vec<u8>,
+    identity_calls: AtomicUsize,
+}
+
+impl JournalSwappingFileSystem {
+    fn new(journal_path: PathBuf, replacement: Vec<u8>) -> Self {
+        Self {
+            inner: LinuxExecutionFileSystem::new(),
+            journal_path,
+            replacement,
+            identity_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl ExecutionFileSystem for JournalSwappingFileSystem {
+    fn identity(
+        &self,
+        parent: &Path,
+        native_name: &OsStr,
+    ) -> Result<ExecutionIdentity, ExecutionFsError> {
+        let identity = self.inner.identity(parent, native_name);
+        if self.identity_calls.fetch_add(1, Ordering::SeqCst) == 2
+            && fs::write(&self.journal_path, &self.replacement).is_err()
+        {
+            return Err(ExecutionFsError::from_kind(ExecutionFsErrorKind::IoFailure));
+        }
+        identity
+    }
+
+    fn rename_no_replace(
+        &self,
+        parent: &Path,
+        source_name: &OsStr,
+        target_name: &OsStr,
+        expected_identity: ExecutionIdentity,
+    ) -> Result<ExecutionIdentity, ExecutionFsError> {
+        self.inner
+            .rename_no_replace(parent, source_name, target_name, expected_identity)
+    }
 }
 
 impl FaultingFileSystem {
@@ -61,13 +106,21 @@ impl ExecutionFileSystem for FaultingFileSystem {
 }
 
 fn completed_fixture() -> Result<(tempfile::TempDir, RenameLedger), Box<dyn std::error::Error>> {
+    completed_fixture_named("source.txt", "a-original.rwj", PlanId::new(81))
+}
+
+fn completed_fixture_named(
+    source_name: &str,
+    journal_name: &str,
+    plan_id: PlanId,
+) -> Result<(tempfile::TempDir, RenameLedger), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let source = directory.path().join("source.txt");
+    let source = directory.path().join(source_name);
     fs::write(&source, b"source")?;
     let mut registry = SourceRegistry::new();
     registry.admit_paths([source])?;
     let plan = build_plan_with_environment(
-        PlanId::new(81),
+        plan_id,
         registry.generation(),
         &registry.snapshots(),
         &[RenameRule::prefix("final-")],
@@ -80,7 +133,7 @@ fn completed_fixture() -> Result<(tempfile::TempDir, RenameLedger), Box<dyn std:
         execute_frozen_plan(
             frozen,
             &filesystem,
-            &directory.path().join("a-original.rwj"),
+            &directory.path().join(journal_name),
             || false,
         )?,
         ExecutionOutcome::Completed
@@ -131,6 +184,32 @@ fn inspects_and_executes_undo_as_a_new_lineaged_transaction()
     assert!(!entries[0].undo_available());
     assert_eq!(entries[1].undo_of_plan_id(), Some(PlanId::new(81)));
     assert!(!entries[1].undo_available());
+    Ok(())
+}
+
+#[test]
+fn undo_preparation_keeps_the_journal_snapshot_validated_for_execution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (authorized_directory, ledger) = completed_fixture()?;
+    let (replacement_directory, _) =
+        completed_fixture_named("attacker.txt", "replacement.rwj", PlanId::new(181))?;
+    let authorized_journal = authorized_directory.path().join("a-original.rwj");
+    let replacement = fs::read(replacement_directory.path().join("replacement.rwj"))?;
+    let filesystem = JournalSwappingFileSystem::new(authorized_journal, replacement);
+
+    let prepared = prepare_undo_transaction(
+        &ledger,
+        first_ledger_id(&ledger)?,
+        PlanId::new(82),
+        &filesystem,
+    )?;
+    let JournalRecord::TransactionStarted { entries, .. } = prepared.initial_record() else {
+        return Err("prepared undo had no journal header".into());
+    };
+
+    assert_eq!(entries[0].undo_of_plan_id(), Some(PlanId::new(81)));
+    assert_eq!(entries[0].names().original_name(), "final-source.txt");
+    assert_eq!(entries[0].names().final_name(), "source.txt");
     Ok(())
 }
 
