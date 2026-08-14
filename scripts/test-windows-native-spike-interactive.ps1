@@ -636,24 +636,8 @@ try {
     throw 'The native spike high-contrast palette did not match the observed Windows state.'
   }
 
-  $nativeDragDropExercised = $false
-  $nativeDragDropStatus = ''
-  if ($RequireExplorerDragDrop) {
-    Set-And-VerifySourceBoundFocus `
-      -Element $changedButton `
-      -Window $windowHandle `
-      -OwnerProcessId $application.Id `
-      -Context 'the Explorer drag/drop target' | Out-Null
-    Write-Host (
-      'Drag one or more disposable files from the current-session Explorer ' +
-      "window into Renamewright within $ExplorerDragDropTimeoutSeconds seconds."
-    )
-    $nativeDragDropStatus = Wait-ForExplorerDropStatus `
-      -Root $applicationRoot `
-      -TimeoutSeconds $ExplorerDragDropTimeoutSeconds
-    $nativeDragDropExercised = $true
-  }
-
+  # Exercise the synthetic 10,000-entry fixture before a real Explorer drop
+  # replaces the planner state with the operator-selected sources.
   $performanceProbeOutput = Invoke-Probe `
     -ProbePath $inspectionProbe `
     -Arguments @('--exercise-performance', $performanceScreenshotPath) `
@@ -681,6 +665,24 @@ try {
   }
   if ($filterMilliseconds -gt $performanceBudgets.tenThousandEntryFilterMilliseconds) {
     throw "The interactive 10,000-entry filter took $filterMilliseconds ms, exceeding the $($performanceBudgets.tenThousandEntryFilterMilliseconds)-ms budget."
+  }
+
+  $nativeDragDropExercised = $false
+  $nativeDragDropStatus = ''
+  if ($RequireExplorerDragDrop) {
+    Set-And-VerifySourceBoundFocus `
+      -Element $changedButton `
+      -Window $windowHandle `
+      -OwnerProcessId $application.Id `
+      -Context 'the Explorer drag/drop target' | Out-Null
+    Write-Host (
+      'Drag one or more disposable files from the current-session Explorer ' +
+      "window into Renamewright within $ExplorerDragDropTimeoutSeconds seconds."
+    )
+    $nativeDragDropStatus = Wait-ForExplorerDropStatus `
+      -Root $applicationRoot `
+      -TimeoutSeconds $ExplorerDragDropTimeoutSeconds
+    $nativeDragDropExercised = $true
   }
 
   $remainingDpi = @($supportedDpiPercent | Where-Object { $_ -ne $dpiPercent })
