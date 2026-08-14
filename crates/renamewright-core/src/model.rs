@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
+use std::sync::Arc;
 
 macro_rules! numeric_id {
     ($name:ident) => {
@@ -347,8 +348,8 @@ pub struct PlanRow {
     entry_kind: Option<EntryKind>,
     original_name: OsString,
     proposed_name: OsString,
-    original_display: String,
-    proposed_display: String,
+    original_display: Arc<str>,
+    proposed_display: Arc<str>,
     status: NameStatus,
     trace: Vec<TraceStep>,
     diagnostics: Vec<Diagnostic>,
@@ -364,8 +365,8 @@ impl PlanRow {
         diagnostics: Vec<Diagnostic>,
     ) -> Self {
         let original_name = source.native_name().to_os_string();
-        let original_display = original_name.to_string_lossy().into_owned();
-        let proposed_display = proposed_name.to_string_lossy().into_owned();
+        let original_display = Arc::from(original_name.to_string_lossy());
+        let proposed_display = Arc::from(proposed_name.to_string_lossy());
         let status = status_for(&original_name, &proposed_name, &diagnostics);
 
         Self {
@@ -438,6 +439,16 @@ impl PlanRow {
     #[must_use]
     pub fn proposed_display(&self) -> &str {
         &self.proposed_display
+    }
+
+    #[must_use]
+    pub fn original_display_shared(&self) -> Arc<str> {
+        Arc::clone(&self.original_display)
+    }
+
+    #[must_use]
+    pub fn proposed_display_shared(&self) -> Arc<str> {
+        Arc::clone(&self.proposed_display)
     }
 
     #[must_use]

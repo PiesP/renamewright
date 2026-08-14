@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
     CaseMode, CharacterClass, CharacterClassOperation, DiagnosticCode, ExecutionDirection,
@@ -1738,8 +1738,8 @@ pub struct PlanDto {
 pub struct PlanRowDto {
     source_id: u64,
     entry_kind: &'static str,
-    original_name: String,
-    proposed_name: String,
+    original_name: Arc<str>,
+    proposed_name: Arc<str>,
     status: &'static str,
     diagnostics: Vec<&'static str>,
     override_applied: bool,
@@ -2134,8 +2134,8 @@ impl From<&RenamePlan> for PlanDto {
                 .map(|row| PlanRowDto {
                     source_id: row.source_id().value(),
                     entry_kind: entry_kind_name(row.entry_kind()),
-                    original_name: row.original_display().to_owned(),
-                    proposed_name: row.proposed_display().to_owned(),
+                    original_name: row.original_display_shared(),
+                    proposed_name: row.proposed_display_shared(),
                     status: status_name(row.status()),
                     diagnostics: row
                         .diagnostics()
@@ -2944,6 +2944,14 @@ mod tests {
         assert!(row.diagnostics().is_empty());
         assert!(!row.override_applied());
         assert!(row.source_id() > 0);
+        let stored = state.latest_plan.lock().map_err(|_| "plan lock failed")?;
+        let core_name = stored
+            .as_ref()
+            .ok_or("the latest plan was not retained")?
+            .plan
+            .rows()[0]
+            .proposed_display_shared();
+        assert!(std::sync::Arc::ptr_eq(&core_name, &row.proposed_name));
         Ok(())
     }
 
