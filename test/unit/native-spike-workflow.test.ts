@@ -198,6 +198,12 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('Update-ArtifactChecksums');
   expect(interactive).not.toContain('Invoke-Expression');
   expect(interactive).not.toContain('DownloadString');
+
+  const performanceProbeIndex = interactive.indexOf('$performanceProbeOutput = Invoke-Probe');
+  const explorerDropIndex = interactive.indexOf('$nativeDragDropExercised = $false');
+  expect(performanceProbeIndex).toBeGreaterThan(-1);
+  expect(explorerDropIndex).toBeGreaterThan(-1);
+  expect(performanceProbeIndex).toBeLessThan(explorerDropIndex);
 });
 
 test('confirms visual review only after binding both captured screenshots', () => {
