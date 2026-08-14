@@ -52,9 +52,9 @@ inspection, and an incomplete, torn, oversized, legacy, or locally modified
 journal must fail closed. Native picker and drag/drop paths are trusted only as
 Rust-side inputs to admission; they are not safe to disclose to the WebView.
 
-Native confirmation is the user-authorization boundary for Recovery and Undo.
-WebView intent alone is not authorization. The filesystem state observed before
-confirmation is not assumed to remain current afterward.
+Native confirmation is the user-authorization boundary for new-plan Apply,
+Recovery, and Undo. UI intent alone is not authorization. The filesystem state
+observed before confirmation is not assumed to remain current afterward.
 
 Third-party packages, downloaded build tools, GitHub Actions, lockfiles, SBOMs,
 checksums, and uploaded artifacts form the software supply-chain boundary.
@@ -71,8 +71,11 @@ checksums, and uploaded artifacts form the software supply-chain boundary.
 - Counts, text fields, generated rule output, trace retention, journal frames,
   journal discovery, and serialized documents are bounded before large
   allocations or copies. Invalid and unsupported input fails closed.
-- Applying a newly previewed plan remains disabled and no new-plan Apply command
-  is registered. Only Recovery and Undo may mutate names in the current product.
+- New-plan Apply is available only in the native shell for the exact current
+  plan ID after native confirmation. The application service freezes and
+  revalidates the Rust-owned plan, chooses the journal below its initialized
+  data root, and holds the same mutation and cancellation boundary as Recovery
+  and Undo. No path-bearing Apply command is registered.
 - Default release builds contain no custom HTTP, TCP inspection, MCP, shell, or
   general filesystem automation API. Test automation requires a separately
   compiled feature, an explicit launch mode, loopback binding, isolated local

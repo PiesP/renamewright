@@ -20,8 +20,10 @@ through the private channel.
   runtime network content is required.
 - The WebView receives opaque source identifiers rather than arbitrary native
   write paths.
-- Applying a newly previewed plan remains disabled, and no new-plan Apply command
-  is registered.
+- New-plan Apply accepts only the exact current plan ID in the native shell and
+  requires native confirmation, fresh identity validation, a backend-selected
+  journal, and journaled no-replace execution. No path-bearing Apply command is
+  registered.
 - Recovery and Undo of existing journals require a current path-free inspection,
   native confirmation, fresh identity validation, and journaled no-replace
   execution.

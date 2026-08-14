@@ -17,24 +17,27 @@ The repository contains the published 0.1.0 Windows baseline. Native picker and
 drag/drop admission retain paths in Rust, the Workbench virtualises and filters
 large rule-based plans, and Windows name, occupied-destination, and stale-source
 diagnostics block unsafe proposals. Plans can be inspected as versioned,
-path-free JSON and exported through a native create-new dialog. Applying a new
-plan remains disabled; recovery and Undo are limited to journaled transactions,
-fresh filesystem revalidation, and native user confirmation.
+path-free JSON and exported through a native create-new dialog. The published
+0.1.0 Tauri baseline keeps new-plan Apply disabled; its recovery and Undo remain
+limited to journaled transactions, fresh filesystem revalidation, and native
+user confirmation.
 
 Post-0.1 development is replacing the Tauri/Solid shell with an
 `eframe`/`egui` native Rust UI. The UI-independent
 `renamewright-application` service now owns session state, source admission,
 planning, inspection/export, Ledger, Recovery, Undo, cancellation, and execution
 preparation; Tauri retains only its framework adapters and native dialogs. The
-native read-only workbench now sends selected, dropped, and root-confined test
+native workbench now sends selected, dropped, and root-confined test
 fixture paths directly into that service and renders only its path-free plan
 projection. It exposes every ordered rule family, diagnostics, source overrides,
 bounded local presets, Korean/English UI text, and path-free JSON/CSV inspection
 and create-new export; its retained 10,000-row synthetic view remains a UI
-performance fixture. The target artifact is one portable Windows executable
-with no Node.js, WebView2, or sidecar runtime. New-plan Apply and directory
-execution remain disabled until their dedicated journal, Windows, automation,
-and packaged UI gates pass.
+performance fixture. The native shell also owns Ledger, Recovery, Undo, and
+current-plan Apply. Apply requires an unblocked current plan, visible native
+confirmation, fresh identity revalidation, a single mutation lock, and a new
+durable no-replace journal. Directory execution remains unavailable until its
+type-aware planning and Windows handle gates pass. The target artifact is one
+portable Windows executable with no Node.js, WebView2, or sidecar runtime.
 
 ## Development
 

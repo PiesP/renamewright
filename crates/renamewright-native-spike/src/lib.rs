@@ -13,11 +13,12 @@ use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
 };
 use renamewright_application::{
-    ApplicationService, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
-    ExtensionOperationDto, FilenamePartDto, LedgerEntryDto, PlanDto, PresetDocumentDto,
-    RangeOperationDto, RangeOriginDto, RecoveryCommandAction, RecoveryCommandErrorDto,
-    RecoveryCommandResultDto, RecoveryInspectionDto, RecoveryRequestDto, RulePipelineRequestDto,
-    RuleRequestDto, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, SourceOverrideDto,
+    ApplicationService, ApplyCommandErrorDto, ApplyCommandResultDto, CaseModeDto,
+    CharacterClassDto, CharacterClassOperationDto, ExtensionOperationDto, FilenamePartDto,
+    LedgerEntryDto, PlanDto, PresetDocumentDto, RangeOperationDto, RangeOriginDto,
+    RecoveryCommandAction, RecoveryCommandErrorDto, RecoveryCommandResultDto,
+    RecoveryInspectionDto, RecoveryRequestDto, RulePipelineRequestDto, RuleRequestDto,
+    SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, SourceOverrideDto,
     UndoCommandErrorDto, UndoCommandResultDto, UndoInspectionDto, UndoRequestDto,
     UnicodeNormalizationFormDto,
 };
@@ -1106,6 +1107,10 @@ struct InspectionDocument {
 
 #[derive(Debug)]
 enum PendingConfirmation {
+    Apply {
+        plan_id: u64,
+        changed_count: usize,
+    },
     Recovery {
         action: RecoveryCommandAction,
         inspection: RecoveryInspectionDto,
@@ -1118,6 +1123,7 @@ enum PendingConfirmation {
 
 #[derive(Debug)]
 enum MutationMessage {
+    Apply(Result<ApplyCommandResultDto, ApplyCommandErrorDto>),
     Recovery(Result<RecoveryCommandResultDto, RecoveryCommandErrorDto>),
     Undo(Result<UndoCommandResultDto, UndoCommandErrorDto>),
 }
@@ -1981,6 +1987,29 @@ impl NativeSpikeApp {
 
     fn start_confirmed_mutation(&mut self, confirmation: PendingConfirmation) {
         match confirmation {
+            PendingConfirmation::Apply {
+                plan_id,
+                changed_count: _,
+            } => {
+                let application = Arc::clone(&self.application);
+                let (sender, receiver) = mpsc::channel();
+                let handle = thread::spawn(move || {
+                    let result = application.apply_latest_plan(
+                        plan_id,
+                        &NativeExecutionFileSystem::new(),
+                        || false,
+                    );
+                    let _ = sender.send(MutationMessage::Apply(result));
+                });
+                self.mutation_task = Some(MutationTask {
+                    receiver,
+                    handle: Some(handle),
+                });
+                self.status = self
+                    .locale
+                    .text("Applying the current plan", "현재 계획을 적용 중입니다")
+                    .to_owned();
+            }
             PendingConfirmation::Recovery { action, inspection } => {
                 let request = RecoveryRequestDto::new(action, &inspection);
                 let application = Arc::clone(&self.application);
@@ -2046,6 +2075,24 @@ impl NativeSpikeApp {
             return;
         };
         match task.receiver.try_recv() {
+            Ok(MutationMessage::Apply(result)) => {
+                if let Some(task) = self.mutation_task.take() {
+                    task.finish();
+                }
+                self.status = match result {
+                    Ok(result) => {
+                        self.plan = None;
+                        self.overrides.clear();
+                        format!(
+                            "{}: {}",
+                            self.locale.text("Apply finished", "적용 완료"),
+                            result.outcome()
+                        )
+                    }
+                    Err(error) => format!("Apply failed ({})", error.code()),
+                };
+                self.refresh_ledger();
+            }
             Ok(MutationMessage::Recovery(result)) => {
                 if let Some(task) = self.mutation_task.take() {
                     task.finish();
@@ -2659,22 +2706,36 @@ impl NativeSpikeApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let apply_text = if self.palette.high_contrast {
+                let can_apply = self.plan.as_ref().is_some_and(PlanDto::can_apply)
+                    && self.journal_root.is_some()
+                    && self.mutation_task.is_none();
+                let apply_text = if self.palette.high_contrast && !can_apply {
                     RichText::new(self.locale.text(semantics::APPLY, "적용"))
                         .color(self.palette.disabled)
                 } else {
                     RichText::new(self.locale.text(semantics::APPLY, "적용"))
                 };
-                ui.add_enabled(false, egui::Button::new(apply_text))
+                if ui
+                    .add_enabled(can_apply, egui::Button::new(apply_text))
                     .on_disabled_hover_text(self.locale.text(
-                        "The native read-only workbench never mutates the filesystem",
-                        "네이티브 읽기 전용 작업대는 파일 시스템을 변경하지 않습니다",
-                    ));
-                ui.label(
-                    RichText::new(self.locale.text(semantics::APPLY_LOCKED, "적용 잠김"))
-                        .color(self.palette.blocked)
-                        .strong(),
-                );
+                        "Apply requires an unblocked current plan and journal storage",
+                        "차단되지 않은 현재 계획과 저널 저장소가 있어야 적용할 수 있습니다",
+                    ))
+                    .clicked()
+                    && let Some(plan) = &self.plan
+                {
+                    self.pending_confirmation = Some(PendingConfirmation::Apply {
+                        plan_id: plan.plan_id(),
+                        changed_count: plan.changed_count(),
+                    });
+                }
+                if !can_apply {
+                    ui.label(
+                        RichText::new(self.locale.text(semantics::APPLY_LOCKED, "적용 잠김"))
+                            .color(self.palette.blocked)
+                            .strong(),
+                    );
+                }
                 if ui
                     .add_enabled(
                         self.plan.is_some(),
@@ -2870,6 +2931,13 @@ impl NativeSpikeApp {
         let mut cancel_confirmation = false;
         if let Some(pending) = &self.pending_confirmation {
             let (title, detail) = match pending {
+                PendingConfirmation::Apply {
+                    plan_id,
+                    changed_count,
+                } => (
+                    self.locale.text(semantics::CONFIRM_ACTION, "작업 확인"),
+                    format!("Apply plan #{plan_id} · {changed_count} changes"),
+                ),
                 PendingConfirmation::Recovery { action, inspection } => (
                     self.locale.text(semantics::CONFIRM_ACTION, "작업 확인"),
                     format!(
@@ -3306,6 +3374,31 @@ mod tests {
         assert!(journal_root.is_dir());
         assert_eq!(app.journal_root.as_deref(), Some(journal_root.as_path()));
         assert!(app.ledger.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn applicable_plan_requires_explicit_native_confirmation() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = NativeSpikeApp::new_product_with_data(
+            NativePalette::default(),
+            Some(directory.path().join("presets.json")),
+            Some(directory.path().join("journals")),
+        );
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_200.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        let apply = harness.get_by_label(semantics::APPLY);
+        assert!(!apply.accesskit_node().is_disabled());
+        apply.click();
+        harness.run_ok();
+        harness.get_by_label(semantics::CONFIRM_ACTION);
+        assert!(harness.state().pending_confirmation.is_some());
         Ok(())
     }
 

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
@@ -34,6 +34,7 @@ pub struct ApplicationService {
     mutation_lock: Mutex<()>,
     recovery_control: Mutex<RecoveryControl>,
     ledger: Mutex<RenameLedger>,
+    journal_root: Mutex<Option<PathBuf>>,
 }
 
 #[derive(Debug, Default)]
@@ -1043,6 +1044,70 @@ pub enum PrepareExecutionError {
     Freeze { kind: FreezeExecutionErrorKind },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyCommandErrorKind {
+    Busy,
+    StateUnavailable,
+    PlanUnavailable,
+    PlanChanged,
+    JournalUnavailable,
+    ExecutionFailed,
+    LedgerRefreshFailed,
+}
+
+impl ApplyCommandErrorKind {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::StateUnavailable => "stateUnavailable",
+            Self::PlanUnavailable => "planUnavailable",
+            Self::PlanChanged => "planChanged",
+            Self::JournalUnavailable => "journalUnavailable",
+            Self::ExecutionFailed => "executionFailed",
+            Self::LedgerRefreshFailed => "ledgerRefreshFailed",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyCommandResultDto {
+    performed: bool,
+    outcome: &'static str,
+    ledger: Vec<LedgerEntryDto>,
+}
+
+impl ApplyCommandResultDto {
+    #[must_use]
+    pub const fn performed(&self) -> bool {
+        self.performed
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> &'static str {
+        self.outcome
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApplyCommandErrorDto {
+    code: &'static str,
+}
+
+impl ApplyCommandErrorDto {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl From<ApplyCommandErrorKind> for ApplyCommandErrorDto {
+    fn from(kind: ApplyCommandErrorKind) -> Self {
+        Self { code: kind.code() }
+    }
+}
+
 impl std::fmt::Display for PrepareExecutionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -1090,6 +1155,7 @@ impl Default for ApplicationService {
             mutation_lock: Mutex::new(()),
             recovery_control: Mutex::new(RecoveryControl::default()),
             ledger: Mutex::new(RenameLedger::default()),
+            journal_root: Mutex::new(None),
         }
     }
 }
@@ -1102,7 +1168,10 @@ impl ApplicationService {
     pub fn initialize(&self, journal_root: &Path) -> Result<(), String> {
         std::fs::create_dir_all(journal_root)
             .map_err(|_| "the journal directory could not be prepared".to_owned())?;
-        let ledger = RenameLedger::discover(journal_root)
+        let journal_root = journal_root
+            .canonicalize()
+            .map_err(|_| "the journal directory could not be resolved".to_owned())?;
+        let ledger = RenameLedger::discover(&journal_root)
             .map_err(|_| "the rename ledger could not be loaded".to_owned())?;
         let next_plan_id = ledger
             .entries()
@@ -1119,6 +1188,10 @@ impl ApplicationService {
             .ledger
             .lock()
             .map_err(|_| "the rename ledger is unavailable".to_owned())? = ledger;
+        *self
+            .journal_root
+            .lock()
+            .map_err(|_| "the journal location is unavailable".to_owned())? = Some(journal_root);
         Ok(())
     }
 
@@ -1272,6 +1345,20 @@ impl ApplicationService {
         C: FnOnce(UndoTransactionInspection) -> bool,
     {
         perform_undo_request(self, request, filesystem, confirm).map_err(UndoCommandErrorDto::from)
+    }
+
+    pub fn apply_latest_plan<F, C>(
+        &self,
+        plan_id: u64,
+        filesystem: &F,
+        should_cancel: C,
+    ) -> Result<ApplyCommandResultDto, ApplyCommandErrorDto>
+    where
+        F: ExecutionFileSystem + ?Sized,
+        C: Fn() -> bool,
+    {
+        perform_apply_request(self, PlanId::new(plan_id), filesystem, should_cancel)
+            .map_err(ApplyCommandErrorDto::from)
     }
 
     pub fn request_confirmed_cancellation<C>(
@@ -2212,6 +2299,57 @@ where
     Ok(RecoveryCommandResultDto {
         performed: true,
         outcome,
+        ledger: ledger.entries().map(LedgerEntryDto::from).collect(),
+    })
+}
+
+fn perform_apply_request<F, C>(
+    state: &ApplicationService,
+    plan_id: PlanId,
+    filesystem: &F,
+    should_cancel: C,
+) -> Result<ApplyCommandResultDto, ApplyCommandErrorKind>
+where
+    F: ExecutionFileSystem + ?Sized,
+    C: Fn() -> bool,
+{
+    let recovery_session =
+        RecoverySession::begin(&state.recovery_control, true).map_err(|kind| match kind {
+            RecoveryCommandErrorKind::Busy => ApplyCommandErrorKind::Busy,
+            _ => ApplyCommandErrorKind::StateUnavailable,
+        })?;
+    let journal_root = state
+        .journal_root
+        .lock()
+        .map_err(|_| ApplyCommandErrorKind::StateUnavailable)?
+        .clone()
+        .ok_or(ApplyCommandErrorKind::JournalUnavailable)?;
+    let prepared =
+        prepare_latest_execution(state, plan_id, filesystem).map_err(|error| match error {
+            PrepareExecutionError::Busy => ApplyCommandErrorKind::Busy,
+            PrepareExecutionError::LatestPlanUnavailable => ApplyCommandErrorKind::PlanUnavailable,
+            PrepareExecutionError::PlanMismatch | PrepareExecutionError::Freeze { .. } => {
+                ApplyCommandErrorKind::PlanChanged
+            }
+            PrepareExecutionError::MutationLockUnavailable
+            | PrepareExecutionError::RegistryUnavailable => ApplyCommandErrorKind::StateUnavailable,
+        })?;
+    let journal_path = journal_root.join(format!("plan-{:016x}.rwj", plan_id.value()));
+    let outcome = prepared
+        .execute(filesystem, &journal_path, || {
+            should_cancel() || recovery_session.cancel_requested()
+        })
+        .map_err(|_| ApplyCommandErrorKind::ExecutionFailed)?;
+    let mut ledger = state
+        .ledger
+        .lock()
+        .map_err(|_| ApplyCommandErrorKind::StateUnavailable)?;
+    ledger
+        .refresh()
+        .map_err(|_| ApplyCommandErrorKind::LedgerRefreshFailed)?;
+    Ok(ApplyCommandResultDto {
+        performed: true,
+        outcome: recovery_outcome_name(outcome),
         ledger: ledger.entries().map(LedgerEntryDto::from).collect(),
     })
 }
@@ -3827,6 +3965,44 @@ mod tests {
         assert_eq!(
             fs::read(directory.path().join("final-source.txt"))?,
             b"source"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_use_case_revalidates_executes_and_refreshes_the_ledger() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source.txt");
+        let journal_root = directory.path().join("journals");
+        fs::write(&source, b"source")?;
+        let state = ApplicationService::default();
+        state.initialize(&journal_root)?;
+        let plan = state.admit_sources_with_rules(
+            [source.clone()],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+
+        let result = state
+            .apply_latest_plan(plan.plan_id(), &LinuxExecutionFileSystem::new(), || false)
+            .map_err(|error| error.code())?;
+
+        assert!(result.performed());
+        assert_eq!(result.outcome(), "completed");
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(directory.path().join("final-source.txt"))?,
+            b"source"
+        );
+        assert_eq!(state.list_ledger()?.len(), 1);
+        assert_eq!(
+            state
+                .apply_latest_plan(plan.plan_id(), &LinuxExecutionFileSystem::new(), || false,)
+                .err()
+                .ok_or("the consumed plan was applied twice")?
+                .code(),
+            "planUnavailable"
         );
         Ok(())
     }
