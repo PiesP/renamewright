@@ -21,3 +21,7 @@ if is_default_branch "$branch"; then
   echo "Direct commits on '$branch' are blocked. Use a work branch." >&2
   exit 1
 fi
+
+if [[ "$(git config --bool --get hooks.codexSecurity || true)" == "true" ]]; then
+  scripts/security/codex-security.sh hook
+fi
