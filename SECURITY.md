@@ -6,16 +6,14 @@ policy in `.github/SECURITY.md`.
 
 ## System and scope
 
-Renamewright is a Windows-first, local desktop batch-renaming workbench. Version
-0.1 uses Rust, Tauri 2, and a bundled Solid/TypeScript WebView. Post-0.1 work is
-migrating the shell and UI to `eframe`/`egui`; the extracted UI-independent Rust
-application service owns state and use cases while shell frameworks retain
-native dialogs and adapter code. The native shell also supports explicitly
-selected directory entries without recursive discovery. Security review covers
-both shells while they coexist, the Rust core,
+Renamewright is a Windows-first, local desktop batch-renaming workbench. The
+product is a native Rust `eframe`/`egui` application; its UI-independent
+application service owns state and use cases while the shell retains native
+dialogs and presentation. Explicit directory entries are admitted without
+recursive discovery. Security review covers the native application, core,
 application and platform crates, the Windows native boundary, journal and
 recovery formats, test-only automation, build workflows, dependency controls,
-and Windows acceptance artifacts.
+and Windows portable artifacts.
 
 The production application has no public network listener, account, telemetry,
 cloud sync, updater, remote UI, shell integration, or user-script/plugin system.
@@ -34,12 +32,6 @@ Important assets are:
 
 ## Threat model and trust boundaries
 
-Treat WebView JavaScript and every Tauri command argument as attacker-controlled
-while the compatibility shell exists. A finding at this boundary does not
-require a separately demonstrated XSS when the registered command itself exposes
-an unsafe native capability. The absence of remote content, the restrictive CSP,
-and bundled assets remain relevant to likelihood and severity.
-
 Treat every test-only inspection message, injected input event, fixture manifest,
 and automation root as untrusted. The automation feature has the authority of
 the current local user and is never assumed harmless merely because it binds to
@@ -51,7 +43,8 @@ filesystem races, and journal files as untrusted. A user may select a hostile
 directory entry, local filesystem state may change after selection or
 inspection, and an incomplete, torn, oversized, legacy, or locally modified
 journal must fail closed. Native picker and drag/drop paths are trusted only as
-Rust-side inputs to admission; they are not safe to disclose to the WebView.
+Rust-side inputs to admission; they are not safe to disclose through path-free
+UI or automation projections.
 
 Native confirmation is the user-authorization boundary for new-plan Apply,
 Recovery, and Undo. UI intent alone is not authorization. The filesystem state
@@ -62,13 +55,11 @@ checksums, and uploaded artifacts form the software supply-chain boundary.
 
 ## Security invariants
 
-- Native paths remain Rust-owned. UI models, WebView DTOs during migration,
-  inspection output, status text, plan JSON/CSV, and ordinary logs expose opaque
-  IDs, display names, and structured codes rather than absolute paths or
-  journal-native names.
-- Registered Tauri commands do not accept arbitrary source, destination,
-  journal, or export paths from the WebView. Export destinations are selected
-  natively and opened with create-new semantics.
+- Native paths remain Rust-owned. UI models, inspection output, status text,
+  plan JSON/CSV, and ordinary logs expose opaque IDs, display names, and
+  structured codes rather than absolute paths or journal-native names.
+- Export destinations are selected natively and opened with create-new
+  semantics. No UI or automation message supplies mutation or journal paths.
 - Counts, text fields, generated rule output, trace retention, journal frames,
   journal discovery, and serialized documents are bounded before large
   allocations or copies. Invalid and unsupported input fails closed.
@@ -121,8 +112,8 @@ filesystem access or replacement, authorization bypass, journal corruption or
 unrecoverable state, resource exhaustion, unsafe-boundary unsoundness, or
 supply-chain/artifact substitution.
 
-Local-only impact is not automatically informational. A reliable WebView-to-
-native path disclosure or local application memory-exhaustion path can be
+Local-only impact is not automatically informational. A reliable UI or
+automation path disclosure or local application memory-exhaustion path can be
 medium when it crosses an explicit boundary or materially affects availability.
 Filesystem corruption, arbitrary overwrite, mutation without current native
 confirmation, escape from selected parents, or exploitable memory unsafety may
@@ -132,8 +123,9 @@ execution or broad release supply-chain compromise. Missing defense in depth
 without a realistic source-to-sink path is generally low or informational.
 
 Calibrate severity using demonstrated reachability, required local interaction,
-whether a compromised WebView is already required, filesystem scope, recovery
-possibility, and whether impact is limited to one local application instance.
+whether the test-only automation feature is already required, filesystem scope,
+recovery possibility, and whether impact is limited to one local application
+instance.
 Do not downgrade solely because the application is desktop-only, and do not
 upgrade based on hypothetical internet or multi-user infrastructure that the
 repository does not contain.
@@ -143,7 +135,7 @@ repository does not contain.
 - Vulnerabilities in the original DarkNamer executable or unrelated software
   are outside this repository's scope.
 - Claims that require a hosted service, account system, updater, remote content,
-  shell plugin, or broad Tauri filesystem permission that is absent from the
+  shell plugin, or general-purpose filesystem API that is absent from the
   reviewed revision are not reachable product findings.
 - Linux and macOS packaging defects are not release blockers while Windows
   x86-64 remains the only supported release target. Portable Rust-domain defects
@@ -156,8 +148,8 @@ repository does not contain.
   labelled unsigned acceptance build is not by itself a vulnerability. A false
   signature claim, checksum mismatch, provenance failure, or unsigned artifact
   represented as a signed release is reportable.
-- Displaying the selected file's base name is intended product behavior. Native
-  parent paths and journal-native paths are not intended WebView data.
+- Displaying the selected entry's base name is intended product behavior. Native
+  parent paths and journal-native paths are not intended UI or automation data.
 
 These exclusions are not suppression authority for a concrete invariant
 violation. Validate source, reachability, and impact for each candidate.
@@ -165,7 +157,7 @@ violation. Validate source, reachability, and impact for each candidate.
 ## Known limitations and accepted pre-release risk
 
 - No stable release is supported yet. Review the exact commit and artifact SHA.
-- Version 0.1.0 is an explicitly disclosed unsigned bootstrap candidate.
+- Portable acceptance artifacts are explicitly disclosed as unsigned.
   SignPath Foundation is the selected future signing path, subject to external
   project acceptance and trusted-build configuration. Never infer a signature
   from checksums alone.
@@ -176,9 +168,6 @@ violation. Validate source, reachability, and impact for each candidate.
   interval, not a permanent globally unique file UUID.
 - The explicit final-component reparse guarantee does not establish full
   handle-relative traversal of every intermediate directory component.
-- Time-bounded advisory exceptions in `osv-scanner.toml` apply only to the named
-  advisory and documented dependency graph. They do not suppress new advisories
-  or source-level exploitability evidence and must be reassessed before expiry.
 - Tests and scanner success are supporting evidence, not proof of FFI soundness,
   race freedom, correct recovery under every interruption, or artifact
   reproducibility.

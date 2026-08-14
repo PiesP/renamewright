@@ -20,7 +20,7 @@ branches:
         contexts:
           - pr-gate/quality
           - pr-gate/unit
-          - pr-gate/e2e
+          - pr-gate/performance
           - pr-gate/windows
           - pr-gate/osv
           - pr-gate/semgrep

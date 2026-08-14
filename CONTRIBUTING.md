@@ -9,14 +9,14 @@ external action regardless of which tools helped produce it.
 1. Start from the current `master` branch and create a focused work branch.
 2. Keep commits conventional, independently reviewable, and buildable when
    practical.
-3. Run the narrowest relevant check first, then `pnpm verify` before publishing
-   a substantive change.
+3. Run the narrowest relevant Cargo check first, then Rustfmt, strict Clippy,
+   and the complete workspace test suite before publishing substantive work.
 4. Use a pull request for external contributions. Maintainer integrations use
    an explicit merge commit so the reviewed branch remains visible in history.
 
 Source, comments, documentation, commit messages, and pull requests are written
-in English. User-facing strings belong in message catalogs once localization is
-introduced.
+in English. User-facing strings must keep the native Korean/English catalog
+complete.
 
 ## AI-assisted work
 
@@ -24,27 +24,20 @@ AI tools may help with research, implementation, tests, documentation, and
 review. They do not reduce the contributor's obligations:
 
 - review the complete diff and understand security-sensitive behavior;
-- never provide secrets, private user paths, file contents, signing material,
-  or unpublished vulnerability details to an external model without explicit
-  authorization;
-- do not claim a test, review, scan, browser run, or platform check that did not
-  actually complete;
-- treat generated security findings as candidates until source-to-sink impact
-  and reachability are validated;
-- do not let an agent publish, deploy, sign, change repository settings, or
-  contact another person unless that external action was explicitly requested;
-- preserve unrelated work and keep generated artifacts out of commits unless
-  they are deliberate, reproducible project outputs.
-
-No special AI attribution is required. The Git author and pull-request author
-are the accountable contributors.
+- never provide secrets, private paths, file contents, signing material, or
+  unpublished vulnerability details to an external model without approval;
+- never claim a test, scan, platform check, or visual review that did not run;
+- validate generated security findings before remediation or severity claims;
+- do not let an agent publish, sign, change repository settings, or contact
+  another person unless that external action was explicitly requested; and
+- preserve unrelated work and commit only deliberate reproducible artifacts.
 
 ## Safety boundary
 
-The first product milestone is read-only. It may admit filenames, create an
-in-memory rename proposal, and export an inspectable plan, but it must not rename,
-move, replace, or delete filesystem entries. New native capabilities require a
-threat-boundary review and tests before they are exposed to the WebView.
+All rename mutations require the application-service plan, native confirmation,
+fresh filesystem identity checks, a durable journal, and no-replace execution.
+Changes to admission, planning, confirmation, Windows handles, journals,
+Recovery, or Undo require a threat-boundary review and focused regression tests.
 
 ## Reporting problems
 

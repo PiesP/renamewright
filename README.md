@@ -2,104 +2,76 @@
 
 **Plan every rename.**
 
-Renamewright is a Windows-first desktop application for building, reviewing,
-and safely executing bulk file and directory rename plans. The public product,
-repository, and executable share the `Renamewright` name; machine-facing
-identifiers use `renamewright`.
-
-This is a redesign, not a source or bug-compatible reconstruction of the legacy
-`DarkNamer.exe`. The old executable is used only as evidence of useful jobs; the
-new product owns its interaction model, safety guarantees, and implementation.
+Renamewright is a Windows-first, local desktop workbench for building,
+reviewing, executing, recovering, and undoing bulk file and directory rename
+plans. The application is a native Rust executable built with `eframe`/`egui`;
+it has no browser runtime, JavaScript toolchain, sidecar, account, telemetry, or
+background network dependency.
 
 ## Status
 
-The repository contains the published 0.1.0 Windows baseline. Native picker and
-drag/drop admission retain paths in Rust, the Workbench virtualises and filters
-large rule-based plans, and Windows name, occupied-destination, and stale-source
-diagnostics block unsafe proposals. Plans can be inspected as versioned,
-path-free JSON and exported through a native create-new dialog. The published
-0.1.0 Tauri baseline keeps new-plan Apply disabled; its recovery and Undo remain
-limited to journaled transactions, fresh filesystem revalidation, and native
-user confirmation.
+The native workbench admits explicitly selected peer files and directories from
+the picker or drag/drop, keeps native paths below the application boundary, and
+renders a path-free plan projection. Its ordered rules, per-source overrides,
+diagnostics, local presets, JSON/CSV inspection, and virtualized 10,000-entry
+preview are implemented in Rust.
 
-Post-0.1 development is replacing the Tauri/Solid shell with an
-`eframe`/`egui` native Rust UI. The UI-independent
-`renamewright-application` service now owns session state, source admission,
-planning, inspection/export, Ledger, Recovery, Undo, cancellation, and execution
-preparation; Tauri retains only its framework adapters and native dialogs. The
-native workbench now sends selected, dropped, and root-confined test
-fixture paths directly into that service and renders only its path-free plan
-projection. It exposes every ordered rule family, diagnostics, source overrides,
-bounded local presets, Korean/English UI text, and path-free JSON/CSV inspection
-and create-new export; its retained 10,000-row synthetic view remains a UI
-performance fixture. The native shell also owns Ledger, Recovery, Undo, and
-current-plan Apply. Apply requires an unblocked current plan, visible native
-confirmation, fresh identity revalidation, a single mutation lock, and a new
-durable no-replace journal. Explicitly selected peer directories use the same
-identity, journal, rollback, Recovery, and Undo path as files; directory
-selection never enumerates children, extension rules skip directories,
-ancestor/descendant selections are blocked, and moves remain within the original
-parent. The target artifact is one portable Windows executable with no Node.js,
-WebView2, or sidecar runtime.
+Apply requires the exact current unblocked plan, native confirmation, fresh
+identity validation, a single mutation lock, and a new durable no-replace
+journal. Ledger, Recovery, Rollback, Resume, Reconcile, cancellation, and Undo
+reuse that journaled execution boundary. Explicit directory selection never
+enumerates children; extension-only rules skip directories, ancestor/descendant
+selections are blocked, reparse points are not followed, and renames remain
+within the original parent.
+
+The primary distributable is one portable `renamewright.exe`. The default
+feature set contains no custom inspection listener or fixture loader. Test
+automation is compiled only with the explicit `automation` Cargo feature and
+still requires `--automation`, an absolute disposable `--automation-root`, and
+a visible test-mode banner.
 
 ## Development
 
-Use the Rust, Node.js, and pnpm versions pinned by `rust-toolchain.toml` and
-`package.json`. After installing the platform prerequisites for Tauri:
+Install the stable Rust version pinned by `rust-toolchain.toml`, then use Cargo:
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm verify
-pnpm verify:full
-pnpm tauri dev
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
+cargo run --package renamewright-app --bin renamewright --locked
 ```
 
-`pnpm verify` runs frontend formatting, linting, strict types, coverage and build
-checks plus Rustfmt, Clippy, and all Rust workspace tests. `pnpm verify:full`
-additionally exercises the rendered flow and responsive layouts in Chromium.
-The native inspection build is a separate test artifact and starts only when
-compiled with `--features automation` and launched with both `--automation` and
-`--automation-root <absolute-disposable-directory>`. An optional
-`--automation-fixture <relative-json-path>` resolves only below that root's
-bounded `fixtures` directory. A fixture may list up to 10,000 relative source
-files; every component is reparse-checked and remains confined to that fixture
-root before native admission. The loopback inspection adapter services one
-connection at a time and bounds input frames, event batches, requests, viewport
-size, and connection lifetime.
+The native performance gate is also Rust-owned:
+
+```bash
+cargo run --release --locked --package renamewright-platform --example large_batch_budget
+```
+
+Windows release and acceptance builds use the checked-in PowerShell packaging
+scripts. They bind artifacts to the source SHA, reject automation markers in the
+production executable, generate a Cargo-lockfile CycloneDX SBOM, and publish
+SHA-256 manifests. See [RELEASE.md](RELEASE.md) and
+[VALIDATION.md](VALIDATION.md) for the remaining external evidence boundaries.
 
 ## Product commitments
 
-- No file changes until the user reviews an explicit plan.
+- No filesystem mutation until the user reviews an explicit plan and confirms
+  the exact current operation.
 - Deterministic, reorderable rules with immediate preview.
-- Collision, invalid-name, stale-source, and case-only rename diagnostics.
-- Crash-aware execution with a durable journal and best-effort rollback.
-- Undo that revalidates the filesystem instead of promising impossible safety.
-- Native path handling without lossy Unicode conversion.
-- Explicitly selected file and directory entries renamed in place, without
-  following directory symlinks or silently expanding a folder selection.
-- No telemetry, remote content, shell access, or background network traffic in
-  the first release.
-- No custom automation listener in production builds; agent inspection is
-  compiled only into an explicit, root-confined test artifact.
+- Collision, invalid-name, stale-source, identity, and case-only diagnostics.
+- Durable journaling, best-effort rollback, explicit Recovery, and revalidated
+  Undo rather than impossible safety promises.
+- Native path handling without lossy Unicode conversion or UI path disclosure.
+- No telemetry, remote content, shell access, plugin system, or runtime updater.
+- No custom automation listener in the default production build.
 
 ## Code signing policy
 
-Renamewright 0.1.0 is an explicitly identified unsigned bootstrap release.
-Future Windows releases are intended to use free code signing provided by
-[SignPath.io](https://signpath.io/), certificate by
-[SignPath Foundation](https://signpath.org/), after the project is accepted and
-the trusted-build integration is configured.
-
-- Committer, reviewer, and signing approver: [PiesP](https://github.com/PiesP).
-- Only artifacts built from this public repository by the configured GitHub
-  Actions release workflow may be submitted for signing.
-- This program does not transfer information to other networked systems unless
-  specifically requested by the user or the person installing or operating it.
-  GitHub and SignPath apply their own privacy policies when a person visits
-  their services or downloads a release.
-- A release page must state whether its artifacts are signed and publish
-  source-bound checksums. An unsigned artifact must never be represented as
-  signed.
+Current acceptance and portable candidate artifacts are explicitly unsigned.
+Future signed releases may use SignPath.io with a SignPath Foundation
+certificate after the project and trusted-build integration are approved. A
+release must state its signing status and publish source-bound checksums; an
+unsigned artifact must never be represented as signed.
 
 ## License
 
