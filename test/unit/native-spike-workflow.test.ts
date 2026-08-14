@@ -228,6 +228,10 @@ test('merges only intentional source-bound Windows acceptance configurations', (
   expect(matrixMerger).toContain('$highContrastObserved -and');
   expect(matrixMerger).toContain('$highContrastPaletteActive');
   expect(matrixMerger).toContain("'visualReviewConfirmed'");
+  expect(matrixMerger).toContain('Get-RequiredBooleanProperty');
+  expect(matrixMerger).toContain('must be a JSON boolean');
+  expect(matrixMerger).toContain('ConvertFrom-Json -DateKind String');
+  expect(matrixMerger).not.toContain('[bool](Get-RequiredProperty');
   expect(matrixMerger).toContain('$confirmedAt -le $capturedAt');
   expect(matrixMerger).toContain(
     "@('readableContrast', 'visibleKeyboardFocus', 'unclippedLayout')"

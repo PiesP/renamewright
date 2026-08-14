@@ -61,6 +61,19 @@ function Get-RequiredProperty {
   return $property.Value
 }
 
+function Get-RequiredBooleanProperty {
+  param(
+    [Parameter(Mandatory = $true)]$Object,
+    [Parameter(Mandatory = $true)] [string]$Name,
+    [Parameter(Mandatory = $true)] [string]$Context
+  )
+  $value = Get-RequiredProperty -Object $Object -Name $Name -Context $Context
+  if ($value -isnot [bool]) {
+    throw "$Context property '$Name' must be a JSON boolean."
+  }
+  return $value
+}
+
 function ConvertFrom-RoundtripTimestamp {
   param(
     [Parameter(Mandatory = $true)] [string]$Value,
@@ -139,7 +152,7 @@ foreach ($file in $evidenceFiles) {
     throw "$context did not match SHA256SUMS."
   }
 
-  $evidence = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+  $evidence = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json -DateKind String
   if ([int](Get-RequiredProperty -Object $evidence -Name 'schemaVersion' -Context $context) -ne 2) {
     throw "$context used an unsupported schema version."
   }
@@ -150,7 +163,7 @@ foreach ($file in $evidenceFiles) {
     -Value ([string](Get-RequiredProperty -Object $evidence -Name 'capturedAtUtc' -Context $context)) `
     -Context "$context capture timestamp"
   foreach ($checkName in $requiredRunChecks) {
-    if (-not [bool](Get-RequiredProperty -Object $evidence.checks -Name $checkName -Context $context)) {
+    if (-not (Get-RequiredBooleanProperty -Object $evidence.checks -Name $checkName -Context $context)) {
       throw "$context did not pass required check '$checkName'."
     }
   }
@@ -177,18 +190,22 @@ foreach ($file in $evidenceFiles) {
     $observedDpi[$dpiPercent] = $true
   }
 
-  $highContrastObserved = [bool](
-    Get-RequiredProperty -Object $evidence.measurements -Name 'highContrastObserved' -Context $context
-  )
-  $highContrastExercised = [bool](
-    Get-RequiredProperty -Object $evidence.checks -Name 'highContrastModeExercised' -Context $context
-  )
-  $highContrastRequired = [bool](
-    Get-RequiredProperty -Object $evidence.intent -Name 'requireHighContrast' -Context $context
-  )
-  $highContrastPaletteActive = [bool](
-    Get-RequiredProperty -Object $evidence.checks -Name 'highContrastPaletteActive' -Context $context
-  )
+  $highContrastObserved = Get-RequiredBooleanProperty `
+    -Object $evidence.measurements `
+    -Name 'highContrastObserved' `
+    -Context $context
+  $highContrastExercised = Get-RequiredBooleanProperty `
+    -Object $evidence.checks `
+    -Name 'highContrastModeExercised' `
+    -Context $context
+  $highContrastRequired = Get-RequiredBooleanProperty `
+    -Object $evidence.intent `
+    -Name 'requireHighContrast' `
+    -Context $context
+  $highContrastPaletteActive = Get-RequiredBooleanProperty `
+    -Object $evidence.checks `
+    -Name 'highContrastPaletteActive' `
+    -Context $context
   if (
     $highContrastRequired -and
     $highContrastObserved -and
@@ -198,12 +215,14 @@ foreach ($file in $evidenceFiles) {
     $highContrastComplete = $true
   }
 
-  $explorerDragDropExercised = [bool](
-    Get-RequiredProperty -Object $evidence.checks -Name 'nativeDragDropExercised' -Context $context
-  )
-  $explorerDragDropRequired = [bool](
-    Get-RequiredProperty -Object $evidence.intent -Name 'requireExplorerDragDrop' -Context $context
-  )
+  $explorerDragDropExercised = Get-RequiredBooleanProperty `
+    -Object $evidence.checks `
+    -Name 'nativeDragDropExercised' `
+    -Context $context
+  $explorerDragDropRequired = Get-RequiredBooleanProperty `
+    -Object $evidence.intent `
+    -Name 'requireExplorerDragDrop' `
+    -Context $context
   $nativeDragDropStatus = [string](
     Get-RequiredProperty -Object $evidence.measurements -Name 'nativeDragDropStatus' -Context $context
   )
@@ -249,7 +268,7 @@ foreach ($file in $evidenceFiles) {
     throw "$context visual review did not occur after screenshot capture."
   }
   foreach ($reviewCheck in @('readableContrast', 'visibleKeyboardFocus', 'unclippedLayout')) {
-    if (-not [bool](Get-RequiredProperty -Object $visualReview -Name $reviewCheck -Context $context)) {
+    if (-not (Get-RequiredBooleanProperty -Object $visualReview -Name $reviewCheck -Context $context)) {
       throw "$context did not pass visual review check '$reviewCheck'."
     }
   }
