@@ -5,6 +5,7 @@ use std::path::Path;
 const ROOT_MANIFEST: &str = include_str!("../../../Cargo.toml");
 const APP_MANIFEST: &str = include_str!("../Cargo.toml");
 const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yaml");
+const REPOSITORY_SETTINGS: &str = include_str!("../../../.github/settings.yaml");
 const SECURITY_WORKFLOW: &str = include_str!("../../../.github/workflows/security.yaml");
 const ACCEPTANCE_WORKFLOW: &str =
     include_str!("../../../.github/workflows/windows-acceptance.yaml");
@@ -58,6 +59,16 @@ fn hosted_gates_are_cargo_only() {
     assert!(CI_WORKFLOW.contains("--package renamewright-app"));
     assert!(CI_WORKFLOW.contains("--example large_batch_budget"));
     assert!(SECURITY_WORKFLOW.contains("language: [actions, rust]"));
+}
+
+#[test]
+fn branch_protection_requires_native_ui_and_performance_gates() {
+    for required in ["pr-gate/e2e", "pr-gate/performance"] {
+        assert!(
+            REPOSITORY_SETTINGS.contains(&format!("- {required}")),
+            "branch protection omitted {required}"
+        );
+    }
 }
 
 #[test]
