@@ -26,6 +26,28 @@ use renamewright_platform::NativeExecutionFileSystem;
 
 const SAMPLE_COUNT: usize = 10_000;
 const PREVIEW_ROW_HEIGHT: f32 = 28.0;
+const PREVIEW_CELL_HEIGHT: f32 = 20.0;
+const PREVIEW_KIND_COLUMN_WIDTH: f32 = 70.0;
+const PREVIEW_SOURCE_COLUMN_WIDTH: f32 = 130.0;
+const PREVIEW_PROPOSED_COLUMN_WIDTH: f32 = 180.0;
+const PREVIEW_STATUS_COLUMN_WIDTH: f32 = 80.0;
+
+fn preview_column_label(
+    ui: &mut egui::Ui,
+    width: f32,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, PREVIEW_CELL_HEIGHT),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            ui.add(egui::Label::new(text).truncate().halign(Align::Min))
+        },
+    )
+    .inner
+}
 
 pub mod semantics {
     pub const PRODUCT_NAME: &str = "Renamewright";
@@ -2598,37 +2620,33 @@ impl RenamewrightApp {
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [70.0, 20.0],
-                        egui::Label::new(
-                            RichText::new(self.locale.text("Kind", "종류"))
-                                .strong()
-                                .color(self.palette.ink),
-                        ),
+                    preview_column_label(
+                        ui,
+                        PREVIEW_KIND_COLUMN_WIDTH,
+                        RichText::new(self.locale.text("Kind", "종류"))
+                            .strong()
+                            .color(self.palette.ink),
                     );
-                    ui.add_sized(
-                        [130.0, 20.0],
-                        egui::Label::new(
-                            RichText::new(self.locale.text("Source", "원본"))
-                                .strong()
-                                .color(self.palette.ink),
-                        ),
+                    preview_column_label(
+                        ui,
+                        PREVIEW_SOURCE_COLUMN_WIDTH,
+                        RichText::new(self.locale.text("Source", "원본"))
+                            .strong()
+                            .color(self.palette.ink),
                     );
-                    ui.add_sized(
-                        [180.0, 20.0],
-                        egui::Label::new(
-                            RichText::new(self.locale.text("Proposed", "변경안"))
-                                .strong()
-                                .color(self.palette.ink),
-                        ),
+                    preview_column_label(
+                        ui,
+                        PREVIEW_PROPOSED_COLUMN_WIDTH,
+                        RichText::new(self.locale.text("Proposed", "변경안"))
+                            .strong()
+                            .color(self.palette.ink),
                     );
-                    ui.add_sized(
-                        [80.0, 20.0],
-                        egui::Label::new(
-                            RichText::new(self.locale.text("Status", "상태"))
-                                .strong()
-                                .color(self.palette.ink),
-                        ),
+                    preview_column_label(
+                        ui,
+                        PREVIEW_STATUS_COLUMN_WIDTH,
+                        RichText::new(self.locale.text("Status", "상태"))
+                            .strong()
+                            .color(self.palette.ink),
                     );
                     ui.label(
                         RichText::new(self.locale.text("Diagnostics", "진단"))
@@ -2702,26 +2720,30 @@ impl RenamewrightApp {
                             );
                             ui.push_id(index, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [70.0, 20.0],
-                                        egui::Label::new(match entry_kind {
+                                    preview_column_label(
+                                        ui,
+                                        PREVIEW_KIND_COLUMN_WIDTH,
+                                        match entry_kind {
                                             "directory" => self.locale.text("Folder", "폴더"),
                                             "symlink" => self.locale.text("Link", "링크"),
                                             _ => self.locale.text("File", "파일"),
-                                        }),
+                                        },
                                     );
-                                    ui.add_sized([130.0, 20.0], egui::Label::new(&source));
-                                    ui.add_sized([180.0, 20.0], egui::Label::new(proposed));
+                                    preview_column_label(ui, PREVIEW_SOURCE_COLUMN_WIDTH, &source);
+                                    preview_column_label(
+                                        ui,
+                                        PREVIEW_PROPOSED_COLUMN_WIDTH,
+                                        proposed,
+                                    );
                                     let color = if blocked {
                                         self.palette.blocked
                                     } else {
                                         self.palette.accent
                                     };
-                                    ui.add_sized(
-                                        [80.0, 20.0],
-                                        egui::Label::new(
-                                            RichText::new(status).color(color).strong(),
-                                        ),
+                                    preview_column_label(
+                                        ui,
+                                        PREVIEW_STATUS_COLUMN_WIDTH,
+                                        RichText::new(status).color(color).strong(),
                                     );
                                     ui.label(diagnostics);
                                     if let Some(source_id) = source_id
@@ -3266,8 +3288,9 @@ mod tests {
         AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
     };
     use super::{
-        Locale, MutationTask, NativePalette, PendingConfirmation, RenamewrightApp, RuleKind,
-        RuleRequestDto, install_theme, semantics,
+        Locale, MutationTask, NativePalette, PREVIEW_PROPOSED_COLUMN_WIDTH,
+        PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, RenamewrightApp, RuleKind,
+        RuleRequestDto, install_theme, preview_column_label, semantics,
     };
 
     #[test]
@@ -3520,6 +3543,46 @@ mod tests {
         harness.get_by_label("report.txt");
         harness.get_by_label("reviewed-report.txt");
         harness.get_by_label("1 shown");
+        Ok(())
+    }
+
+    #[test]
+    fn preview_column_labels_left_align_and_truncate_long_names() -> Result<(), Box<dyn Error>> {
+        let short_name = "a.txt";
+        let original_name =
+            "quarterly-report-with-a-deliberately-long-name-for-column-alignment.txt";
+        let short_proposed_name = format!("reviewed-{short_name}");
+        let proposed_name = format!("reviewed-{original_name}");
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(600.0, 160.0))
+            .build_ui(|ui| {
+                ui.horizontal(|ui| {
+                    preview_column_label(ui, PREVIEW_SOURCE_COLUMN_WIDTH, "Source");
+                    preview_column_label(ui, PREVIEW_PROPOSED_COLUMN_WIDTH, "Proposed");
+                });
+                ui.horizontal(|ui| {
+                    preview_column_label(ui, PREVIEW_SOURCE_COLUMN_WIDTH, short_name);
+                    preview_column_label(ui, PREVIEW_PROPOSED_COLUMN_WIDTH, &short_proposed_name);
+                });
+                ui.horizontal(|ui| {
+                    preview_column_label(ui, PREVIEW_SOURCE_COLUMN_WIDTH, original_name);
+                    preview_column_label(ui, PREVIEW_PROPOSED_COLUMN_WIDTH, &proposed_name);
+                });
+            });
+        harness.run_ok();
+        let source_header = harness.get_by_label("Source").rect();
+        let proposed_header = harness.get_by_label("Proposed").rect();
+        let short_original = harness.get_by_label(short_name).rect();
+        let long_original = harness.get_by_label(original_name).rect();
+        let short_proposed = harness.get_by_label(&short_proposed_name).rect();
+        let long_proposed = harness.get_by_label(&proposed_name).rect();
+        assert!((source_header.left() - short_original.left()).abs() < 0.5);
+        assert!((source_header.left() - long_original.left()).abs() < 0.5);
+        assert!((proposed_header.left() - short_proposed.left()).abs() < 0.5);
+        assert!((proposed_header.left() - long_proposed.left()).abs() < 0.5);
+        assert!(long_original.width() <= PREVIEW_SOURCE_COLUMN_WIDTH + 0.5);
+        assert!(long_proposed.width() <= PREVIEW_PROPOSED_COLUMN_WIDTH + 0.5);
         Ok(())
     }
 
