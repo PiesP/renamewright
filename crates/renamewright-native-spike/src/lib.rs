@@ -82,6 +82,7 @@ pub mod automation {
     pub const MAX_AUTOMATION_TEXT_BYTES: usize = 4 * 1024;
     pub const MAX_AUTOMATION_EVENTS: usize = 256;
     pub const MAX_AUTOMATION_REQUESTS_PER_CONNECTION: usize = 128;
+    pub const MAX_AUTOMATION_SETTLE_STEPS: u64 = 256;
     pub const MAX_AUTOMATION_SOURCES: usize = 10_000;
     const MAX_AUTOMATION_RELATIVE_PATH_BYTES: usize = 4 * 1024;
     const MAX_AUTOMATION_CONNECTION_DURATION: Duration = Duration::from_secs(120);
@@ -541,6 +542,9 @@ pub mod automation {
                     && *width <= MAX_AUTOMATION_VIEWPORT_WIDTH
                     && *height <= MAX_AUTOMATION_VIEWPORT_HEIGHT
             }
+            Request::Settle { max_steps } => {
+                *max_steps > 0 && *max_steps <= MAX_AUTOMATION_SETTLE_STEPS
+            }
         }
     }
 
@@ -651,7 +655,7 @@ pub mod automation {
 
         use super::{
             DeadlineStream, MAX_AUTOMATION_EVENTS, MAX_AUTOMATION_MESSAGE_BYTES,
-            read_bounded_message, request_is_bounded, serve_bounded,
+            MAX_AUTOMATION_SETTLE_STEPS, read_bounded_message, request_is_bounded, serve_bounded,
         };
 
         #[test]
@@ -718,6 +722,13 @@ pub mod automation {
             assert!(!request_is_bounded(&Request::GetScreenshot {
                 pixels_per_point: Some(f32::NAN),
             }));
+            assert!(request_is_bounded(&Request::Settle {
+                max_steps: MAX_AUTOMATION_SETTLE_STEPS,
+            }));
+            assert!(!request_is_bounded(&Request::Settle {
+                max_steps: MAX_AUTOMATION_SETTLE_STEPS + 1,
+            }));
+            assert!(!request_is_bounded(&Request::Settle { max_steps: 0 }));
         }
 
         #[test]
@@ -2467,7 +2478,7 @@ impl NativeSpikeApp {
                 .raw
                 .dropped_files
                 .iter()
-                .filter_map(|file| file.path.clone())
+                .map(|file| file.path().to_path_buf())
                 .collect::<Vec<_>>()
         });
         if !dropped_paths.is_empty() {
