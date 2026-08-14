@@ -1993,6 +1993,16 @@ impl RenamewrightApp {
     }
 
     fn start_confirmed_mutation(&mut self, confirmation: PendingConfirmation) {
+        if self.mutation_task.is_some() && !matches!(&confirmation, PendingConfirmation::Cancel) {
+            self.status = self
+                .locale
+                .text(
+                    "Another operation is already running",
+                    "다른 작업이 이미 실행 중입니다",
+                )
+                .to_owned();
+            return;
+        }
         match confirmation {
             PendingConfirmation::Apply {
                 plan_id,
@@ -2180,6 +2190,7 @@ impl RenamewrightApp {
             self.undo_inspection = None;
         }
 
+        let mutation_idle = self.mutation_task.is_none();
         let (recovery_available, undo_available) = self
             .selected_ledger_id
             .and_then(|ledger_id| {
@@ -2193,7 +2204,7 @@ impl RenamewrightApp {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
-                    recovery_available,
+                    recovery_available && mutation_idle,
                     egui::Button::new(self.locale.text(semantics::INSPECT_RECOVERY, "복구 검사")),
                 )
                 .clicked()
@@ -2202,7 +2213,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    undo_available,
+                    undo_available && mutation_idle,
                     egui::Button::new(self.locale.text(semantics::INSPECT_UNDO, "실행 취소 검사")),
                 )
                 .clicked()
@@ -2240,7 +2251,10 @@ impl RenamewrightApp {
                         inspection.reconcile_available(),
                     ),
                 ] {
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                    if ui
+                        .add_enabled(enabled && mutation_idle, egui::Button::new(label))
+                        .clicked()
+                    {
                         requested_action = Some(action);
                     }
                 }
@@ -2266,7 +2280,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    inspection.undo_available(),
+                    inspection.undo_available() && mutation_idle,
                     egui::Button::new(self.locale.text(semantics::UNDO, "실행 취소")),
                 )
                 .clicked()
@@ -3240,6 +3254,8 @@ mod tests {
     use std::fs;
     #[cfg(feature = "automation")]
     use std::path::Path;
+    use std::sync::mpsc;
+    use std::thread;
 
     use eframe::egui;
     use egui_kittest::Harness;
@@ -3250,8 +3266,44 @@ mod tests {
         AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
     };
     use super::{
-        Locale, NativePalette, RenamewrightApp, RuleKind, RuleRequestDto, install_theme, semantics,
+        Locale, MutationTask, NativePalette, PendingConfirmation, RenamewrightApp, RuleKind,
+        RuleRequestDto, install_theme, semantics,
     };
+
+    #[test]
+    fn confirmed_mutation_cannot_replace_the_tracked_task() -> Result<(), Box<dyn Error>> {
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        let (message_sender, receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = release_receiver.recv();
+            drop(message_sender);
+        });
+        let original_thread = handle.thread().id();
+        app.mutation_task = Some(MutationTask {
+            receiver,
+            handle: Some(handle),
+        });
+
+        app.start_confirmed_mutation(PendingConfirmation::Apply {
+            plan_id: 1,
+            changed_count: 1,
+        });
+
+        let tracked_thread = app
+            .mutation_task
+            .as_ref()
+            .and_then(|task| task.handle.as_ref())
+            .map(|handle| handle.thread().id());
+        assert_eq!(tracked_thread, Some(original_thread));
+        assert_eq!(app.status, "Another operation is already running");
+
+        release_sender.send(())?;
+        if let Some(task) = app.mutation_task.take() {
+            task.finish();
+        }
+        Ok(())
+    }
 
     #[test]
     fn accesskit_exposes_primary_workbench_controls() {
