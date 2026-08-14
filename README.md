@@ -30,6 +30,30 @@ automation is compiled only with the explicit `automation` Cargo feature and
 still requires `--automation`, an absolute disposable `--automation-root`, and
 a visible test-mode banner.
 
+## Interaction design
+
+The native UI follows a direct-command workbench model inspired by the short,
+predictable workflow of classic batch renamers without reproducing their hidden
+state or unsafe mutation behavior:
+
+1. Add explicitly selected files or directory entries. Adding a directory entry
+   never implies recursive discovery.
+2. Press a labelled command such as Replace, Prefix, Suffix, Number, Remove
+   range, Extension, or Case.
+3. Enter only the values required by that command. The first field receives
+   focus, the live preview updates while editing, `Enter` commits the rule, and
+   `Escape` closes the edit without applying filesystem changes.
+4. Review the compact ordered rule chain and the before-and-after name table.
+5. Resolve every blocked row, then confirm the exact changed count shown by the
+   Apply action.
+
+Common rules are buttons rather than a rule-type dropdown. Only one inline rule
+editor is open at a time, while committed rules remain visible and reorderable.
+Rename Ledger, Recovery, Undo, presets, and inspection exports are on-demand
+surfaces so the preview retains the majority of the window. A disabled Apply
+action always has persistent explanatory text; safety information never depends
+on hover or colour alone.
+
 ## Development
 
 Install the stable Rust version pinned by `rust-toolchain.toml`, then use Cargo:
@@ -58,6 +82,7 @@ SHA-256 manifests. See [RELEASE.md](RELEASE.md) and
 - No filesystem mutation until the user reviews an explicit plan and confirms
   the exact current operation.
 - Deterministic, reorderable rules with immediate preview.
+- Direct rule buttons with keyboard-focused, progressively disclosed inputs.
 - Collision, invalid-name, stale-source, identity, and case-only diagnostics.
 - Durable journaling, best-effort rollback, explicit Recovery, and revalidated
   Undo rather than impossible safety promises.
