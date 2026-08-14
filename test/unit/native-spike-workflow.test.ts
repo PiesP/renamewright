@@ -244,6 +244,16 @@ test('merges only intentional source-bound Windows acceptance configurations', (
   expect(matrixMerger).toContain('sources · [0-9]+ changed · [0-9]+ blocked');
   expect(matrixMerger).toContain('Assert-Screenshot');
   expect(matrixMerger).toContain('checksumsVerified = $true');
+  expect(matrixMerger).toContain('[switch]$SkipDpiMatrix');
+  expect(matrixMerger).toContain('[switch]$SkipHighContrast');
+  expect(matrixMerger).toContain('$SkipDpiMatrix -or $remainingDpi.Count -eq 0');
+  expect(matrixMerger).toContain('$SkipHighContrast -or $highContrastComplete');
+  expect(matrixMerger).toContain("dpiMatrix = if ($SkipDpiMatrix) { 'skipped' }");
+  expect(matrixMerger).toContain("highContrast = if ($SkipHighContrast) { 'skipped' }");
+  expect(matrixMerger).toContain("explorerDragDrop = 'required'");
+  expect(matrixMerger).toContain('dpiPercent = $remainingDpi');
+  expect(matrixMerger).toContain('highContrast = (-not $highContrastComplete)');
+  expect(matrixMerger).toContain('schemaVersion = 3');
   expect(matrixMerger).toContain("status = if ($complete) { 'complete' } else { 'partial' }");
   expect(matrixMerger).toContain('$RequireComplete -and -not $complete');
   expect(matrixMerger).not.toContain('Set-ItemProperty');
