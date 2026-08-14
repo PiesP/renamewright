@@ -54,6 +54,8 @@ fn hosted_gates_are_cargo_only() {
         }
     }
     assert!(CI_WORKFLOW.contains("cargo test --workspace --all-targets --all-features --locked"));
+    assert!(CI_WORKFLOW.contains("name: pr-gate/e2e"));
+    assert!(CI_WORKFLOW.contains("--package renamewright-app"));
     assert!(CI_WORKFLOW.contains("--example large_batch_budget"));
     assert!(SECURITY_WORKFLOW.contains("language: [actions, rust]"));
 }

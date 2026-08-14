@@ -55,6 +55,27 @@ jobs:
       - name: Run the complete Rust workspace test suite
         run: cargo test --workspace --all-targets --all-features --locked
 
+  native-ui:
+    name: pr-gate/e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Exercise native UI, accessibility, and automation contracts
+        run: >-
+          cargo test
+          --package renamewright-app
+          --all-targets
+          --all-features
+          --locked
+
   performance:
     name: pr-gate/performance
     runs-on: ubuntu-24.04
