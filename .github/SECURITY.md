@@ -49,6 +49,27 @@ scripts/security/codex-security.sh branch origin/master
 scripts/security/codex-security.sh full
 ```
 
+Review and reconcile saved findings through the same locked CLI and private
+state directory:
+
+```bash
+scripts/security/codex-security.sh login --device-auth
+scripts/security/codex-security.sh login-status
+scripts/security/codex-security.sh scans list
+scripts/security/codex-security.sh scans rerun PREVIOUS_SCAN_ID
+scripts/security/codex-security.sh scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+scripts/security/codex-security.sh findings list
+scripts/security/codex-security.sh validate findings.json "Recheck the reviewed finding"
+scripts/security/codex-security.sh findings false-positive OCCURRENCE_ID \
+  --reason "Specific reviewed evidence that makes this path unreachable"
+scripts/security/codex-security.sh logout
+```
+
+Only use `false-positive` after source-to-sink review. A resolved comparison
+requires the later scan to cover the original target and location without gaps;
+otherwise the result remains unknown. Use `validate` for security-critical fixes
+because scan comparison tracks result changes but does not prove remediation.
+
 To opt into the high-severity pre-commit check without replacing the versioned
 Git hook, run `git config hooks.codexSecurity true`. Disable it with
 `git config --unset hooks.codexSecurity`. Authentication defaults to the stored

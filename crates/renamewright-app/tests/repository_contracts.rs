@@ -99,6 +99,10 @@ fn codex_security_cli_is_locked_private_and_repository_specific() {
         "mktemp -d",
         "--working-tree",
         "--fail-on-severity",
+        "exec \"$cli_bin\" \"$mode\" \"$@\"",
+        "exec \"$cli_bin\" login \"$@\"",
+        "exec \"$cli_bin\" login status",
+        "exec \"$cli_bin\" logout",
     ] {
         assert!(
             CODEX_SECURITY_HELPER.contains(required),

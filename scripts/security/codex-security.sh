@@ -4,7 +4,11 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/security/codex-security.sh <dry-run|hook|working-tree|branch|full> [base-revision]
+Usage:
+  scripts/security/codex-security.sh <dry-run|hook|working-tree|branch|full> [base-revision]
+  scripts/security/codex-security.sh <scans|findings|validate> [arguments...]
+  scripts/security/codex-security.sh login [arguments...]
+  scripts/security/codex-security.sh <login-status|logout>
 
 Environment overrides:
   CODEX_SECURITY_AUTH              Authentication mode (default: chatgpt)
@@ -18,17 +22,28 @@ EOF
 
 mode="${1:-}"
 case "$mode" in
-  dry-run | hook | working-tree | branch | full) ;;
+  dry-run | hook | working-tree | branch | full | scans | findings | validate | login | login-status | logout) ;;
   *)
     usage >&2
     exit 2
     ;;
 esac
 shift
-if (($# > 1)) || { [[ "$mode" != branch ]] && (($# > 0)); }; then
-  usage >&2
-  exit 2
-fi
+case "$mode" in
+  branch)
+    if (($# > 1)); then
+      usage >&2
+      exit 2
+    fi
+    ;;
+  dry-run | hook | working-tree | full | login-status | logout)
+    if (($# > 0)); then
+      usage >&2
+      exit 2
+    fi
+    ;;
+  scans | findings | validate | login) ;;
+esac
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
@@ -183,8 +198,27 @@ if [[ "$installed_version" != "$cli_version" ]]; then
   exit 2
 fi
 
-scan_dir="$(mktemp -d "$output_root/$mode.XXXXXX")"
 export CODEX_SECURITY_STATE_DIR="$state_dir"
+case "$mode" in
+  scans | findings | validate)
+    cd -- "$repo_root"
+    exec "$cli_bin" "$mode" "$@"
+    ;;
+  login-status)
+    cd -- "$repo_root"
+    exec "$cli_bin" login status
+    ;;
+  login)
+    cd -- "$repo_root"
+    exec "$cli_bin" login "$@"
+    ;;
+  logout)
+    cd -- "$repo_root"
+    exec "$cli_bin" logout
+    ;;
+esac
+
+scan_dir="$(mktemp -d "$output_root/$mode.XXXXXX")"
 
 args=(
   scan
