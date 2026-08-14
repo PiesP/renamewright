@@ -926,18 +926,21 @@ fn decode_entry(
     } else {
         None
     };
-    let entry = JournalEntry::new(source_id, parent_id, names, fingerprint, execution_identity);
-    let entry = native_parent.map_or(entry.clone(), |parent| {
-        JournalEntry::with_native_parent(
-            entry.source_id(),
-            entry.parent_id(),
-            entry.names().clone(),
-            entry.admission_fingerprint().clone(),
-            entry.execution_identity(),
+    let entry = match native_parent {
+        Some(parent) => JournalEntry::with_native_parent(
+            source_id,
+            parent_id,
+            names,
+            fingerprint,
+            execution_identity,
             parent,
-        )
-    });
-    Ok(undo_of_plan_id.map_or(entry.clone(), |plan_id| entry.into_undo_of(plan_id)))
+        ),
+        None => JournalEntry::new(source_id, parent_id, names, fingerprint, execution_identity),
+    };
+    Ok(match undo_of_plan_id {
+        Some(plan_id) => entry.into_undo_of(plan_id),
+        None => entry,
+    })
 }
 
 fn encode_fingerprint(payload: &mut Vec<u8>, fingerprint: &SourceFingerprint) {

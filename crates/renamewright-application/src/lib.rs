@@ -2619,7 +2619,7 @@ struct InspectionWriter {
 impl InspectionWriter {
     fn new() -> Self {
         Self {
-            bytes: Vec::with_capacity(MAX_PLAN_INSPECTION_BYTES),
+            bytes: Vec::new(),
             truncated: false,
         }
     }
