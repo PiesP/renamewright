@@ -260,27 +260,47 @@ impl SourceRegistry {
             (left.parent_id(), left.native_name()).cmp(&(right.parent_id(), right.native_name()))
         });
 
-        let mut ancestor_conflicts = BTreeSet::new();
-        for (source_id, path) in &self.paths {
-            let is_directory = self
-                .snapshots
-                .get(source_id)
-                .and_then(SourceSnapshot::entry_kind)
-                == Some(EntryKind::Directory);
-            if !is_directory {
-                continue;
-            }
-            for (other_id, other_path) in &self.paths {
-                if source_id != other_id && other_path.starts_with(path) {
-                    ancestor_conflicts.insert(*source_id);
-                    ancestor_conflicts.insert(*other_id);
-                }
-            }
-        }
+        let ancestor_conflicts = ancestor_conflicts(&self.paths, &self.snapshots);
 
         ValidationEnvironment::new(stale_sources, unavailable_parents, occupied_names)
             .with_ancestor_conflicts(ancestor_conflicts)
     }
+}
+
+fn ancestor_conflicts(
+    paths: &BTreeMap<SourceId, PathBuf>,
+    snapshots: &BTreeMap<SourceId, SourceSnapshot>,
+) -> BTreeSet<SourceId> {
+    let mut selected = paths
+        .iter()
+        .map(|(source_id, path)| {
+            let is_directory = snapshots
+                .get(source_id)
+                .and_then(SourceSnapshot::entry_kind)
+                == Some(EntryKind::Directory);
+            (path, *source_id, is_directory)
+        })
+        .collect::<Vec<_>>();
+    selected.sort_unstable_by(|left, right| left.0.cmp(right.0));
+
+    let mut conflicts = BTreeSet::new();
+    let mut directory_stack = Vec::<(&Path, SourceId)>::new();
+    for (path, source_id, is_directory) in selected {
+        while directory_stack
+            .last()
+            .is_some_and(|(directory, _)| !path.starts_with(directory))
+        {
+            directory_stack.pop();
+        }
+        if let Some((_, ancestor_id)) = directory_stack.last() {
+            conflicts.insert(*ancestor_id);
+            conflicts.insert(source_id);
+        }
+        if is_directory {
+            directory_stack.push((path.as_path(), source_id));
+        }
+    }
+    conflicts
 }
 
 #[cfg(target_os = "linux")]
