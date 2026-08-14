@@ -3608,9 +3608,9 @@ mod tests {
             renamewright_platform::encode_journal(&[record])?,
         )?;
 
-        let error = ApplicationService::default()
-            .initialize(directory.path())
-            .expect_err("an exhausted journal plan ID must fail closed");
+        let Err(error) = ApplicationService::default().initialize(directory.path()) else {
+            return Err("an exhausted journal plan ID must fail closed".into());
+        };
 
         assert_eq!(error, "the plan sequence is exhausted");
         Ok(())
@@ -3625,9 +3625,11 @@ mod tests {
             .map_err(|_| "plan sequence lock failed")? = u64::MAX;
 
         for _ in 0..2 {
-            let error = state
-                .preview_rules(RulePipelineRequestDto::new(Vec::new(), Vec::new()))
-                .expect_err("an exhausted plan ID must never be reused");
+            let Err(error) =
+                state.preview_rules(RulePipelineRequestDto::new(Vec::new(), Vec::new()))
+            else {
+                return Err("an exhausted plan ID must never be reused".into());
+            };
             assert_eq!(error.code(), "planSequenceExhausted");
         }
         Ok(())
