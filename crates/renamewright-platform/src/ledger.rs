@@ -147,7 +147,7 @@ impl Error for LedgerDiscoveryError {}
 struct CatalogItem {
     projection: LedgerEntry,
     native_path: PathBuf,
-    inspection: Option<JournalInspection>,
+    inspectable: bool,
 }
 
 #[derive(Debug, Default)]
@@ -189,29 +189,29 @@ impl RenameLedger {
         let mut remaining_bytes = max_total_bytes;
         for (index, native_path) in candidates.into_iter().enumerate() {
             let ledger_id = LedgerId(u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1));
-            let (projection, inspection) = match read_bounded_journal(&native_path, remaining_bytes)
-            {
-                Ok(bytes) => {
-                    remaining_bytes = remaining_bytes
-                        .saturating_sub(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-                    let inspection = inspect_journal(&bytes);
-                    (project_inspection(ledger_id, &inspection), Some(inspection))
-                }
-                Err(ReadJournalError::TooLarge) => {
-                    (empty_projection(ledger_id, LedgerStatus::TooLarge), None)
-                }
-                Err(ReadJournalError::DiscoveryLimitExceeded) => (
-                    empty_projection(ledger_id, LedgerStatus::DiscoveryLimitExceeded),
-                    None,
-                ),
-                Err(ReadJournalError::Io) => {
-                    (empty_projection(ledger_id, LedgerStatus::Unreadable), None)
-                }
-            };
+            let (projection, inspectable) =
+                match read_bounded_journal(&native_path, remaining_bytes) {
+                    Ok(bytes) => {
+                        remaining_bytes = remaining_bytes
+                            .saturating_sub(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                        let inspection = inspect_journal(&bytes);
+                        (project_inspection(ledger_id, &inspection), true)
+                    }
+                    Err(ReadJournalError::TooLarge) => {
+                        (empty_projection(ledger_id, LedgerStatus::TooLarge), false)
+                    }
+                    Err(ReadJournalError::DiscoveryLimitExceeded) => (
+                        empty_projection(ledger_id, LedgerStatus::DiscoveryLimitExceeded),
+                        false,
+                    ),
+                    Err(ReadJournalError::Io) => {
+                        (empty_projection(ledger_id, LedgerStatus::Unreadable), false)
+                    }
+                };
             items.push(CatalogItem {
                 projection,
                 native_path,
-                inspection,
+                inspectable,
             });
         }
         if count_limited {
@@ -223,7 +223,7 @@ impl RenameLedger {
             items.push(CatalogItem {
                 projection: empty_projection(ledger_id, LedgerStatus::DiscoveryLimitExceeded),
                 native_path: root.to_path_buf(),
-                inspection: None,
+                inspectable: false,
             });
         }
         let superseded_plan_ids = items
@@ -261,15 +261,13 @@ impl RenameLedger {
         Ok(())
     }
 
-    pub(crate) fn item(&self, ledger_id: LedgerId) -> Option<(&Path, &JournalInspection)> {
-        self.items
+    pub(crate) fn item(&self, ledger_id: LedgerId) -> Option<(PathBuf, JournalInspection)> {
+        let item = self
+            .items
             .iter()
-            .find(|item| item.projection.ledger_id == ledger_id)
-            .and_then(|item| {
-                item.inspection
-                    .as_ref()
-                    .map(|inspection| (item.native_path.as_path(), inspection))
-            })
+            .find(|item| item.projection.ledger_id == ledger_id && item.inspectable)?;
+        let bytes = read_bounded_journal(&item.native_path, MAX_DISCOVERED_JOURNAL_BYTES).ok()?;
+        Some((item.native_path.clone(), inspect_journal(&bytes)))
     }
 
     pub(crate) fn entry(&self, ledger_id: LedgerId) -> Option<LedgerEntry> {

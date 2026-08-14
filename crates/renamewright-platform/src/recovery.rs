@@ -398,7 +398,7 @@ pub fn reconcile_prepared_step<F: ExecutionFileSystem + ?Sized>(
     let (journal_path, _) = ledger.item(ledger_id).ok_or_else(|| {
         RecoveryActionError::new(None, RecoveryActionErrorKind::JournalUnavailable)
     })?;
-    let (mut writer, mut records) = JournalWriter::resume(journal_path).map_err(|error| {
+    let (mut writer, mut records) = JournalWriter::resume(&journal_path).map_err(|error| {
         RecoveryActionError::new(
             None,
             RecoveryActionErrorKind::Journal { kind: error.kind() },
@@ -479,7 +479,7 @@ where
     let (journal_path, _) = ledger.item(ledger_id).ok_or_else(|| {
         RecoveryActionError::new(None, RecoveryActionErrorKind::JournalUnavailable)
     })?;
-    let (mut writer, records) = JournalWriter::resume(journal_path).map_err(|error| {
+    let (mut writer, records) = JournalWriter::resume(&journal_path).map_err(|error| {
         RecoveryActionError::new(
             None,
             RecoveryActionErrorKind::Journal { kind: error.kind() },
