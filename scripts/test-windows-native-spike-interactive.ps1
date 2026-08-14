@@ -36,7 +36,6 @@ if ($ExpectedDpiPercent -ne 0 -and $supportedDpiPercent -notcontains $ExpectedDp
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName PresentationFramework
 Add-Type -TypeDefinition @'
 using System;
@@ -67,8 +66,6 @@ public struct RenamewrightGuiThreadInfo
 
 public static class RenamewrightAcceptanceNativeMethods
 {
-    public static readonly IntPtr PerMonitorAwareV2 = new IntPtr(-4);
-
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
 
@@ -99,22 +96,100 @@ public static class RenamewrightAcceptanceNativeMethods
         ref RenamewrightGuiThreadInfo info
     );
 
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool GetWindowRect(IntPtr window, out RenamewrightWindowRect rect);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool PrintWindow(IntPtr window, IntPtr deviceContext, uint flags);
-
-    [DllImport("user32.dll")]
-    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
 }
 '@
 
 function Resolve-RequiredPath {
   param([Parameter(Mandatory = $true)] [string]$Path)
   return (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Get-RequiredProperty {
+  param(
+    [Parameter(Mandatory = $true)]$Object,
+    [Parameter(Mandatory = $true)] [string]$Name,
+    [Parameter(Mandatory = $true)] [string]$Context
+  )
+  if ($null -eq $Object -or $Object.PSObject.Properties.Name -cnotcontains $Name) {
+    throw "$Context is missing required property '$Name'."
+  }
+  return $Object.$Name
+}
+
+function Read-ArtifactChecksums {
+  param([Parameter(Mandatory = $true)] [string]$ArtifactRoot)
+  $checksumPath = Resolve-RequiredPath -Path (Join-Path $ArtifactRoot 'SHA256SUMS')
+  $checksums = @{}
+  foreach ($line in (Get-Content -LiteralPath $checksumPath)) {
+    if ($line -notmatch '^(?<digest>[a-f0-9]{64})  (?<name>[^\\/]+)$') {
+      throw 'SHA256SUMS contained an invalid or non-local entry.'
+    }
+    if ($checksums.ContainsKey($Matches.name)) {
+      throw 'SHA256SUMS contained a duplicate entry.'
+    }
+    $checksums[$Matches.name] = $Matches.digest
+  }
+  return $checksums
+}
+
+function Assert-ChecksumCoveredArtifactFile {
+  param(
+    [Parameter(Mandatory = $true)] [string]$ArtifactRoot,
+    [Parameter(Mandatory = $true)] [hashtable]$ExpectedChecksums,
+    [Parameter(Mandatory = $true)] [string]$FileName,
+    [Parameter(Mandatory = $true)] [string]$Context
+  )
+  if ([System.IO.Path]::GetFileName($FileName) -cne $FileName) {
+    throw "$Context contained a non-local filename."
+  }
+  if (-not $ExpectedChecksums.ContainsKey($FileName)) {
+    throw "$Context was not covered by SHA256SUMS."
+  }
+  $path = Resolve-RequiredPath -Path (Join-Path $ArtifactRoot $FileName)
+  $item = Get-Item -LiteralPath $path
+  if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+    throw "$Context was not a regular artifact file."
+  }
+  $actualSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actualSha256 -cne $ExpectedChecksums[$FileName]) {
+    throw "$Context did not match SHA256SUMS."
+  }
+  return $path
+}
+
+function Assert-ManifestArtifactInput {
+  param(
+    [Parameter(Mandatory = $true)] [string]$ArtifactRoot,
+    [Parameter(Mandatory = $true)] [hashtable]$ExpectedChecksums,
+    [Parameter(Mandatory = $true)]$Manifest,
+    [Parameter(Mandatory = $true)] [string]$Role,
+    [Parameter(Mandatory = $true)] [string]$SuppliedPath
+  )
+  $entries = @($Manifest.files | Where-Object role -CEQ $Role)
+  if ($entries.Count -ne 1) {
+    throw "The native spike manifest did not contain exactly one '$Role' artifact."
+  }
+  $entry = $entries[0]
+  $name = [string](Get-RequiredProperty -Object $entry -Name 'name' -Context "$Role artifact")
+  $manifestSha256 = [string](
+    Get-RequiredProperty -Object $entry -Name 'sha256' -Context "$Role artifact"
+  )
+  if ($manifestSha256 -cnotmatch '^[a-f0-9]{64}$') {
+    throw "The native spike manifest contained an invalid '$Role' digest."
+  }
+  $expectedPath = Assert-ChecksumCoveredArtifactFile `
+    -ArtifactRoot $ArtifactRoot `
+    -ExpectedChecksums $ExpectedChecksums `
+    -FileName $name `
+    -Context "$Role artifact"
+  if ((Resolve-RequiredPath -Path $SuppliedPath) -cne $expectedPath) {
+    throw "The supplied $Role path was not the source-bound artifact file."
+  }
+  $actualSha256 = (Get-FileHash -LiteralPath $expectedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actualSha256 -cne $manifestSha256) {
+    throw "The $Role artifact did not match the native spike manifest."
+  }
+  return $expectedPath
 }
 
 function Stop-TestProcess {
@@ -327,84 +402,32 @@ function Invoke-Probe {
   return (Get-Content -LiteralPath $OutputPath -Raw)
 }
 
-function Save-WindowScreenshot {
-  param(
-    [Parameter(Mandatory = $true)] [IntPtr]$Window,
-    [Parameter(Mandatory = $true)] [string]$Path
-  )
-
-  $previousDpiContext = [RenamewrightAcceptanceNativeMethods]::SetThreadDpiAwarenessContext(
-    [RenamewrightAcceptanceNativeMethods]::PerMonitorAwareV2
-  )
-  if ($previousDpiContext -eq [IntPtr]::Zero) {
-    throw 'Windows could not enable per-monitor DPI awareness for screenshot capture.'
-  }
-  try {
-    $rect = [RenamewrightWindowRect]::new()
-    if (-not [RenamewrightAcceptanceNativeMethods]::GetWindowRect($Window, [ref]$rect)) {
-      throw 'Windows could not read the native spike window bounds.'
-    }
-    $width = $rect.Right - $rect.Left
-    $height = $rect.Bottom - $rect.Top
-    if ($width -le 0 -or $height -le 0) {
-      throw 'The native spike window bounds were empty.'
-    }
-
-    $bitmap = [System.Drawing.Bitmap]::new($width, $height)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    try {
-      $deviceContext = $graphics.GetHdc()
-      try {
-        $captured = [RenamewrightAcceptanceNativeMethods]::PrintWindow(
-          $Window,
-          $deviceContext,
-          2
-        )
-      } finally {
-        $graphics.ReleaseHdc($deviceContext)
-      }
-      if (-not $captured) {
-        $graphics.CopyFromScreen(
-          $rect.Left,
-          $rect.Top,
-          0,
-          0,
-          [System.Drawing.Size]::new($width, $height)
-        )
-      }
-      $output = [System.IO.File]::Open(
-        $Path,
-        [System.IO.FileMode]::Create,
-        [System.IO.FileAccess]::Write,
-        [System.IO.FileShare]::None
-      )
-      try {
-        $bitmap.Save($output, [System.Drawing.Imaging.ImageFormat]::Png)
-      } finally {
-        $output.Dispose()
-      }
-    } finally {
-      $graphics.Dispose()
-      $bitmap.Dispose()
-    }
-  } finally {
-    if (
-      [RenamewrightAcceptanceNativeMethods]::SetThreadDpiAwarenessContext($previousDpiContext) -eq
-      [IntPtr]::Zero
-    ) {
-      throw 'Windows could not restore the screenshot thread DPI awareness context.'
-    }
-  }
-}
-
-$automationExecutable = Resolve-RequiredPath -Path $AutomationExecutablePath
-$inspectionProbe = Resolve-RequiredPath -Path $InspectionProbePath
 $artifactRoot = Resolve-RequiredPath -Path $ArtifactDirectory
-$manifest = Get-Content -LiteralPath (Join-Path $artifactRoot 'native-spike-manifest.json') -Raw |
-  ConvertFrom-Json
-if ([string]$manifest.sourceSha -cne $SourceSha) {
+$expectedChecksums = Read-ArtifactChecksums -ArtifactRoot $artifactRoot
+$manifestPath = Assert-ChecksumCoveredArtifactFile `
+  -ArtifactRoot $artifactRoot `
+  -ExpectedChecksums $expectedChecksums `
+  -FileName 'native-spike-manifest.json' `
+  -Context 'native spike manifest'
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ([int](Get-RequiredProperty -Object $manifest -Name 'schemaVersion' -Context 'native spike manifest') -ne 1) {
+  throw 'The native spike manifest used an unsupported schema version.'
+}
+if ([string](Get-RequiredProperty -Object $manifest -Name 'sourceSha' -Context 'native spike manifest') -cne $SourceSha) {
   throw 'The native spike artifact is not bound to the requested source SHA.'
 }
+$automationExecutable = Assert-ManifestArtifactInput `
+  -ArtifactRoot $artifactRoot `
+  -ExpectedChecksums $expectedChecksums `
+  -Manifest $manifest `
+  -Role 'automation' `
+  -SuppliedPath $AutomationExecutablePath
+$inspectionProbe = Assert-ManifestArtifactInput `
+  -ArtifactRoot $artifactRoot `
+  -ExpectedChecksums $expectedChecksums `
+  -Manifest $manifest `
+  -Role 'inspectionProbe' `
+  -SuppliedPath $InspectionProbePath
 
 $currentSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
 $explorerInSession = Get-Process -Name explorer -ErrorAction SilentlyContinue |
@@ -522,7 +545,14 @@ try {
     -Window $windowHandle `
     -OwnerProcessId $application.Id `
     -Context 'Changed' | Out-Null
-  Save-WindowScreenshot -Window $windowHandle -Path $focusScreenshotPath
+  $focusProbeOutput = Invoke-Probe `
+    -ProbePath $inspectionProbe `
+    -Arguments @($focusScreenshotPath) `
+    -OutputPath $probeOutputPath `
+    -ErrorPath $probeErrorPath
+  if ($focusProbeOutput.IndexOf('screenshot=1180x760', [StringComparison]::Ordinal) -lt 0) {
+    throw 'The application-rendered focus screenshot did not report the expected dimensions.'
+  }
 
   $prefixEdit = Find-Element `
     -Elements $elements `
