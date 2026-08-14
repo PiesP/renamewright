@@ -45,9 +45,20 @@ jobs:
       - name: Classify relevant security changes
         id: classify
         env:
+          EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           WORKFLOW_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: ./scripts/ci/classify-workflow-changes.sh
+        run: |
+          set -euo pipefail
+          classifier=scripts/ci/classify-workflow-changes.sh
+          case "$EVENT_NAME" in
+            pull_request | merge_group)
+              classifier="$RUNNER_TEMP/trusted-classify-workflow-changes.sh"
+              [[ "$WORKFLOW_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+              git show "$WORKFLOW_BASE_SHA:scripts/ci/classify-workflow-changes.sh" > "$classifier"
+              ;;
+          esac
+          bash "$classifier"
 
   cargo-policy:
     name: pr-gate/cargo-policy
