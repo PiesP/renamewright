@@ -16,12 +16,12 @@ use renamewright_core::{
 };
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
-    FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, PreparedStepDisposition,
-    RecoveryAction, RecoveryReadiness, RecoveryTransactionInspection, RenameLedger, SourceRegistry,
-    UndoBlockReason, UndoReadiness, UndoTransactionInspection, execute_frozen_plan,
-    execute_prepared_undo, freeze_execution_plan, inspect_recovery_transaction,
-    inspect_undo_transaction, prepare_undo_transaction, reconcile_prepared_step,
-    recover_transaction,
+    FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, MAX_ADMITTED_SOURCES,
+    PreparedStepDisposition, RecoveryAction, RecoveryReadiness, RecoveryTransactionInspection,
+    RenameLedger, SourceRegistry, UndoBlockReason, UndoReadiness, UndoTransactionInspection,
+    execute_frozen_plan, execute_prepared_undo, freeze_execution_plan,
+    inspect_recovery_transaction, inspect_undo_transaction, prepare_undo_transaction,
+    reconcile_prepared_step, recover_transaction,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1140,7 +1140,13 @@ impl ApplicationService {
         I: IntoIterator<Item = std::path::PathBuf>,
     {
         let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
-        let paths = paths.into_iter().collect::<Vec<_>>();
+        let paths = paths
+            .into_iter()
+            .take(MAX_ADMITTED_SOURCES.saturating_add(1))
+            .collect::<Vec<_>>();
+        if paths.len() > MAX_ADMITTED_SOURCES {
+            return Err(PlanningCommandErrorDto::new("tooManySources"));
+        }
         if contains_directory(&paths) {
             return Err(PlanningCommandErrorDto::new(
                 "directoryAdmissionUnavailable",
@@ -1590,7 +1596,9 @@ struct TraceStepDocument<'a> {
 }
 
 fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf]) {
-    let outcome = if contains_directory(paths) {
+    let outcome = if paths.len() > MAX_ADMITTED_SOURCES {
+        Err("tooManySources".to_owned())
+    } else if contains_directory(paths) {
         Err("directoryAdmissionUnavailable".to_owned())
     } else {
         state
@@ -2520,6 +2528,21 @@ mod tests {
         assert_eq!(changes.revision, 1);
         assert_eq!(changes.error, None);
         Ok(())
+    }
+
+    #[test]
+    fn application_rejects_oversized_source_batches_before_planning() {
+        let state = ApplicationService::default();
+        let paths = std::iter::repeat_n(
+            std::path::PathBuf::from("unavailable.txt"),
+            renamewright_platform::MAX_ADMITTED_SOURCES + 1,
+        );
+
+        let error = state
+            .admit_sources_with_rules(paths, RulePipelineRequestDto::new(Vec::new(), Vec::new()))
+            .err();
+
+        assert_eq!(error.map(|error| error.code()), Some("tooManySources"));
     }
 
     #[test]
