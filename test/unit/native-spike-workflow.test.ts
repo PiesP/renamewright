@@ -198,12 +198,19 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain('Update-ArtifactChecksums');
   expect(interactive).not.toContain('Invoke-Expression');
   expect(interactive).not.toContain('DownloadString');
+
+  const performanceProbeIndex = interactive.indexOf('$performanceProbeOutput = Invoke-Probe');
+  const explorerDropIndex = interactive.indexOf('$nativeDragDropExercised = $false');
+  expect(performanceProbeIndex).toBeGreaterThan(-1);
+  expect(explorerDropIndex).toBeGreaterThan(-1);
+  expect(performanceProbeIndex).toBeLessThan(explorerDropIndex);
 });
 
 test('confirms visual review only after binding both captured screenshots', () => {
   expect(visualReviewer).toContain('[switch]$ConfirmReadableContrast');
   expect(visualReviewer).toContain('[switch]$ConfirmVisibleKeyboardFocus');
   expect(visualReviewer).toContain('[switch]$ConfirmUnclippedLayout');
+  expect(visualReviewer).toContain('ConvertFrom-Json -DateKind String');
   expect(visualReviewer).toContain("schemaVersion' -Context $evidenceFileName) -ne 2");
   expect(visualReviewer).toContain("capturedAtUtc' -Context $evidenceFileName");
   expect(visualReviewer).toContain('$confirmedAt -le $capturedAt');
@@ -244,6 +251,16 @@ test('merges only intentional source-bound Windows acceptance configurations', (
   expect(matrixMerger).toContain('sources · [0-9]+ changed · [0-9]+ blocked');
   expect(matrixMerger).toContain('Assert-Screenshot');
   expect(matrixMerger).toContain('checksumsVerified = $true');
+  expect(matrixMerger).toContain('[switch]$SkipDpiMatrix');
+  expect(matrixMerger).toContain('[switch]$SkipHighContrast');
+  expect(matrixMerger).toContain('$SkipDpiMatrix -or $remainingDpi.Count -eq 0');
+  expect(matrixMerger).toContain('$SkipHighContrast -or $highContrastComplete');
+  expect(matrixMerger).toContain("dpiMatrix = if ($SkipDpiMatrix) { 'skipped' }");
+  expect(matrixMerger).toContain("highContrast = if ($SkipHighContrast) { 'skipped' }");
+  expect(matrixMerger).toContain("explorerDragDrop = 'required'");
+  expect(matrixMerger).toContain('dpiPercent = $remainingDpi');
+  expect(matrixMerger).toContain('highContrast = (-not $highContrastComplete)');
+  expect(matrixMerger).toContain('schemaVersion = 3');
   expect(matrixMerger).toContain("status = if ($complete) { 'complete' } else { 'partial' }");
   expect(matrixMerger).toContain('$RequireComplete -and -not $complete');
   expect(matrixMerger).not.toContain('Set-ItemProperty');
