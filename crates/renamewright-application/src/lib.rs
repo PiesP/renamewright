@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
@@ -1376,8 +1376,22 @@ impl ApplicationService {
         plan_document_csv(plan_id, self)
     }
 
-    pub fn export_document(path: &Path, document: &str) -> Result<(), String> {
-        write_new_document(path, document).map_err(export_write_error)
+    pub fn export_plan_json(&self, plan_id: u64, path: &Path) -> Result<(), String> {
+        let latest_plan = self
+            .latest_plan
+            .lock()
+            .map_err(|_| "the latest plan is unavailable".to_owned())?;
+        let stored = current_plan(plan_id, &latest_plan)?;
+        write_new_serialized_document(path, |writer| write_plan_json(stored, writer))
+    }
+
+    pub fn export_plan_csv(&self, plan_id: u64, path: &Path) -> Result<(), String> {
+        let latest_plan = self
+            .latest_plan
+            .lock()
+            .map_err(|_| "the latest plan is unavailable".to_owned())?;
+        let stored = current_plan(plan_id, &latest_plan)?;
+        write_new_serialized_document(path, |writer| write_plan_csv(stored, writer))
     }
 }
 
@@ -2554,10 +2568,7 @@ fn plan_document_json(plan_id: u64, state: &ApplicationService) -> Result<String
         .latest_plan
         .lock()
         .map_err(|_| "the latest plan is unavailable".to_owned())?;
-    let stored = latest_plan
-        .as_ref()
-        .filter(|stored| stored.plan.id().value() == plan_id)
-        .ok_or_else(|| "the requested plan is no longer current".to_owned())?;
+    let stored = current_plan(plan_id, &latest_plan)?;
     serde_json::to_string_pretty(&PlanDocument::from(stored))
         .map_err(|error| format!("the plan could not be serialized: {error}"))
 }
@@ -2567,18 +2578,32 @@ fn plan_document_csv(plan_id: u64, state: &ApplicationService) -> Result<String,
         .latest_plan
         .lock()
         .map_err(|_| "the latest plan is unavailable".to_owned())?;
-    let stored = latest_plan
-        .as_ref()
-        .filter(|stored| stored.plan.id().value() == plan_id)
-        .ok_or_else(|| "the requested plan is no longer current".to_owned())?;
+    let stored = current_plan(plan_id, &latest_plan)?;
     plan_csv(stored)
 }
 
+fn current_plan(plan_id: u64, latest_plan: &Option<StoredPlan>) -> Result<&StoredPlan, String> {
+    latest_plan
+        .as_ref()
+        .filter(|stored| stored.plan.id().value() == plan_id)
+        .ok_or_else(|| "the requested plan is no longer current".to_owned())
+}
+
+fn write_plan_json(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), String> {
+    serde_json::to_writer_pretty(writer, &PlanDocument::from(stored))
+        .map_err(|error| format!("the plan could not be serialized: {error}"))
+}
+
 fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
+    let mut csv = Vec::new();
+    write_plan_csv(stored, &mut csv)?;
+    String::from_utf8(csv).map_err(|_| "the plan CSV was not valid UTF-8".to_owned())
+}
+
+fn write_plan_csv(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), String> {
     let plan = PlanDocument::from(stored);
-    let mut csv = String::new();
-    push_csv_row(
-        &mut csv,
+    write_csv_row(
+        writer,
         &[
             "csv_schema_version",
             "plan_id",
@@ -2592,14 +2617,14 @@ fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
             "override_applied",
             "trace_json",
         ],
-    );
+    )?;
     for row in plan.rows {
         let diagnostics = serde_json::to_string(&row.diagnostics)
             .map_err(|_| "the plan CSV could not be serialized".to_owned())?;
         let trace = serde_json::to_string(&row.trace)
             .map_err(|_| "the plan CSV could not be serialized".to_owned())?;
-        push_csv_row(
-            &mut csv,
+        write_csv_row(
+            writer,
             &[
                 &PLAN_CSV_SCHEMA_VERSION.to_string(),
                 &plan.plan_id.to_string(),
@@ -2617,19 +2642,25 @@ fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
                 },
                 &trace,
             ],
-        );
+        )?;
     }
-    Ok(csv)
+    Ok(())
 }
 
-fn push_csv_row(csv: &mut String, cells: &[&str]) {
+fn write_csv_row(writer: &mut impl Write, cells: &[&str]) -> Result<(), String> {
     for (index, cell) in cells.iter().enumerate() {
         if index > 0 {
-            csv.push(',');
+            writer
+                .write_all(b",")
+                .map_err(|error| format!("the plan CSV could not be written: {error}"))?;
         }
-        csv.push_str(&csv_cell(cell));
+        writer
+            .write_all(csv_cell(cell).as_bytes())
+            .map_err(|error| format!("the plan CSV could not be written: {error}"))?;
     }
-    csv.push_str("\r\n");
+    writer
+        .write_all(b"\r\n")
+        .map_err(|error| format!("the plan CSV could not be written: {error}"))
 }
 
 fn csv_cell(value: &str) -> String {
@@ -2711,10 +2742,33 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     }
 }
 
-fn write_new_document(path: &Path, document: &str) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(document.as_bytes())?;
-    file.sync_all()
+fn write_new_serialized_document(
+    path: &Path,
+    serialize: impl FnOnce(&mut BufWriter<File>) -> Result<(), String>,
+) -> Result<(), String> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(export_write_error)?;
+    let mut writer = BufWriter::new(file);
+    let result = serialize(&mut writer)
+        .and_then(|()| {
+            writer
+                .flush()
+                .map_err(|error| format!("the plan could not be exported: {error}"))
+        })
+        .and_then(|()| {
+            writer
+                .get_ref()
+                .sync_all()
+                .map_err(|error| format!("the plan could not be exported: {error}"))
+        });
+    if result.is_err() {
+        drop(writer);
+        let _ = std::fs::remove_file(path);
+    }
+    result
 }
 
 fn export_write_error(error: std::io::Error) -> String {
@@ -2832,8 +2886,8 @@ mod tests {
         RULE_PIPELINE_SCHEMA_VERSION, RangeOperationDto, RangeOriginDto, RulePipelineRequestDto,
         RuleRequestDto, RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto,
         SequenceScopeDto, SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto,
-        admit_dropped_sources, compile_rule_request, csv_cell, export_write_error,
-        plan_document_csv, plan_document_json, plan_from_registry, write_new_document,
+        admit_dropped_sources, compile_rule_request, csv_cell, plan_document_csv,
+        plan_document_json, plan_from_registry,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -3585,19 +3639,32 @@ mod tests {
     }
 
     #[test]
-    fn plan_export_never_replaces_an_existing_file() -> Result<(), Box<dyn Error>> {
+    fn plan_export_streams_the_current_document_without_replacing_files()
+    -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
-        let export = directory.path().join("plan.json");
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let state = ApplicationService::default();
+        let plan = state.admit_sources_with_rules(
+            [source],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        let json_export = directory.path().join("plan.json");
+        let csv_export = directory.path().join("plan.csv");
+        let expected_json = state.inspect_plan_json(plan.plan_id())?;
+        let expected_csv = state.inspect_plan_csv(plan.plan_id())?;
 
-        write_new_document(&export, "first")?;
-        let Err(error) = write_new_document(&export, "second") else {
+        state.export_plan_json(plan.plan_id(), &json_export)?;
+        state.export_plan_csv(plan.plan_id(), &csv_export)?;
+        let Err(error) = state.export_plan_json(plan.plan_id(), &json_export) else {
             return Err("create-new must reject reuse".into());
         };
         assert_eq!(
-            export_write_error(error),
+            error,
             "the export file already exists; choose a new file name"
         );
-        assert_eq!(fs::read_to_string(export)?, "first");
+        assert_eq!(fs::read_to_string(json_export)?, expected_json);
+        assert_eq!(fs::read_to_string(csv_export)?, expected_csv);
         Ok(())
     }
 

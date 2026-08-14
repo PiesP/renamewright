@@ -3919,21 +3919,6 @@ impl RenamewrightApp {
         let Some(plan_id) = self.plan.as_ref().map(PlanDto::plan_id) else {
             return;
         };
-        let document = if json {
-            self.application.inspect_plan_json(plan_id)
-        } else {
-            self.application.inspect_plan_csv(plan_id)
-        };
-        let Ok(document) = document else {
-            self.status = self
-                .locale
-                .text(
-                    "The current plan could not be inspected",
-                    "현재 계획을 검토할 수 없습니다",
-                )
-                .to_owned();
-            return;
-        };
         let extension = if json { "json" } else { "csv" };
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export the path-free Renamewright plan")
@@ -3947,7 +3932,12 @@ impl RenamewrightApp {
                 .to_owned();
             return;
         };
-        match ApplicationService::export_document(&path, &document) {
+        let result = if json {
+            self.application.export_plan_json(plan_id, &path)
+        } else {
+            self.application.export_plan_csv(plan_id, &path)
+        };
+        match result {
             Ok(()) => {
                 self.status = match self.locale {
                     Locale::English => format!("Plan {extension} exported"),
