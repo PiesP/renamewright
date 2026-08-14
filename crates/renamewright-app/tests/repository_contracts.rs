@@ -13,6 +13,10 @@ const ACCEPTANCE_WORKFLOW: &str =
     include_str!("../../../.github/workflows/windows-acceptance.yaml");
 const RELEASE_WORKFLOW: &str = include_str!("../../../.github/workflows/release.yaml");
 const ACCEPTANCE_PACKAGER: &str = include_str!("../../../scripts/prepare-windows-native-app.ps1");
+const RUNTIME_ACCEPTANCE: &str =
+    include_str!("../../../scripts/test-windows-native-app-runtime.ps1");
+const INTERACTIVE_ACCEPTANCE: &str =
+    include_str!("../../../scripts/test-windows-native-app-interactive.ps1");
 const RELEASE_PACKAGER: &str =
     include_str!("../../../scripts/prepare-windows-portable-release.ps1");
 const CODEX_SECURITY_PACKAGE: &str = include_str!("../../../.github/codex-security/package.json");
@@ -197,4 +201,13 @@ fn portable_release_excludes_automation_and_binds_evidence() {
     }
     assert!(ACCEPTANCE_PACKAGER.contains("defaultExcludesAutomationMarkers = $true"));
     assert!(ACCEPTANCE_PACKAGER.contains("cyclonedx-json=$sbomPath"));
+}
+
+#[test]
+fn windows_acceptance_flushes_redirected_process_streams_before_hashing() {
+    for script in [RUNTIME_ACCEPTANCE, INTERACTIVE_ACCEPTANCE] {
+        assert!(script.contains("$Process.WaitForExit()"));
+        assert!(script.contains("$Process.Dispose()"));
+        assert!(script.contains("Update-ArtifactChecksums -ArtifactRoot $artifactRoot"));
+    }
 }
