@@ -2,6 +2,8 @@
 param(
   [Parameter(Mandatory = $true)] [string]$ArtifactDirectory,
   [Parameter(Mandatory = $true)] [string]$SourceSha,
+  [switch]$SkipDpiMatrix,
+  [switch]$SkipHighContrast,
   [switch]$RequireComplete
 )
 
@@ -302,15 +304,22 @@ foreach ($file in $evidenceFiles) {
 }
 
 $remainingDpi = @($requiredDpiPercent | Where-Object { -not $observedDpi.ContainsKey($_) })
+$dpiRequirementSatisfied = ($SkipDpiMatrix -or $remainingDpi.Count -eq 0)
+$highContrastRequirementSatisfied = ($SkipHighContrast -or $highContrastComplete)
 $complete = (
-  $remainingDpi.Count -eq 0 -and
-  $highContrastComplete -and
+  $dpiRequirementSatisfied -and
+  $highContrastRequirementSatisfied -and
   $explorerDragDropComplete
 )
 $matrixEvidence = [ordered]@{
-  schemaVersion = 2
+  schemaVersion = 3
   sourceSha = $SourceSha
   status = if ($complete) { 'complete' } else { 'partial' }
+  policy = [ordered]@{
+    dpiMatrix = if ($SkipDpiMatrix) { 'skipped' } else { 'required' }
+    highContrast = if ($SkipHighContrast) { 'skipped' } else { 'required' }
+    explorerDragDrop = 'required'
+  }
   checks = [ordered]@{
     sourceBoundRuns = $true
     checksumsVerified = $true
@@ -318,12 +327,18 @@ $matrixEvidence = [ordered]@{
     fullDpiMatrixExercised = ($remainingDpi.Count -eq 0)
     highContrastModeExercised = $highContrastComplete
     nativeExplorerDragDropExercised = $explorerDragDropComplete
+    dpiRequirementSatisfied = $dpiRequirementSatisfied
+    highContrastRequirementSatisfied = $highContrastRequirementSatisfied
   }
   runs = $runs
   remaining = [ordered]@{
     dpiPercent = $remainingDpi
     highContrast = (-not $highContrastComplete)
     nativeExplorerDragDrop = (-not $explorerDragDropComplete)
+  }
+  skipped = [ordered]@{
+    dpiMatrix = [bool]$SkipDpiMatrix
+    highContrast = [bool]$SkipHighContrast
   }
 }
 $matrixPath = Join-Path $artifactRoot $matrixFileName
