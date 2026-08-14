@@ -185,14 +185,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .any(|(_, node)| node.label() == Some("Apply") && node.is_disabled())
             });
             let read_only_workbench = [
-                "01 Add prefix",
-                "Add suffix",
-                "Add rule",
+                "Replace",
+                "Prefix",
+                "Suffix",
+                "Number",
+                "Remove range",
+                "Extension",
+                "Case",
+                "Active rules",
+                "Prefix text",
                 "All diagnostics",
-                "Local presets",
-                "Preset name",
-                "Inspect JSON",
-                "Inspect CSV",
             ]
             .into_iter()
             .all(has_text);

@@ -515,8 +515,8 @@ try {
   }
 
   foreach ($requiredName in @(
-    'AUTOMATION TEST MODE', 'Renamewright', 'Add files', 'Add folder',
-    '01 Add prefix', 'Move rule up', 'Move rule down', 'Remove rule',
+    'AUTOMATION TEST MODE', 'Renamewright', 'Add files', 'Add folder entry',
+    'Replace', 'Prefix', 'Suffix', 'Number', 'Move rule up', 'Move rule down', 'Remove rule',
     '한글 IME 입력 확인', 'Apply'
   )) {
     $found = $false
@@ -540,7 +540,7 @@ try {
   $scrollBars = @($elements | Where-Object {
     $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::ScrollBar
   })
-  if ($editControls.Count -lt 3) {
+  if ($editControls.Count -lt 2) {
     throw 'Windows UI Automation did not expose the planner edit controls.'
   }
   if ($scrollBars.Count -lt 1) {
@@ -617,7 +617,7 @@ try {
   $elements = Get-Descendants -Root $applicationRoot
   $addFolderButton = Find-Element `
     -Elements $elements `
-    -Name 'Add folder' `
+    -Name 'Add folder entry' `
     -ControlType ([System.Windows.Automation.ControlType]::Button)
   if (-not $addFolderButton.Current.IsEnabled) {
     throw 'The native workbench did not expose explicit directory admission.'
