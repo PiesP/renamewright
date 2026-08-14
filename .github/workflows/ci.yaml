@@ -13,21 +13,53 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: workflow/change-scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      quality: ${{ steps.classify.outputs.quality }}
+      unit: ${{ steps.classify.outputs.unit }}
+      e2e: ${{ steps.classify.outputs.e2e }}
+      performance: ${{ steps.classify.outputs.performance }}
+      windows: ${{ steps.classify.outputs.windows }}
+    steps:
+      - name: Checkout source history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify relevant changes
+        id: classify
+        env:
+          WORKFLOW_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          WORKFLOW_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: ./scripts/ci/classify-workflow-changes.sh
+
   quality:
     name: pr-gate/quality
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
+      - name: No relevant quality changes
+        if: needs.changes.result == 'success' && needs.changes.outputs.quality != 'true'
+        run: echo "Quality checks are not required for this change set."
+
       - name: Checkout source
+        if: needs.changes.result != 'success' || needs.changes.outputs.quality == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
+        if: needs.changes.result != 'success' || needs.changes.outputs.quality == 'true'
         run: >-
           rustup toolchain install 1.97.1
           --profile minimal
@@ -35,40 +67,59 @@ jobs:
           --component clippy
 
       - name: Check all Rust sources and feature combinations
+        if: needs.changes.result != 'success' || needs.changes.outputs.quality == 'true'
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   unit:
     name: pr-gate/unit
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
+      - name: No relevant unit-test changes
+        if: needs.changes.result == 'success' && needs.changes.outputs.unit != 'true'
+        run: echo "Unit tests are not required for this change set."
+
       - name: Checkout source
+        if: needs.changes.result != 'success' || needs.changes.outputs.unit == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
+        if: needs.changes.result != 'success' || needs.changes.outputs.unit == 'true'
         run: rustup toolchain install 1.97.1 --profile minimal
 
       - name: Run the complete Rust workspace test suite
+        if: needs.changes.result != 'success' || needs.changes.outputs.unit == 'true'
         run: cargo test --workspace --all-targets --all-features --locked
 
   native-ui:
     name: pr-gate/e2e
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
+      - name: No relevant native UI changes
+        if: needs.changes.result == 'success' && needs.changes.outputs.e2e != 'true'
+        run: echo "Native UI tests are not required for this change set."
+
       - name: Checkout source
+        if: needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
+        if: needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true'
         run: rustup toolchain install 1.97.1 --profile minimal
 
       - name: Exercise native UI, accessibility, and automation contracts
+        if: needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true'
         run: >-
           cargo test
           --package renamewright-app
@@ -78,18 +129,27 @@ jobs:
 
   performance:
     name: pr-gate/performance
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
+      - name: No relevant performance changes
+        if: needs.changes.result == 'success' && needs.changes.outputs.performance != 'true'
+        run: echo "Performance checks are not required for this change set."
+
       - name: Checkout source
+        if: needs.changes.result != 'success' || needs.changes.outputs.performance == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
+        if: needs.changes.result != 'success' || needs.changes.outputs.performance == 'true'
         run: rustup toolchain install 1.97.1 --profile minimal
 
       - name: Enforce the 10,000-entry Rust planning budget
+        if: needs.changes.result != 'success' || needs.changes.outputs.performance == 'true'
         run: >-
           cargo run
           --release
@@ -99,23 +159,34 @@ jobs:
 
   windows:
     name: pr-gate/windows
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: windows-2025
     timeout-minutes: 40
     steps:
+      - name: No relevant Windows changes
+        if: needs.changes.result == 'success' && needs.changes.outputs.windows != 'true'
+        shell: pwsh
+        run: Write-Output 'Windows checks are not required for this change set.'
+
       - name: Checkout source
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install pinned Rust toolchain
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows == 'true'
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy
 
       - name: Validate the complete default and automation matrices
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows == 'true'
         run: |
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-targets --all-features --locked
 
       - name: Build isolated production and automation executables
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows == 'true'
         shell: pwsh
         run: |
           $inputRoot = Join-Path $PWD.Path 'target/native-app-input'
@@ -133,6 +204,7 @@ jobs:
           Copy-Item 'target/release/inspection-probe.exe' (Join-Path $automationRoot 'inspection-probe.exe')
 
       - name: Prepare the source-bound native acceptance artifact
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows == 'true'
         shell: pwsh
         run: >-
           ./scripts/prepare-windows-native-app.ps1
@@ -144,6 +216,7 @@ jobs:
           -SourceSha $env:GITHUB_SHA
 
       - name: Attempt the hosted Windows runtime gate
+        if: needs.changes.result != 'success' || needs.changes.outputs.windows == 'true'
         shell: pwsh
         run: >-
           ./scripts/test-windows-native-app-runtime.ps1
@@ -155,7 +228,7 @@ jobs:
           -AllowHostedRendererUnavailable
 
       - name: Upload source-bound Windows diagnostics
-        if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ (needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') && !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: renamewright-native-windows-${{ github.sha }}

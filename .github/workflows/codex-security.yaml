@@ -3,6 +3,18 @@ name: Codex Security advisory scan
 on:
   pull_request:
     branches: [master]
+    paths:
+      - "crates/**"
+      - "scripts/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "deny.toml"
+      - ".cargo/**"
+      - ".github/workflows/**"
+      - ".github/codex-security/**"
+      - ".github/SECURITY.md"
+      - "SECURITY.md"
   workflow_dispatch:
 
 env:
