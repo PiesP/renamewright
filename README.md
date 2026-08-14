@@ -88,6 +88,7 @@ The native performance gate is also Rust-owned:
 
 ```bash
 cargo run --release --locked --package renamewright-platform --example large_batch_budget
+cargo run --release --locked --package renamewright-application --example service_batch_budget
 ```
 
 Windows release and acceptance builds use the checked-in PowerShell packaging
