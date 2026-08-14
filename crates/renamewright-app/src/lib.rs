@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
@@ -34,6 +35,7 @@ const PREVIEW_SOURCE_COLUMN_WIDTH: f32 = 130.0;
 const PREVIEW_PROPOSED_COLUMN_WIDTH: f32 = 180.0;
 const PREVIEW_STATUS_COLUMN_WIDTH: f32 = 80.0;
 const APPEARANCE_STORAGE_KEY: &str = "renamewright.appearance.v1";
+const MUTATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn preview_column_label(
     ui: &mut egui::Ui,
@@ -2105,7 +2107,7 @@ impl RenamewrightApp {
             .as_ref()
             .and_then(|root| application.initialize(root).err());
         let ledger = if journal_status.is_none() {
-            application.list_ledger().unwrap_or_default()
+            application.ledger_snapshot().unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -2707,7 +2709,7 @@ impl RenamewrightApp {
                 };
                 self.refresh_ledger();
             }
-            Err(TryRecvError::Empty) => context.request_repaint(),
+            Err(TryRecvError::Empty) => context.request_repaint_after(MUTATION_POLL_INTERVAL),
             Err(TryRecvError::Disconnected) => {
                 if let Some(task) = self.mutation_task.take() {
                     task.finish();
@@ -3919,21 +3921,6 @@ impl RenamewrightApp {
         let Some(plan_id) = self.plan.as_ref().map(PlanDto::plan_id) else {
             return;
         };
-        let document = if json {
-            self.application.inspect_plan_json(plan_id)
-        } else {
-            self.application.inspect_plan_csv(plan_id)
-        };
-        let Ok(document) = document else {
-            self.status = self
-                .locale
-                .text(
-                    "The current plan could not be inspected",
-                    "현재 계획을 검토할 수 없습니다",
-                )
-                .to_owned();
-            return;
-        };
         let extension = if json { "json" } else { "csv" };
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export the path-free Renamewright plan")
@@ -3947,7 +3934,12 @@ impl RenamewrightApp {
                 .to_owned();
             return;
         };
-        match ApplicationService::export_document(&path, &document) {
+        let result = if json {
+            self.application.export_plan_json(plan_id, &path)
+        } else {
+            self.application.export_plan_csv(plan_id, &path)
+        };
+        match result {
             Ok(()) => {
                 self.status = match self.locale {
                     Locale::English => format!("Plan {extension} exported"),

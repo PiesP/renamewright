@@ -168,6 +168,15 @@ jobs:
           --package renamewright-platform
           --example large_batch_budget
 
+      - name: Enforce the 10,000-entry application-service budget
+        if: needs.changes.result != 'success' || needs.changes.outputs.performance == 'true'
+        run: >-
+          cargo run
+          --release
+          --locked
+          --package renamewright-application
+          --example service_batch_budget
+
   windows:
     name: pr-gate/windows
     needs: changes

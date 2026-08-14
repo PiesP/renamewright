@@ -2,9 +2,9 @@
 
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
     CaseMode, CharacterClass, CharacterClassOperation, DiagnosticCode, ExecutionDirection,
@@ -122,6 +122,7 @@ const PRESET_DOCUMENT_SCHEMA_VERSION: u16 = 2;
 const MAX_PRESETS: usize = 32;
 const MAX_PRESET_NAME_BYTES: usize = 256;
 const MAX_PRESET_DOCUMENT_BYTES: u64 = 512 * 1_024;
+const MAX_PLAN_INSPECTION_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_SEQUENCE_INPUT: u64 = 9_007_199_254_740_991;
 const MAX_RANGE_INPUT: u64 = u32::MAX as u64;
 
@@ -1277,6 +1278,14 @@ impl ApplicationService {
         Ok(ledger.entries().map(LedgerEntryDto::from).collect())
     }
 
+    pub fn ledger_snapshot(&self) -> Result<Vec<LedgerEntryDto>, String> {
+        let ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| "the rename ledger is unavailable".to_owned())?;
+        Ok(ledger.entries().map(LedgerEntryDto::from).collect())
+    }
+
     pub fn inspect_recovery<F>(
         &self,
         ledger_id: u64,
@@ -1376,8 +1385,22 @@ impl ApplicationService {
         plan_document_csv(plan_id, self)
     }
 
-    pub fn export_document(path: &Path, document: &str) -> Result<(), String> {
-        write_new_document(path, document).map_err(export_write_error)
+    pub fn export_plan_json(&self, plan_id: u64, path: &Path) -> Result<(), String> {
+        let latest_plan = self
+            .latest_plan
+            .lock()
+            .map_err(|_| "the latest plan is unavailable".to_owned())?;
+        let stored = current_plan(plan_id, &latest_plan)?;
+        write_new_serialized_document(path, |writer| write_plan_json(stored, writer))
+    }
+
+    pub fn export_plan_csv(&self, plan_id: u64, path: &Path) -> Result<(), String> {
+        let latest_plan = self
+            .latest_plan
+            .lock()
+            .map_err(|_| "the latest plan is unavailable".to_owned())?;
+        let stored = current_plan(plan_id, &latest_plan)?;
+        write_new_serialized_document(path, |writer| write_plan_csv(stored, writer))
     }
 }
 
@@ -1738,8 +1761,8 @@ pub struct PlanDto {
 pub struct PlanRowDto {
     source_id: u64,
     entry_kind: &'static str,
-    original_name: String,
-    proposed_name: String,
+    original_name: Arc<str>,
+    proposed_name: Arc<str>,
     status: &'static str,
     diagnostics: Vec<&'static str>,
     override_applied: bool,
@@ -2134,8 +2157,8 @@ impl From<&RenamePlan> for PlanDto {
                 .map(|row| PlanRowDto {
                     source_id: row.source_id().value(),
                     entry_kind: entry_kind_name(row.entry_kind()),
-                    original_name: row.original_display().to_owned(),
-                    proposed_name: row.proposed_display().to_owned(),
+                    original_name: row.original_display_shared(),
+                    proposed_name: row.proposed_display_shared(),
                     status: status_name(row.status()),
                     diagnostics: row
                         .diagnostics()
@@ -2554,12 +2577,10 @@ fn plan_document_json(plan_id: u64, state: &ApplicationService) -> Result<String
         .latest_plan
         .lock()
         .map_err(|_| "the latest plan is unavailable".to_owned())?;
-    let stored = latest_plan
-        .as_ref()
-        .filter(|stored| stored.plan.id().value() == plan_id)
-        .ok_or_else(|| "the requested plan is no longer current".to_owned())?;
-    serde_json::to_string_pretty(&PlanDocument::from(stored))
-        .map_err(|error| format!("the plan could not be serialized: {error}"))
+    let stored = current_plan(plan_id, &latest_plan)?;
+    let mut writer = InspectionWriter::new();
+    write_plan_json(stored, &mut writer)?;
+    writer.finish()
 }
 
 fn plan_document_csv(plan_id: u64, state: &ApplicationService) -> Result<String, String> {
@@ -2567,18 +2588,71 @@ fn plan_document_csv(plan_id: u64, state: &ApplicationService) -> Result<String,
         .latest_plan
         .lock()
         .map_err(|_| "the latest plan is unavailable".to_owned())?;
-    let stored = latest_plan
-        .as_ref()
-        .filter(|stored| stored.plan.id().value() == plan_id)
-        .ok_or_else(|| "the requested plan is no longer current".to_owned())?;
+    let stored = current_plan(plan_id, &latest_plan)?;
     plan_csv(stored)
 }
 
+fn current_plan(plan_id: u64, latest_plan: &Option<StoredPlan>) -> Result<&StoredPlan, String> {
+    latest_plan
+        .as_ref()
+        .filter(|stored| stored.plan.id().value() == plan_id)
+        .ok_or_else(|| "the requested plan is no longer current".to_owned())
+}
+
+fn write_plan_json(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), String> {
+    serde_json::to_writer_pretty(writer, &PlanDocument::from(stored))
+        .map_err(|error| format!("the plan could not be serialized: {error}"))
+}
+
 fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
+    let mut writer = InspectionWriter::new();
+    write_plan_csv(stored, &mut writer)?;
+    writer.finish()
+}
+
+struct InspectionWriter {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl InspectionWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::with_capacity(MAX_PLAN_INSPECTION_BYTES),
+            truncated: false,
+        }
+    }
+
+    fn finish(self) -> Result<String, String> {
+        let mut document = String::from_utf8(self.bytes)
+            .map_err(|_| "the plan inspection was not valid UTF-8".to_owned())?;
+        if self.truncated {
+            document.push_str(
+                "\n\n[Inspection truncated at 2 MiB. Export the plan for the complete document.]",
+            );
+        }
+        Ok(document)
+    }
+}
+
+impl Write for InspectionWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let remaining = MAX_PLAN_INSPECTION_BYTES.saturating_sub(self.bytes.len());
+        let retained = remaining.min(buffer.len());
+        self.bytes.extend_from_slice(&buffer[..retained]);
+        self.truncated |= retained < buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn write_plan_csv(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), String> {
     let plan = PlanDocument::from(stored);
-    let mut csv = String::new();
-    push_csv_row(
-        &mut csv,
+    write_csv_row(
+        writer,
         &[
             "csv_schema_version",
             "plan_id",
@@ -2592,14 +2666,14 @@ fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
             "override_applied",
             "trace_json",
         ],
-    );
+    )?;
     for row in plan.rows {
         let diagnostics = serde_json::to_string(&row.diagnostics)
             .map_err(|_| "the plan CSV could not be serialized".to_owned())?;
         let trace = serde_json::to_string(&row.trace)
             .map_err(|_| "the plan CSV could not be serialized".to_owned())?;
-        push_csv_row(
-            &mut csv,
+        write_csv_row(
+            writer,
             &[
                 &PLAN_CSV_SCHEMA_VERSION.to_string(),
                 &plan.plan_id.to_string(),
@@ -2617,19 +2691,25 @@ fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
                 },
                 &trace,
             ],
-        );
+        )?;
     }
-    Ok(csv)
+    Ok(())
 }
 
-fn push_csv_row(csv: &mut String, cells: &[&str]) {
+fn write_csv_row(writer: &mut impl Write, cells: &[&str]) -> Result<(), String> {
     for (index, cell) in cells.iter().enumerate() {
         if index > 0 {
-            csv.push(',');
+            writer
+                .write_all(b",")
+                .map_err(|error| format!("the plan CSV could not be written: {error}"))?;
         }
-        csv.push_str(&csv_cell(cell));
+        writer
+            .write_all(csv_cell(cell).as_bytes())
+            .map_err(|error| format!("the plan CSV could not be written: {error}"))?;
     }
-    csv.push_str("\r\n");
+    writer
+        .write_all(b"\r\n")
+        .map_err(|error| format!("the plan CSV could not be written: {error}"))
 }
 
 fn csv_cell(value: &str) -> String {
@@ -2711,10 +2791,33 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     }
 }
 
-fn write_new_document(path: &Path, document: &str) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(document.as_bytes())?;
-    file.sync_all()
+fn write_new_serialized_document(
+    path: &Path,
+    serialize: impl FnOnce(&mut BufWriter<File>) -> Result<(), String>,
+) -> Result<(), String> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(export_write_error)?;
+    let mut writer = BufWriter::new(file);
+    let result = serialize(&mut writer)
+        .and_then(|()| {
+            writer
+                .flush()
+                .map_err(|error| format!("the plan could not be exported: {error}"))
+        })
+        .and_then(|()| {
+            writer
+                .get_ref()
+                .sync_all()
+                .map_err(|error| format!("the plan could not be exported: {error}"))
+        });
+    if result.is_err() {
+        drop(writer);
+        let _ = std::fs::remove_file(path);
+    }
+    result
 }
 
 fn export_write_error(error: std::io::Error) -> String {
@@ -2827,13 +2930,13 @@ mod tests {
 
     use super::{
         ApplicationService, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
-        ExtensionOperationDto, FilenamePartDto, LedgerEntryDto, MAX_PRESET_DOCUMENT_BYTES, PlanDto,
-        PresetDocumentDto, PresetDocumentError, PresetDocumentErrorKind,
-        RULE_PIPELINE_SCHEMA_VERSION, RangeOperationDto, RangeOriginDto, RulePipelineRequestDto,
-        RuleRequestDto, RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto,
-        SequenceScopeDto, SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto,
-        admit_dropped_sources, compile_rule_request, csv_cell, export_write_error,
-        plan_document_csv, plan_document_json, plan_from_registry, write_new_document,
+        ExtensionOperationDto, FilenamePartDto, InspectionWriter, LedgerEntryDto,
+        MAX_PLAN_INSPECTION_BYTES, MAX_PRESET_DOCUMENT_BYTES, PlanDto, PresetDocumentDto,
+        PresetDocumentError, PresetDocumentErrorKind, RULE_PIPELINE_SCHEMA_VERSION,
+        RangeOperationDto, RangeOriginDto, RulePipelineRequestDto, RuleRequestDto,
+        RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto,
+        SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto, admit_dropped_sources,
+        compile_rule_request, csv_cell, plan_document_csv, plan_document_json, plan_from_registry,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -2944,6 +3047,14 @@ mod tests {
         assert!(row.diagnostics().is_empty());
         assert!(!row.override_applied());
         assert!(row.source_id() > 0);
+        let stored = state.latest_plan.lock().map_err(|_| "plan lock failed")?;
+        let core_name = stored
+            .as_ref()
+            .ok_or("the latest plan was not retained")?
+            .plan
+            .rows()[0]
+            .proposed_display_shared();
+        assert!(std::sync::Arc::ptr_eq(&core_name, &row.proposed_name));
         Ok(())
     }
 
@@ -3243,6 +3354,19 @@ mod tests {
         assert_eq!(csv_cell("  @command"), "\"'  @command\"");
         assert_eq!(csv_cell("\tcommand"), "\"'\tcommand\"");
         assert_eq!(csv_cell("safe-leading text"), "\"safe-leading text\"");
+    }
+
+    #[test]
+    fn plan_inspection_is_bounded_and_points_to_full_export() -> Result<(), Box<dyn Error>> {
+        let mut writer = InspectionWriter::new();
+        std::io::Write::write_all(&mut writer, &vec![b'x'; MAX_PLAN_INSPECTION_BYTES + 1])?;
+
+        let document = writer.finish()?;
+
+        assert!(document.starts_with(&"x".repeat(MAX_PLAN_INSPECTION_BYTES)));
+        assert!(document.ends_with("Export the plan for the complete document.]"));
+        assert!(document.len() < MAX_PLAN_INSPECTION_BYTES + 128);
+        Ok(())
     }
 
     #[test]
@@ -3577,19 +3701,32 @@ mod tests {
     }
 
     #[test]
-    fn plan_export_never_replaces_an_existing_file() -> Result<(), Box<dyn Error>> {
+    fn plan_export_streams_the_current_document_without_replacing_files()
+    -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
-        let export = directory.path().join("plan.json");
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let state = ApplicationService::default();
+        let plan = state.admit_sources_with_rules(
+            [source],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        let json_export = directory.path().join("plan.json");
+        let csv_export = directory.path().join("plan.csv");
+        let expected_json = state.inspect_plan_json(plan.plan_id())?;
+        let expected_csv = state.inspect_plan_csv(plan.plan_id())?;
 
-        write_new_document(&export, "first")?;
-        let Err(error) = write_new_document(&export, "second") else {
+        state.export_plan_json(plan.plan_id(), &json_export)?;
+        state.export_plan_csv(plan.plan_id(), &csv_export)?;
+        let Err(error) = state.export_plan_json(plan.plan_id(), &json_export) else {
             return Err("create-new must reject reuse".into());
         };
         assert_eq!(
-            export_write_error(error),
+            error,
             "the export file already exists; choose a new file name"
         );
-        assert_eq!(fs::read_to_string(export)?, "first");
+        assert_eq!(fs::read_to_string(json_export)?, expected_json);
+        assert_eq!(fs::read_to_string(csv_export)?, expected_csv);
         Ok(())
     }
 
@@ -3613,6 +3750,22 @@ mod tests {
         };
 
         assert_eq!(error, "the plan sequence is exhausted");
+        Ok(())
+    }
+
+    #[test]
+    fn ledger_snapshot_reuses_initial_discovery_until_an_explicit_refresh()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let state = ApplicationService::default();
+        state.initialize(directory.path())?;
+        assert!(state.ledger_snapshot()?.is_empty());
+
+        fs::write(directory.path().join("late.rwj"), b"not-a-journal")?;
+
+        assert!(state.ledger_snapshot()?.is_empty());
+        assert_eq!(state.list_ledger()?.len(), 1);
+        assert_eq!(state.ledger_snapshot()?.len(), 1);
         Ok(())
     }
 

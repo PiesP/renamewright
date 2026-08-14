@@ -12,7 +12,7 @@ publish = false
 [dependencies]
 renamewright-core = { path = "../renamewright-core" }
 renamewright-platform = { path = "../renamewright-platform" }
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.151"
 tempfile = "3.27.0"
 
