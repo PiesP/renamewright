@@ -1304,7 +1304,7 @@ pub struct SourceChangeDto {
     error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LedgerEntryDto {
     ledger_id: u64,
@@ -1317,6 +1317,43 @@ pub struct LedgerEntryDto {
     recovery_available: bool,
     undo_of_plan_id: Option<u64>,
     undo_available: bool,
+}
+
+impl LedgerEntryDto {
+    #[must_use]
+    pub const fn ledger_id(&self) -> u64 {
+        self.ledger_id
+    }
+
+    #[must_use]
+    pub const fn plan_id(&self) -> Option<u64> {
+        self.plan_id
+    }
+
+    #[must_use]
+    pub const fn source_count(&self) -> usize {
+        self.source_count
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> &'static str {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn attention_step(&self) -> Option<usize> {
+        self.attention_step
+    }
+
+    #[must_use]
+    pub const fn recovery_available(&self) -> bool {
+        self.recovery_available
+    }
+
+    #[must_use]
+    pub const fn undo_available(&self) -> bool {
+        self.undo_available
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1336,12 +1373,31 @@ pub struct UndoRequestDto {
     inspection: UndoInspectionDto,
 }
 
+impl UndoRequestDto {
+    #[must_use]
+    pub const fn new(inspection: UndoInspectionDto) -> Self {
+        Self { inspection }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoCommandResultDto {
     performed: bool,
     outcome: &'static str,
     ledger: Vec<LedgerEntryDto>,
+}
+
+impl UndoCommandResultDto {
+    #[must_use]
+    pub const fn performed(&self) -> bool {
+        self.performed
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> &'static str {
+        self.outcome
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1355,7 +1411,7 @@ pub enum UndoCommandErrorKind {
 }
 
 impl UndoCommandErrorKind {
-    const fn code(self) -> &'static str {
+    pub const fn code(self) -> &'static str {
         match self {
             Self::Busy => "busy",
             Self::StateUnavailable => "stateUnavailable",
@@ -1372,13 +1428,20 @@ pub struct UndoCommandErrorDto {
     code: &'static str,
 }
 
+impl UndoCommandErrorDto {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
 impl From<UndoCommandErrorKind> for UndoCommandErrorDto {
     fn from(kind: UndoCommandErrorKind) -> Self {
         Self { code: kind.code() }
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryInspectionDto {
     ledger_id: u64,
@@ -1389,6 +1452,48 @@ pub struct RecoveryInspectionDto {
     resume_available: bool,
     rollback_available: bool,
     reconcile_available: bool,
+}
+
+impl RecoveryInspectionDto {
+    #[must_use]
+    pub const fn ledger_id(&self) -> u64 {
+        self.ledger_id
+    }
+
+    #[must_use]
+    pub const fn direction(&self) -> &'static str {
+        self.direction
+    }
+
+    #[must_use]
+    pub const fn step_index(&self) -> Option<usize> {
+        self.step_index
+    }
+
+    #[must_use]
+    pub const fn readiness(&self) -> &'static str {
+        self.readiness
+    }
+
+    #[must_use]
+    pub const fn disposition(&self) -> Option<&'static str> {
+        self.disposition
+    }
+
+    #[must_use]
+    pub const fn resume_available(&self) -> bool {
+        self.resume_available
+    }
+
+    #[must_use]
+    pub const fn rollback_available(&self) -> bool {
+        self.rollback_available
+    }
+
+    #[must_use]
+    pub const fn reconcile_available(&self) -> bool {
+        self.reconcile_available
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -1419,12 +1524,43 @@ pub struct RecoveryRequestDto {
     inspection: RecoveryExpectationDto,
 }
 
+impl RecoveryRequestDto {
+    #[must_use]
+    pub fn new(action: RecoveryCommandAction, inspection: &RecoveryInspectionDto) -> Self {
+        Self {
+            action,
+            inspection: RecoveryExpectationDto {
+                ledger_id: inspection.ledger_id,
+                direction: inspection.direction.to_owned(),
+                step_index: inspection.step_index,
+                readiness: inspection.readiness.to_owned(),
+                disposition: inspection.disposition.map(str::to_owned),
+                resume_available: inspection.resume_available,
+                rollback_available: inspection.rollback_available,
+                reconcile_available: inspection.reconcile_available,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryCommandResultDto {
     performed: bool,
     outcome: &'static str,
     ledger: Vec<LedgerEntryDto>,
+}
+
+impl RecoveryCommandResultDto {
+    #[must_use]
+    pub const fn performed(&self) -> bool {
+        self.performed
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> &'static str {
+        self.outcome
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1438,7 +1574,7 @@ pub enum RecoveryCommandErrorKind {
 }
 
 impl RecoveryCommandErrorKind {
-    const fn code(self) -> &'static str {
+    pub const fn code(self) -> &'static str {
         match self {
             Self::Busy => "busy",
             Self::StateUnavailable => "stateUnavailable",
@@ -1453,6 +1589,45 @@ impl RecoveryCommandErrorKind {
 #[derive(Debug, Serialize)]
 pub struct RecoveryCommandErrorDto {
     code: &'static str,
+}
+
+impl RecoveryCommandErrorDto {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl UndoInspectionDto {
+    #[must_use]
+    pub const fn ledger_id(&self) -> u64 {
+        self.ledger_id
+    }
+
+    #[must_use]
+    pub const fn original_plan_id(&self) -> u64 {
+        self.original_plan_id
+    }
+
+    #[must_use]
+    pub const fn source_count(&self) -> usize {
+        self.source_count
+    }
+
+    #[must_use]
+    pub fn readiness(&self) -> &str {
+        &self.readiness
+    }
+
+    #[must_use]
+    pub fn block_reason(&self) -> Option<&str> {
+        self.block_reason.as_deref()
+    }
+
+    #[must_use]
+    pub const fn undo_available(&self) -> bool {
+        self.undo_available
+    }
 }
 
 impl From<RecoveryCommandErrorKind> for RecoveryCommandErrorDto {

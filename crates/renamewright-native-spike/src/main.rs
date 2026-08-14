@@ -13,14 +13,14 @@ use renamewright_native_spike::automation::{
 use renamewright_native_spike::{NativePalette, NativeSpikeApp, install_theme};
 
 #[cfg(windows)]
-fn native_preset_path() -> Option<PathBuf> {
+fn native_data_root() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .map(|root| root.join("Renamewright").join("presets.json"))
+        .map(|root| root.join("Renamewright"))
 }
 
 #[cfg(not(windows))]
-fn native_preset_path() -> Option<PathBuf> {
+fn native_data_root() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| {
@@ -28,7 +28,7 @@ fn native_preset_path() -> Option<PathBuf> {
                 .map(PathBuf::from)
                 .map(|home| home.join(".local").join("share"))
         })
-        .map(|root| root.join("renamewright").join("presets.json"))
+        .map(|root| root.join("renamewright"))
 }
 
 #[cfg(windows)]
@@ -178,9 +178,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     automation_launch.fixture.as_ref(),
                 )));
             }
-            Ok(Box::new(NativeSpikeApp::new_product(
+            let data_root = native_data_root();
+            let preset_path = data_root.as_ref().map(|root| root.join("presets.json"));
+            let journal_root = data_root.as_ref().map(|root| root.join("journals"));
+            Ok(Box::new(NativeSpikeApp::new_product_with_data(
                 palette,
-                native_preset_path(),
+                preset_path,
+                journal_root,
             )))
         }),
     )?;

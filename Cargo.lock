@@ -4126,6 +4126,7 @@ dependencies = [
  "kittest",
  "pico-args",
  "renamewright-application",
+ "renamewright-platform",
  "renamewright-windows-native",
  "rfd",
  "serde",

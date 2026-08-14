@@ -5,16 +5,23 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread::{self, JoinHandle};
 
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
 };
 use renamewright_application::{
     ApplicationService, CaseModeDto, CharacterClassDto, CharacterClassOperationDto,
-    ExtensionOperationDto, FilenamePartDto, PlanDto, PresetDocumentDto, RangeOperationDto,
-    RangeOriginDto, RulePipelineRequestDto, RuleRequestDto, SequenceOrderDto, SequencePlacementDto,
-    SequenceScopeDto, SourceOverrideDto, UnicodeNormalizationFormDto,
+    ExtensionOperationDto, FilenamePartDto, LedgerEntryDto, PlanDto, PresetDocumentDto,
+    RangeOperationDto, RangeOriginDto, RecoveryCommandAction, RecoveryCommandErrorDto,
+    RecoveryCommandResultDto, RecoveryInspectionDto, RecoveryRequestDto, RulePipelineRequestDto,
+    RuleRequestDto, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, SourceOverrideDto,
+    UndoCommandErrorDto, UndoCommandResultDto, UndoInspectionDto, UndoRequestDto,
+    UnicodeNormalizationFormDto,
 };
+use renamewright_platform::NativeExecutionFileSystem;
 
 const SAMPLE_COUNT: usize = 10_000;
 const PREVIEW_ROW_HEIGHT: f32 = 28.0;
@@ -60,6 +67,16 @@ pub mod semantics {
     pub const NO_SOURCES: &str = "No sources selected";
     pub const AUTOMATION_BANNER: &str = "AUTOMATION TEST MODE";
     pub const HIGH_CONTRAST_ACTIVE: &str = "Windows high contrast palette active";
+    pub const LEDGER: &str = "Ledger";
+    pub const REFRESH_LEDGER: &str = "Refresh ledger";
+    pub const INSPECT_RECOVERY: &str = "Inspect recovery";
+    pub const INSPECT_UNDO: &str = "Inspect Undo";
+    pub const RESUME: &str = "Resume";
+    pub const ROLLBACK: &str = "Rollback";
+    pub const RECONCILE: &str = "Reconcile";
+    pub const UNDO: &str = "Undo";
+    pub const CANCEL_MUTATION: &str = "Cancel operation";
+    pub const CONFIRM_ACTION: &str = "Confirm action";
 }
 
 #[cfg(feature = "automation")]
@@ -1087,6 +1104,38 @@ struct InspectionDocument {
     content: String,
 }
 
+#[derive(Debug)]
+enum PendingConfirmation {
+    Recovery {
+        action: RecoveryCommandAction,
+        inspection: RecoveryInspectionDto,
+    },
+    Undo {
+        inspection: UndoInspectionDto,
+    },
+    Cancel,
+}
+
+#[derive(Debug)]
+enum MutationMessage {
+    Recovery(Result<RecoveryCommandResultDto, RecoveryCommandErrorDto>),
+    Undo(Result<UndoCommandResultDto, UndoCommandErrorDto>),
+}
+
+#[derive(Debug)]
+struct MutationTask {
+    receiver: Receiver<MutationMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl MutationTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn rule_enabled_mut(rule: &mut RuleRequestDto) -> &mut bool {
     match rule {
         RuleRequestDto::Prefix { enabled, .. }
@@ -1493,7 +1542,7 @@ impl PlanFilter {
 
 #[derive(Debug)]
 pub struct NativeSpikeApp {
-    application: ApplicationService,
+    application: Arc<ApplicationService>,
     plan: Option<PlanDto>,
     rules: Vec<RuleRequestDto>,
     overrides: BTreeMap<u64, String>,
@@ -1508,9 +1557,16 @@ pub struct NativeSpikeApp {
     inspection: Option<InspectionDocument>,
     synthetic_fixture: bool,
     preset_path: Option<PathBuf>,
+    journal_root: Option<PathBuf>,
     presets: PresetDocumentDto,
     preset_name: String,
     status: String,
+    ledger: Vec<LedgerEntryDto>,
+    selected_ledger_id: Option<u64>,
+    recovery_inspection: Option<RecoveryInspectionDto>,
+    undo_inspection: Option<UndoInspectionDto>,
+    pending_confirmation: Option<PendingConfirmation>,
+    mutation_task: Option<MutationTask>,
     palette: NativePalette,
     #[cfg(feature = "automation")]
     automation_mode: bool,
@@ -1535,18 +1591,28 @@ impl NativeSpikeApp {
         palette: NativePalette,
         preset_path: Option<PathBuf>,
     ) -> Self {
-        Self::new_configured(_automation_mode, palette, preset_path, true)
+        Self::new_configured(_automation_mode, palette, preset_path, None, true)
     }
 
     #[must_use]
     pub fn new_product(palette: NativePalette, preset_path: Option<PathBuf>) -> Self {
-        Self::new_configured(false, palette, preset_path, false)
+        Self::new_configured(false, palette, preset_path, None, false)
+    }
+
+    #[must_use]
+    pub fn new_product_with_data(
+        palette: NativePalette,
+        preset_path: Option<PathBuf>,
+        journal_root: Option<PathBuf>,
+    ) -> Self {
+        Self::new_configured(false, palette, preset_path, journal_root, false)
     }
 
     fn new_configured(
         _automation_mode: bool,
         palette: NativePalette,
         preset_path: Option<PathBuf>,
+        journal_root: Option<PathBuf>,
         synthetic_fixture: bool,
     ) -> Self {
         let (presets, preset_status) = preset_path.as_ref().map_or_else(
@@ -1559,8 +1625,17 @@ impl NativeSpikeApp {
                 ),
             },
         );
+        let application = Arc::new(ApplicationService::default());
+        let journal_status = journal_root
+            .as_ref()
+            .and_then(|root| application.initialize(root).err());
+        let ledger = if journal_status.is_none() {
+            application.list_ledger().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         Self {
-            application: ApplicationService::default(),
+            application,
             plan: None,
             rules: vec![RuleRequestDto::Prefix {
                 rule_id: 1,
@@ -1579,15 +1654,22 @@ impl NativeSpikeApp {
             inspection: None,
             synthetic_fixture,
             preset_path,
+            journal_root,
             presets,
             preset_name: String::new(),
-            status: preset_status.unwrap_or_else(|| {
+            status: journal_status.or(preset_status).unwrap_or_else(|| {
                 if synthetic_fixture {
                     format!("{SAMPLE_COUNT} sample entries ready")
                 } else {
                     semantics::NO_SOURCES.to_owned()
                 }
             }),
+            ledger,
+            selected_ledger_id: None,
+            recovery_inspection: None,
+            undo_inspection: None,
+            pending_confirmation: None,
+            mutation_task: None,
             palette,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
@@ -1604,7 +1686,9 @@ impl NativeSpikeApp {
         fixture: Option<&automation::AutomationFixture>,
     ) -> Self {
         let preset_path = automation_root.state_root().join("presets.json");
-        let mut app = Self::new_with_storage(true, palette, Some(preset_path));
+        let journal_root = automation_root.journal_root().to_path_buf();
+        let mut app =
+            Self::new_configured(true, palette, Some(preset_path), Some(journal_root), true);
         if let Some(fixture) = fixture {
             if let Some(prefix) = fixture.prefix() {
                 app.set_prefix(prefix);
@@ -1835,6 +1919,317 @@ impl NativeSpikeApp {
                 .text("Preset deleted", "프리셋을 삭제했습니다")
                 .to_owned(),
         );
+    }
+
+    fn refresh_ledger(&mut self) {
+        if self.journal_root.is_none() {
+            self.status = self
+                .locale
+                .text(
+                    "The journal location is unavailable",
+                    "저널 위치를 사용할 수 없습니다",
+                )
+                .to_owned();
+            return;
+        }
+        match self.application.list_ledger() {
+            Ok(ledger) => {
+                if self.selected_ledger_id.is_some_and(|selected| {
+                    !ledger.iter().any(|entry| entry.ledger_id() == selected)
+                }) {
+                    self.selected_ledger_id = None;
+                    self.recovery_inspection = None;
+                    self.undo_inspection = None;
+                }
+                self.ledger = ledger;
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn inspect_selected_recovery(&mut self) {
+        let Some(ledger_id) = self.selected_ledger_id else {
+            return;
+        };
+        match self
+            .application
+            .inspect_recovery(ledger_id, &NativeExecutionFileSystem::new())
+        {
+            Ok(inspection) => {
+                self.recovery_inspection = Some(inspection);
+                self.undo_inspection = None;
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn inspect_selected_undo(&mut self) {
+        let Some(ledger_id) = self.selected_ledger_id else {
+            return;
+        };
+        match self
+            .application
+            .inspect_undo(ledger_id, &NativeExecutionFileSystem::new())
+        {
+            Ok(inspection) => {
+                self.undo_inspection = Some(inspection);
+                self.recovery_inspection = None;
+            }
+            Err(error) => self.status = error.code().to_owned(),
+        }
+    }
+
+    fn start_confirmed_mutation(&mut self, confirmation: PendingConfirmation) {
+        match confirmation {
+            PendingConfirmation::Recovery { action, inspection } => {
+                let request = RecoveryRequestDto::new(action, &inspection);
+                let application = Arc::clone(&self.application);
+                let (sender, receiver) = mpsc::channel();
+                let handle = thread::spawn(move || {
+                    let result = application.apply_recovery_action(
+                        &request,
+                        &NativeExecutionFileSystem::new(),
+                        |_, _| true,
+                    );
+                    let _ = sender.send(MutationMessage::Recovery(result));
+                });
+                self.mutation_task = Some(MutationTask {
+                    receiver,
+                    handle: Some(handle),
+                });
+                self.status = self
+                    .locale
+                    .text("Recovery operation running", "복구 작업을 실행 중입니다")
+                    .to_owned();
+            }
+            PendingConfirmation::Undo { inspection } => {
+                let request = UndoRequestDto::new(inspection);
+                let application = Arc::clone(&self.application);
+                let (sender, receiver) = mpsc::channel();
+                let handle = thread::spawn(move || {
+                    let result =
+                        application
+                            .apply_undo(&request, &NativeExecutionFileSystem::new(), |_| true);
+                    let _ = sender.send(MutationMessage::Undo(result));
+                });
+                self.mutation_task = Some(MutationTask {
+                    receiver,
+                    handle: Some(handle),
+                });
+                self.status = self
+                    .locale
+                    .text("Undo operation running", "실행 취소 작업을 실행 중입니다")
+                    .to_owned();
+            }
+            PendingConfirmation::Cancel => {
+                match self.application.request_confirmed_cancellation(|| true) {
+                    Ok(true) => {
+                        self.status = self
+                            .locale
+                            .text("Cancellation requested", "취소를 요청했습니다")
+                            .to_owned();
+                    }
+                    Ok(false) => {
+                        self.status = self
+                            .locale
+                            .text("No cancellable operation", "취소 가능한 작업이 없습니다")
+                            .to_owned();
+                    }
+                    Err(error) => self.status = error.code().to_owned(),
+                }
+            }
+        }
+    }
+
+    fn poll_mutation(&mut self, context: &egui::Context) {
+        let Some(task) = self.mutation_task.as_ref() else {
+            return;
+        };
+        match task.receiver.try_recv() {
+            Ok(MutationMessage::Recovery(result)) => {
+                if let Some(task) = self.mutation_task.take() {
+                    task.finish();
+                }
+                self.status = match result {
+                    Ok(result) => format!(
+                        "{}: {}",
+                        self.locale.text("Recovery finished", "복구 완료"),
+                        result.outcome()
+                    ),
+                    Err(error) => format!("Recovery failed ({})", error.code()),
+                };
+                self.refresh_ledger();
+            }
+            Ok(MutationMessage::Undo(result)) => {
+                if let Some(task) = self.mutation_task.take() {
+                    task.finish();
+                }
+                self.status = match result {
+                    Ok(result) => format!(
+                        "{}: {}",
+                        self.locale.text("Undo finished", "실행 취소 완료"),
+                        result.outcome()
+                    ),
+                    Err(error) => format!("Undo failed ({})", error.code()),
+                };
+                self.refresh_ledger();
+            }
+            Err(TryRecvError::Empty) => context.request_repaint(),
+            Err(TryRecvError::Disconnected) => {
+                if let Some(task) = self.mutation_task.take() {
+                    task.finish();
+                }
+                self.status = self
+                    .locale
+                    .text(
+                        "The operation ended unexpectedly",
+                        "작업이 예기치 않게 종료되었습니다",
+                    )
+                    .to_owned();
+            }
+        }
+    }
+
+    fn show_ledger(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading(self.locale.text(semantics::LEDGER, "원장"));
+            if ui
+                .button(
+                    self.locale
+                        .text(semantics::REFRESH_LEDGER, "원장 새로 고침"),
+                )
+                .clicked()
+            {
+                self.refresh_ledger();
+            }
+        });
+        if self.ledger.is_empty() {
+            ui.label(self.locale.text("No transactions", "트랜잭션이 없습니다"));
+            return;
+        }
+
+        let mut selected = self.selected_ledger_id;
+        ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+            for entry in &self.ledger {
+                let label = format!(
+                    "#{} · {} · {}",
+                    entry.ledger_id(),
+                    entry.status(),
+                    entry.source_count()
+                );
+                ui.selectable_value(&mut selected, Some(entry.ledger_id()), label);
+            }
+        });
+        if selected != self.selected_ledger_id {
+            self.selected_ledger_id = selected;
+            self.recovery_inspection = None;
+            self.undo_inspection = None;
+        }
+
+        let (recovery_available, undo_available) = self
+            .selected_ledger_id
+            .and_then(|ledger_id| {
+                self.ledger
+                    .iter()
+                    .find(|entry| entry.ledger_id() == ledger_id)
+            })
+            .map_or((false, false), |entry| {
+                (entry.recovery_available(), entry.undo_available())
+            });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    recovery_available,
+                    egui::Button::new(self.locale.text(semantics::INSPECT_RECOVERY, "복구 검사")),
+                )
+                .clicked()
+            {
+                self.inspect_selected_recovery();
+            }
+            if ui
+                .add_enabled(
+                    undo_available,
+                    egui::Button::new(self.locale.text(semantics::INSPECT_UNDO, "실행 취소 검사")),
+                )
+                .clicked()
+            {
+                self.inspect_selected_undo();
+            }
+        });
+
+        if let Some(inspection) = &self.recovery_inspection {
+            ui.separator();
+            ui.label(format!(
+                "{} · {} · {}",
+                inspection.direction(),
+                inspection.readiness(),
+                inspection
+                    .step_index()
+                    .map_or_else(|| "-".to_owned(), |step| step.to_string())
+            ));
+            let mut requested_action = None;
+            ui.horizontal(|ui| {
+                for (action, label, enabled) in [
+                    (
+                        RecoveryCommandAction::Resume,
+                        self.locale.text(semantics::RESUME, "계속"),
+                        inspection.resume_available(),
+                    ),
+                    (
+                        RecoveryCommandAction::Rollback,
+                        self.locale.text(semantics::ROLLBACK, "롤백"),
+                        inspection.rollback_available(),
+                    ),
+                    (
+                        RecoveryCommandAction::Reconcile,
+                        self.locale.text(semantics::RECONCILE, "조정"),
+                        inspection.reconcile_available(),
+                    ),
+                ] {
+                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                        requested_action = Some(action);
+                    }
+                }
+            });
+            if let Some(action) = requested_action {
+                self.pending_confirmation = Some(PendingConfirmation::Recovery {
+                    action,
+                    inspection: inspection.clone(),
+                });
+            }
+        }
+
+        if let Some(inspection) = &self.undo_inspection {
+            ui.separator();
+            ui.label(format!(
+                "Plan #{} · {} · {}",
+                inspection.original_plan_id(),
+                inspection.readiness(),
+                inspection.source_count()
+            ));
+            if let Some(reason) = inspection.block_reason() {
+                ui.label(reason);
+            }
+            if ui
+                .add_enabled(
+                    inspection.undo_available(),
+                    egui::Button::new(self.locale.text(semantics::UNDO, "실행 취소")),
+                )
+                .clicked()
+            {
+                self.pending_confirmation = Some(PendingConfirmation::Undo {
+                    inspection: inspection.clone(),
+                });
+            }
+        }
+
+        if self.mutation_task.is_some()
+            && ui
+                .button(self.locale.text(semantics::CANCEL_MUTATION, "작업 취소"))
+                .clicked()
+        {
+            self.pending_confirmation = Some(PendingConfirmation::Cancel);
+        }
     }
 
     fn show_source_bar(&mut self, ui: &mut egui::Ui) {
@@ -2470,9 +2865,68 @@ impl NativeSpikeApp {
         if close_inspection {
             self.inspection = None;
         }
+
+        let mut confirm_action = false;
+        let mut cancel_confirmation = false;
+        if let Some(pending) = &self.pending_confirmation {
+            let (title, detail) = match pending {
+                PendingConfirmation::Recovery { action, inspection } => (
+                    self.locale.text(semantics::CONFIRM_ACTION, "작업 확인"),
+                    format!(
+                        "{:?} · transaction #{} · {} sources",
+                        action,
+                        inspection.ledger_id(),
+                        self.ledger
+                            .iter()
+                            .find(|entry| entry.ledger_id() == inspection.ledger_id())
+                            .map_or(0, LedgerEntryDto::source_count)
+                    ),
+                ),
+                PendingConfirmation::Undo { inspection } => (
+                    self.locale.text(semantics::CONFIRM_ACTION, "작업 확인"),
+                    format!(
+                        "Undo plan #{} · {} sources",
+                        inspection.original_plan_id(),
+                        inspection.source_count()
+                    ),
+                ),
+                PendingConfirmation::Cancel => (
+                    self.locale.text(semantics::CONFIRM_ACTION, "작업 확인"),
+                    self.locale
+                        .text("Request cancellation?", "작업 취소를 요청할까요?")
+                        .to_owned(),
+                ),
+            };
+            egui::Window::new(title)
+                .collapsible(false)
+                .resizable(false)
+                .show(context, |ui| {
+                    ui.label(detail);
+                    ui.label(self.locale.text(
+                        "The filesystem will be revalidated before mutation.",
+                        "변경 전에 파일 시스템을 다시 검증합니다.",
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button(self.locale.text("Confirm", "확인")).clicked() {
+                            confirm_action = true;
+                        }
+                        if ui.button(self.locale.text("Cancel", "취소")).clicked() {
+                            cancel_confirmation = true;
+                        }
+                    });
+                });
+        }
+        if confirm_action {
+            if let Some(pending) = self.pending_confirmation.take() {
+                self.start_confirmed_mutation(pending);
+            }
+        } else if cancel_confirmation {
+            self.pending_confirmation = None;
+        }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        self.poll_mutation(ui.ctx());
         let dropped_paths = ui.ctx().input(|input| {
             input
                 .raw
@@ -2546,6 +3000,17 @@ impl NativeSpikeApp {
             )
             .show(ui, |ui| self.show_rule_rail(ui));
 
+        egui::Panel::right("ledger")
+            .resizable(true)
+            .default_size(280.0)
+            .min_size(240.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(self.palette.paper_soft)
+                    .inner_margin(12.0),
+            )
+            .show(ui, |ui| self.show_ledger(ui));
+
         egui::Panel::bottom("review-bar")
             .frame(
                 egui::Frame::new()
@@ -2570,6 +3035,17 @@ impl NativeSpikeApp {
 impl eframe::App for NativeSpikeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
+    }
+}
+
+impl Drop for NativeSpikeApp {
+    fn drop(&mut self) {
+        if self.mutation_task.is_some() {
+            let _ = self.application.request_confirmed_cancellation(|| true);
+        }
+        if let Some(task) = self.mutation_task.take() {
+            task.finish();
+        }
     }
 }
 
@@ -2685,6 +3161,7 @@ mod tests {
             semantics::SOURCE_QUERY_LABEL,
         );
         let apply = harness.get_by_label(semantics::APPLY);
+        let refresh_ledger = harness.get_by_label(semantics::REFRESH_LEDGER);
         let move_up = harness.get_by_label(semantics::MOVE_RULE_UP);
         let remove_rule = harness.get_by_label(semantics::REMOVE_RULE);
         assert_eq!(
@@ -2706,6 +3183,10 @@ mod tests {
         );
         assert_eq!(apply.accesskit_node().role(), egui::accesskit::Role::Button);
         assert!(apply.accesskit_node().is_disabled());
+        assert_eq!(
+            refresh_ledger.accesskit_node().role(),
+            egui::accesskit::Role::Button
+        );
         assert_eq!(
             move_up.accesskit_node().role(),
             egui::accesskit::Role::Button
@@ -2810,6 +3291,22 @@ mod tests {
         harness.get_by_label(semantics::NO_SOURCES);
         harness.get_by_label("0 shown");
         assert!(harness.query_by_label("IMG_00000.jpg").is_none());
+    }
+
+    #[test]
+    fn product_workbench_initializes_its_journal_root() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_root = directory.path().join("journals");
+        let app = NativeSpikeApp::new_product_with_data(
+            NativePalette::default(),
+            Some(directory.path().join("presets.json")),
+            Some(journal_root.clone()),
+        );
+
+        assert!(journal_root.is_dir());
+        assert_eq!(app.journal_root.as_deref(), Some(journal_root.as_path()));
+        assert!(app.ledger.is_empty());
+        Ok(())
     }
 
     #[test]
