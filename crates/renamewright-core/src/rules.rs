@@ -144,6 +144,11 @@ pub enum RenameRule {
 
 impl RenameRule {
     #[must_use]
+    pub const fn applies_to_directories(&self) -> bool {
+        !matches!(self, Self::Extension { .. })
+    }
+
+    #[must_use]
     pub fn prefix(value: impl Into<String>) -> Self {
         Self::Prefix {
             value: value.into(),

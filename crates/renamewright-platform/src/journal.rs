@@ -11,7 +11,7 @@ use renamewright_core::{
     SourceFingerprint, SourceId, replay_journal,
 };
 
-pub const JOURNAL_SCHEMA_VERSION: u16 = 3;
+pub const JOURNAL_SCHEMA_VERSION: u16 = 4;
 pub const MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION: u16 = 1;
 const MIN_RESUMABLE_JOURNAL_SCHEMA_VERSION: u16 = 2;
 pub const MAX_JOURNAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -906,7 +906,7 @@ fn decode_entry(
         decode_native_name(cursor)?,
         decode_native_name(cursor)?,
     );
-    let fingerprint = decode_fingerprint(cursor)?;
+    let fingerprint = decode_fingerprint(cursor, schema_version)?;
     let execution_identity = decode_execution_identity(cursor)?;
     let native_parent = if schema_version >= 2 {
         match cursor.read_u8()? {
@@ -944,6 +944,7 @@ fn encode_fingerprint(payload: &mut Vec<u8>, fingerprint: &SourceFingerprint) {
     payload.push(match fingerprint.entry_kind() {
         EntryKind::File => 1,
         EntryKind::Symlink => 2,
+        EntryKind::Directory => 3,
     });
     match fingerprint.entry_identity_signal() {
         Some(signal) => {
@@ -965,10 +966,12 @@ fn encode_fingerprint(payload: &mut Vec<u8>, fingerprint: &SourceFingerprint) {
 
 fn decode_fingerprint(
     cursor: &mut PayloadCursor<'_>,
+    schema_version: u16,
 ) -> Result<SourceFingerprint, JournalCodecError> {
     let entry_kind = match cursor.read_u8()? {
         1 => EntryKind::File,
         2 => EntryKind::Symlink,
+        3 if schema_version >= 4 => EntryKind::Directory,
         _ => return Err(cursor.error(JournalCodecErrorKind::InvalidPayload)),
     };
     let identity_signal = match cursor.read_u8()? {

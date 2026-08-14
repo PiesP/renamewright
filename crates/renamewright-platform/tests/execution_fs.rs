@@ -34,6 +34,32 @@ fn no_replace_rename_preserves_identity_and_contents() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn no_replace_rename_preserves_directory_identity_and_children()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempdir()?;
+    let source = root.path().join("source-directory");
+    fs::create_dir(&source)?;
+    fs::write(source.join("child.txt"), b"child")?;
+    let filesystem = LinuxExecutionFileSystem::new();
+    let identity = filesystem.identity(root.path(), OsStr::new("source-directory"))?;
+
+    let observed = filesystem.rename_no_replace(
+        root.path(),
+        OsStr::new("source-directory"),
+        OsStr::new("target-directory"),
+        identity,
+    )?;
+
+    assert_eq!(observed, identity);
+    assert!(!source.exists());
+    assert_eq!(
+        fs::read(root.path().join("target-directory").join("child.txt"))?,
+        b"child"
+    );
+    Ok(())
+}
+
+#[test]
 fn destination_race_never_replaces_the_occupant() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
     fs::write(directory.path().join("source.txt"), b"source contents")?;

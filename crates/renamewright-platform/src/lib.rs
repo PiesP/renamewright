@@ -55,10 +55,10 @@ pub use undo::{
 
 pub const MAX_ADMITTED_SOURCES: usize = 10_000;
 
-/// Applying a newly planned rename remains unavailable.
+/// Applying a newly planned rename is enabled through the application service.
 #[must_use]
 pub const fn plan_execution_is_enabled() -> bool {
-    false
+    true
 }
 
 /// Startup recovery is available after the recovery safety gates pass.
@@ -260,7 +260,26 @@ impl SourceRegistry {
             (left.parent_id(), left.native_name()).cmp(&(right.parent_id(), right.native_name()))
         });
 
+        let mut ancestor_conflicts = BTreeSet::new();
+        for (source_id, path) in &self.paths {
+            let is_directory = self
+                .snapshots
+                .get(source_id)
+                .and_then(SourceSnapshot::entry_kind)
+                == Some(EntryKind::Directory);
+            if !is_directory {
+                continue;
+            }
+            for (other_id, other_path) in &self.paths {
+                if source_id != other_id && other_path.starts_with(path) {
+                    ancestor_conflicts.insert(*source_id);
+                    ancestor_conflicts.insert(*other_id);
+                }
+            }
+        }
+
         ValidationEnvironment::new(stale_sources, unavailable_parents, occupied_names)
+            .with_ancestor_conflicts(ancestor_conflicts)
     }
 }
 
@@ -306,18 +325,28 @@ fn fingerprint_for(metadata: &Metadata) -> Option<SourceFingerprint> {
         EntryKind::Symlink
     } else if metadata.file_type().is_file() {
         EntryKind::File
+    } else if metadata.file_type().is_dir() {
+        EntryKind::Directory
     } else {
         return None;
     };
-    let modified_nanos = metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos());
+    let modified_nanos = (entry_kind != EntryKind::Directory)
+        .then(|| {
+            metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+        })
+        .flatten();
     Some(SourceFingerprint::new(
         entry_kind,
         entry_identity_signal(metadata),
-        metadata.len(),
+        if entry_kind == EntryKind::Directory {
+            0
+        } else {
+            metadata.len()
+        },
         modified_nanos,
     ))
 }
@@ -359,8 +388,8 @@ mod tests {
     };
 
     #[test]
-    fn plan_execution_remains_locked_while_recovery_is_available() {
-        assert!(!plan_execution_is_enabled());
+    fn plan_execution_and_recovery_are_enabled_together() {
+        assert!(plan_execution_is_enabled());
         assert!(recovery_execution_is_enabled());
     }
 

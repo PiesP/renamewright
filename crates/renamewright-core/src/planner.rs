@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
-    Diagnostic, DiagnosticCode, ParentId, PlanId, PlanRow, RenamePlan, SourceId, SourceSnapshot,
-    TargetPolicy, TraceStep, ValidationEnvironment,
+    Diagnostic, DiagnosticCode, EntryKind, ParentId, PlanId, PlanRow, RenamePlan, SourceId,
+    SourceSnapshot, TargetPolicy, TraceStep, ValidationEnvironment,
 };
 use crate::rules::{
     RenameRule, RuleApplicationError, RulePipeline, SequenceAllocation, SequenceOrder,
@@ -178,6 +178,7 @@ pub fn build_plan_with_rule_pipeline_overrides_and_environment(
     }
 
     mark_stale_sources(&mut rows, environment);
+    mark_ancestor_conflicts(&mut rows, environment);
     mark_unavailable_parents(&mut rows, environment);
     mark_duplicates(&mut rows, policy);
     mark_occupied_destinations(&mut rows, policy, environment);
@@ -201,6 +202,11 @@ fn build_row(
     let mut trace_truncated = false;
 
     for rule_index in 0..pipeline.rules().len() {
+        if source.entry_kind() == Some(EntryKind::Directory)
+            && !pipeline.rules()[rule_index].applies_to_directories()
+        {
+            continue;
+        }
         let before = (!trace_budget.exhausted()).then(|| proposed.to_string_lossy().into_owned());
         let sequence_value = sequence_values
             .get(rule_index)
@@ -379,6 +385,14 @@ fn mark_stale_sources(rows: &mut [PlanRow], environment: &ValidationEnvironment)
     for row in rows {
         if environment.stale_sources().contains(&row.source_id()) {
             row.block(DiagnosticCode::StaleSource);
+        }
+    }
+}
+
+fn mark_ancestor_conflicts(rows: &mut [PlanRow], environment: &ValidationEnvironment) {
+    for row in rows {
+        if environment.ancestor_conflicts().contains(&row.source_id()) {
+            row.block(DiagnosticCode::AncestorDescendantConflict);
         }
     }
 }

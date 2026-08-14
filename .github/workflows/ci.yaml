@@ -16,114 +16,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  NODE_VERSION: "26"
-
 jobs:
   quality:
     name: pr-gate/quality
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install pnpm and Node.js
-        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
-        with:
-          package-json-file: package.json
-          runtime: node@${{ env.NODE_VERSION }}
-          cache: true
-          install: false
-
-      - name: Install locked frontend dependencies
-        run: pnpm install --frozen-lockfile --no-runtime
-
-      - name: Install pinned Rust toolchain
-        run: >-
-          rustup toolchain install 1.97.1
-          --profile minimal
-          --component rustfmt
-          --component clippy
-
-      - name: Check frontend and Rust sources
-        run: |
-          pnpm fmt
-          pnpm lint
-          pnpm check
-          pnpm fmt:rust
-          cargo clippy \
-            --package renamewright-core \
-            --package renamewright-platform \
-            --package renamewright-windows-native \
-            --all-targets \
-            --locked \
-            -- -D warnings
-
-  unit:
-    name: pr-gate/unit
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install pnpm and Node.js
-        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
-        with:
-          package-json-file: package.json
-          runtime: node@${{ env.NODE_VERSION }}
-          cache: true
-          install: false
-
-      - name: Install locked frontend dependencies
-        run: pnpm install --frozen-lockfile --no-runtime
-
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-
-      - name: Run deterministic unit suites
-        run: |
-          pnpm test:cov
-          cargo test \
-            --package renamewright-core \
-            --package renamewright-platform \
-            --all-targets \
-            --locked
-
-  performance:
-    name: pr-gate/performance
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install pnpm and Node.js
-        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
-        with:
-          package-json-file: package.json
-          runtime: node@${{ env.NODE_VERSION }}
-          cache: true
-          install: false
-
-      - name: Install locked frontend dependencies
-        run: pnpm install --frozen-lockfile --no-runtime
-
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-
-      - name: Enforce 10,000-source performance budgets
-        run: pnpm perf:budget
-
-  e2e:
-    name: pr-gate/e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -132,157 +27,118 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package.json') }}
-          restore-keys: |
-            playwright-${{ runner.os }}-
+      - name: Install pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.97.1
+          --profile minimal
+          --component rustfmt
+          --component clippy
 
-      - name: Install pnpm and Node.js
-        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
-        with:
-          package-json-file: package.json
-          runtime: node@${{ env.NODE_VERSION }}
-          cache: true
-          install: false
+      - name: Check all Rust sources and feature combinations
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Install locked frontend dependencies
-        run: pnpm install --frozen-lockfile --no-runtime
-
-      - name: Install Chromium and host libraries
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Exercise the rendered workbench
-        run: pnpm test:e2e
-
-      - name: Upload Playwright diagnostics
-        if: ${{ failure() && !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: playwright-diagnostics-${{ github.sha }}
-          path: test-results/
-          if-no-files-found: warn
-          retention-days: 7
-
-  windows:
-    name: pr-gate/windows
-    runs-on: windows-2025
-    timeout-minutes: 30
+  unit:
+    name: pr-gate/unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Checkout source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install pnpm and Node.js
-        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
-        with:
-          package-json-file: package.json
-          runtime: node@${{ env.NODE_VERSION }}
-          cache: true
-          install: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
 
-      - name: Install locked frontend dependencies
-        run: pnpm install --frozen-lockfile --no-runtime
+      - name: Run the complete Rust workspace test suite
+        run: cargo test --workspace --all-targets --all-features --locked
+
+  performance:
+    name: pr-gate/performance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Enforce the 10,000-entry Rust planning budget
+        run: >-
+          cargo run
+          --release
+          --locked
+          --package renamewright-platform
+          --example large_batch_budget
+
+  windows:
+    name: pr-gate/windows
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy
 
-      - name: Lint the Windows native boundary
-        run: >-
-          cargo clippy
-          --package renamewright-platform
-          --package renamewright-windows-native
-          --all-targets
-          --locked
-          -- -D warnings
-
-      - name: Test the complete Rust workspace
-        run: cargo test --workspace --all-targets --locked
-
-      - name: Validate the native spike feature matrix
+      - name: Validate the complete default and automation matrices
         run: |
-          cargo clippy `
-            --package renamewright-native-spike `
-            --all-targets `
-            --all-features `
-            --locked `
-            -- -D warnings
-          cargo test `
-            --package renamewright-native-spike `
-            --all-targets `
-            --all-features `
-            --locked
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-targets --all-features --locked
 
-      - name: Build isolated native spike executables
+      - name: Build isolated production and automation executables
         shell: pwsh
         run: |
-          $inputRoot = Join-Path $PWD.Path 'target/native-spike-input'
+          $inputRoot = Join-Path $PWD.Path 'target/native-app-input'
           $defaultRoot = Join-Path $inputRoot 'default'
           $automationRoot = Join-Path $inputRoot 'automation'
           New-Item -ItemType Directory -Path $defaultRoot, $automationRoot | Out-Null
 
-          cargo build `
-            --package renamewright-native-spike `
-            --release `
-            --bin renamewright-native-spike `
-            --locked
-          if ($LASTEXITCODE -ne 0) {
-            throw 'The default native spike build failed.'
-          }
-          Copy-Item `
-            -LiteralPath 'target/release/renamewright-native-spike.exe' `
-            -Destination (Join-Path $defaultRoot 'renamewright-native-spike.exe')
+          cargo build --package renamewright-app --release --bin renamewright --locked
+          if ($LASTEXITCODE -ne 0) { throw 'The production build failed.' }
+          Copy-Item 'target/release/renamewright.exe' (Join-Path $defaultRoot 'renamewright.exe')
 
-          cargo build `
-            --package renamewright-native-spike `
-            --release `
-            --bins `
-            --features automation `
-            --locked
-          if ($LASTEXITCODE -ne 0) {
-            throw 'The automation native spike build failed.'
-          }
-          Copy-Item `
-            -LiteralPath 'target/release/renamewright-native-spike.exe' `
-            -Destination (Join-Path $automationRoot 'renamewright-native-spike.exe')
-          Copy-Item `
-            -LiteralPath 'target/release/inspection-probe.exe' `
-            -Destination (Join-Path $automationRoot 'inspection-probe.exe')
+          cargo build --package renamewright-app --release --bins --features automation --locked
+          if ($LASTEXITCODE -ne 0) { throw 'The automation build failed.' }
+          Copy-Item 'target/release/renamewright.exe' (Join-Path $automationRoot 'renamewright.exe')
+          Copy-Item 'target/release/inspection-probe.exe' (Join-Path $automationRoot 'inspection-probe.exe')
 
-      - name: Prepare the source-bound native spike artifact
+      - name: Prepare the source-bound native acceptance artifact
         shell: pwsh
         run: >-
-          ./scripts/prepare-windows-native-spike.ps1
+          ./scripts/prepare-windows-native-app.ps1
           -RepositoryRoot $PWD.Path
-          -DefaultExecutablePath 'target/native-spike-input/default/renamewright-native-spike.exe'
-          -AutomationExecutablePath 'target/native-spike-input/automation/renamewright-native-spike.exe'
-          -InspectionProbePath 'target/native-spike-input/automation/inspection-probe.exe'
-          -OutputDirectory 'native-spike-acceptance'
+          -DefaultExecutablePath 'target/native-app-input/default/renamewright.exe'
+          -AutomationExecutablePath 'target/native-app-input/automation/renamewright.exe'
+          -InspectionProbePath 'target/native-app-input/automation/inspection-probe.exe'
+          -OutputDirectory 'native-app-acceptance'
           -SourceSha $env:GITHUB_SHA
 
-      - name: Attempt the Windows native spike runtime
+      - name: Attempt the hosted Windows runtime gate
         shell: pwsh
         run: >-
-          ./scripts/test-windows-native-spike-runtime.ps1
-          -DefaultExecutablePath 'target/native-spike-input/default/renamewright-native-spike.exe'
-          -AutomationExecutablePath 'target/native-spike-input/automation/renamewright-native-spike.exe'
-          -InspectionProbePath 'target/native-spike-input/automation/inspection-probe.exe'
-          -ArtifactDirectory 'native-spike-acceptance'
+          ./scripts/test-windows-native-app-runtime.ps1
+          -DefaultExecutablePath 'target/native-app-input/default/renamewright.exe'
+          -AutomationExecutablePath 'target/native-app-input/automation/renamewright.exe'
+          -InspectionProbePath 'target/native-app-input/automation/inspection-probe.exe'
+          -ArtifactDirectory 'native-app-acceptance'
           -SourceSha $env:GITHUB_SHA
           -AllowHostedRendererUnavailable
 
-      - name: Upload the source-bound native spike artifact
+      - name: Upload source-bound Windows diagnostics
         if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: renamewright-native-spike-windows-${{ github.sha }}
-          path: native-spike-acceptance/
+          name: renamewright-native-windows-${{ github.sha }}
+          path: native-app-acceptance/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
-
-      - name: Build the Windows desktop application
-        run: pnpm tauri build --no-bundle

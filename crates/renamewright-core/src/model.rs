@@ -77,11 +77,20 @@ impl SourceSnapshot {
     pub const fn fingerprint(&self) -> Option<&SourceFingerprint> {
         self.fingerprint.as_ref()
     }
+
+    #[must_use]
+    pub const fn entry_kind(&self) -> Option<EntryKind> {
+        match self.fingerprint.as_ref() {
+            Some(fingerprint) => Some(fingerprint.entry_kind()),
+            None => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
     File,
+    Directory,
     Symlink,
 }
 
@@ -184,6 +193,7 @@ pub struct ValidationEnvironment {
     stale_sources: BTreeSet<SourceId>,
     unavailable_parents: BTreeSet<ParentId>,
     occupied_names: Vec<OccupiedName>,
+    ancestor_conflicts: BTreeSet<SourceId>,
 }
 
 impl ValidationEnvironment {
@@ -197,7 +207,14 @@ impl ValidationEnvironment {
             stale_sources,
             unavailable_parents,
             occupied_names,
+            ancestor_conflicts: BTreeSet::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_ancestor_conflicts(mut self, ancestor_conflicts: BTreeSet<SourceId>) -> Self {
+        self.ancestor_conflicts = ancestor_conflicts;
+        self
     }
 
     #[must_use]
@@ -213,6 +230,11 @@ impl ValidationEnvironment {
     #[must_use]
     pub fn occupied_names(&self) -> &[OccupiedName] {
         &self.occupied_names
+    }
+
+    #[must_use]
+    pub fn ancestor_conflicts(&self) -> &BTreeSet<SourceId> {
+        &self.ancestor_conflicts
     }
 }
 
@@ -237,6 +259,7 @@ pub enum DiagnosticCode {
     ParentUnavailable,
     InvalidRule,
     SequenceOverflow,
+    AncestorDescendantConflict,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -321,6 +344,7 @@ impl TraceStep {
 pub struct PlanRow {
     source_id: SourceId,
     parent_id: ParentId,
+    entry_kind: Option<EntryKind>,
     original_name: OsString,
     proposed_name: OsString,
     original_display: String,
@@ -347,6 +371,7 @@ impl PlanRow {
         Self {
             source_id: source.id(),
             parent_id: source.parent_id(),
+            entry_kind: source.entry_kind(),
             original_name,
             proposed_name,
             original_display,
@@ -388,6 +413,11 @@ impl PlanRow {
     #[must_use]
     pub const fn parent_id(&self) -> ParentId {
         self.parent_id
+    }
+
+    #[must_use]
+    pub const fn entry_kind(&self) -> Option<EntryKind> {
+        self.entry_kind
     }
 
     #[must_use]

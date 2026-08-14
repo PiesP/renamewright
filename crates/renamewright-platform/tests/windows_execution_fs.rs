@@ -29,6 +29,31 @@ fn native_adapter_uses_execution_grade_identity_for_rename()
 }
 
 #[test]
+fn native_adapter_renames_a_directory_with_the_same_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let source = root.path().join("source-directory");
+    fs::create_dir(&source)?;
+    fs::write(source.join("child.txt"), b"child")?;
+    let filesystem = NativeExecutionFileSystem::new();
+    let identity = filesystem.identity(root.path(), OsStr::new("source-directory"))?;
+
+    let observed = filesystem.rename_no_replace(
+        root.path(),
+        OsStr::new("source-directory"),
+        OsStr::new("target-directory"),
+        identity,
+    )?;
+
+    assert_eq!(observed, identity);
+    assert_eq!(
+        fs::read(root.path().join("target-directory").join("child.txt"))?,
+        b"child"
+    );
+    Ok(())
+}
+
+#[test]
 fn native_adapter_maps_collision_and_stale_identity_without_mutation()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;

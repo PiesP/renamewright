@@ -11,13 +11,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  NODE_VERSION: "26"
   SYFT_VERSION: "1.51.0"
   SYFT_WINDOWS_AMD64_SHA256: "fc5ffaeffb993576ece9c791da5a688fb2c8969a1479bbfe58583672c64da336"
 
 jobs:
   package:
-    name: acceptance/windows-package
+    name: acceptance/windows-portable
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
@@ -26,77 +25,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install pnpm and Node.js
-        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2.0.2
-        with:
-          package-json-file: package.json
-          runtime: node@${{ env.NODE_VERSION }}
-          cache: true
-          install: false
-
-      - name: Install locked frontend dependencies
-        run: pnpm install --frozen-lockfile --no-runtime
-
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy
 
-      - name: Lint the Windows native boundary
-        run: >-
-          cargo clippy
-          --package renamewright-platform
-          --package renamewright-windows-native
-          --all-targets
-          --locked
-          -- -D warnings
+      - name: Validate the complete Rust workspace
+        run: |
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-targets --all-features --locked
 
-      - name: Test the complete Rust workspace
-        run: cargo test --workspace --all-targets --locked
-
-      - name: Build the previous-version compatibility fixture
+      - name: Build isolated production and automation executables
         shell: pwsh
         run: |
-          $fixtureConfig = Join-Path $env:RUNNER_TEMP 'previous-version.json'
-          @{ version = '0.0.0' } |
-            ConvertTo-Json |
-            Set-Content -LiteralPath $fixtureConfig -Encoding utf8
-          pnpm tauri build --ci --bundles nsis --no-sign --config $fixtureConfig
-          if ($LASTEXITCODE -ne 0) {
-            throw 'The previous-version compatibility fixture could not be built.'
-          }
-          $installers = @(
-            Get-ChildItem -LiteralPath 'target/release/bundle/nsis' -Filter '*.exe' -File
-          )
-          if ($installers.Count -ne 1) {
-            throw 'Exactly one previous-version installer fixture is required.'
-          }
-          $isolatedInstaller = Join-Path $env:RUNNER_TEMP $installers[0].Name
-          Move-Item -LiteralPath $installers[0].FullName -Destination $isolatedInstaller
-          "PREVIOUS_INSTALLER_PATH=$isolatedInstaller" |
-            Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
-
-      - name: Build the unsigned Windows acceptance package
-        run: pnpm tauri build --ci --bundles nsis --no-sign
-
-      - name: Verify install, upgrade, portable, downgrade, and uninstall behavior
-        shell: pwsh
-        run: |
-          $packageDocument = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
-          $tauriConfig = Get-Content -LiteralPath src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
-          $installers = @(Get-ChildItem -LiteralPath target/release/bundle/nsis -Filter '*.exe' -File)
-          if ($installers.Count -ne 1) {
-            throw 'Exactly one current installer is required for lifecycle validation.'
-          }
-          $evidence = Join-Path $env:RUNNER_TEMP 'windows-lifecycle-evidence.json'
-          ./scripts/test-windows-package-lifecycle.ps1 `
-            -CurrentInstallerPath $installers[0].FullName `
-            -CurrentPortablePath (Join-Path $PWD.Path 'target/release/renamewright-app.exe') `
-            -PreviousInstallerPath $env:PREVIOUS_INSTALLER_PATH `
-            -CurrentVersion ([string]$packageDocument.version) `
-            -PreviousVersion '0.0.0' `
-            -Identifier ([string]$tauriConfig.identifier) `
-            -OutputPath $evidence
-          "LIFECYCLE_EVIDENCE_PATH=$evidence" |
-            Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          $inputRoot = Join-Path $PWD.Path 'target/native-app-input'
+          $defaultRoot = Join-Path $inputRoot 'default'
+          $automationRoot = Join-Path $inputRoot 'automation'
+          New-Item -ItemType Directory -Path $defaultRoot, $automationRoot | Out-Null
+          cargo build --package renamewright-app --release --bin renamewright --locked
+          if ($LASTEXITCODE -ne 0) { throw 'The production build failed.' }
+          Copy-Item 'target/release/renamewright.exe' (Join-Path $defaultRoot 'renamewright.exe')
+          cargo build --package renamewright-app --release --bins --features automation --locked
+          if ($LASTEXITCODE -ne 0) { throw 'The automation build failed.' }
+          Copy-Item 'target/release/renamewright.exe' (Join-Path $automationRoot 'renamewright.exe')
+          Copy-Item 'target/release/inspection-probe.exe' (Join-Path $automationRoot 'inspection-probe.exe')
 
       - name: Install the verified Syft binary
         shell: pwsh
@@ -106,22 +56,33 @@ jobs:
           Invoke-WebRequest `
             -Uri "https://github.com/anchore/syft/releases/download/v${env:SYFT_VERSION}/syft_${env:SYFT_VERSION}_windows_amd64.zip" `
             -OutFile $archive
-          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($digest -cne $env:SYFT_WINDOWS_AMD64_SHA256) {
-            throw 'The downloaded Syft archive did not match its reviewed SHA-256 digest.'
-          }
-          Expand-Archive -LiteralPath $archive -DestinationPath $destination
-          "SYFT_PATH=$(Join-Path $destination 'syft.exe')" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          $digest = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:SYFT_WINDOWS_AMD64_SHA256) { throw 'Syft digest mismatch.' }
+          Expand-Archive $archive $destination
+          "SYFT_PATH=$(Join-Path $destination 'syft.exe')" | Add-Content $env:GITHUB_ENV
 
       - name: Prepare the source-bound acceptance artifact
         shell: pwsh
         run: >-
-          ./scripts/prepare-windows-acceptance.ps1
+          ./scripts/prepare-windows-native-app.ps1
           -RepositoryRoot $PWD.Path
-          -OutputDirectory (Join-Path $PWD.Path 'acceptance')
+          -DefaultExecutablePath 'target/native-app-input/default/renamewright.exe'
+          -AutomationExecutablePath 'target/native-app-input/automation/renamewright.exe'
+          -InspectionProbePath 'target/native-app-input/automation/inspection-probe.exe'
+          -OutputDirectory 'acceptance'
           -SourceSha $env:GITHUB_SHA
           -SyftPath $env:SYFT_PATH
-          -LifecycleEvidencePath $env:LIFECYCLE_EVIDENCE_PATH
+
+      - name: Run the hosted runtime and automation budget gate
+        shell: pwsh
+        run: >-
+          ./scripts/test-windows-native-app-runtime.ps1
+          -DefaultExecutablePath 'target/native-app-input/default/renamewright.exe'
+          -AutomationExecutablePath 'target/native-app-input/automation/renamewright.exe'
+          -InspectionProbePath 'target/native-app-input/automation/inspection-probe.exe'
+          -ArtifactDirectory 'acceptance'
+          -SourceSha $env:GITHUB_SHA
+          -AllowHostedRendererUnavailable
 
       - name: Upload the Windows acceptance artifact
         id: upload
@@ -142,7 +103,8 @@ jobs:
           ## Windows acceptance artifact
 
           - Source SHA: ``${env:GITHUB_SHA}``
-          - Artifact: ``renamewright-windows-acceptance-${env:GITHUB_SHA}``
           - GitHub artifact digest: ``${env:ARTIFACT_DIGEST}``
+          - Runtime: native Rust, portable executable
           - Signing: unsigned acceptance build
-          "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          - Interactive GUI matrix: not run by this hosted workflow
+          "@ | Add-Content $env:GITHUB_STEP_SUMMARY

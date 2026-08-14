@@ -3,13 +3,44 @@ use std::error::Error;
 use std::ffi::OsString;
 
 use renamewright_core::{
-    DiagnosticCode, NameOverride, NameStatus, OccupiedName, ParentId, PlanId, RenameRule,
-    RulePipeline, SourceId, SourceSnapshot, TargetPolicy, ValidationEnvironment, build_plan,
-    build_plan_with_environment, build_plan_with_rule_pipeline_overrides_and_environment,
+    DiagnosticCode, EntryKind, ExtensionOperation, NameOverride, NameStatus, OccupiedName,
+    ParentId, PlanId, RenameRule, RulePipeline, SourceFingerprint, SourceId, SourceSnapshot,
+    TargetPolicy, ValidationEnvironment, build_plan, build_plan_with_environment,
+    build_plan_with_rule_pipeline_overrides_and_environment,
 };
 
 fn source(id: u64, parent: u64, name: impl Into<OsString>) -> SourceSnapshot {
     SourceSnapshot::new(SourceId::new(id), ParentId::new(parent), name.into())
+}
+
+fn directory_source(id: u64, parent: u64, name: impl Into<OsString>) -> SourceSnapshot {
+    SourceSnapshot::with_fingerprint(
+        SourceId::new(id),
+        ParentId::new(parent),
+        name.into(),
+        SourceFingerprint::new(EntryKind::Directory, None, 0, None),
+    )
+}
+
+#[test]
+fn directory_names_use_component_rules_but_skip_extension_rules() {
+    let plan = build_plan(
+        PlanId::new(1),
+        1,
+        &[directory_source(1, 10, "archive.old")],
+        &[
+            RenameRule::prefix("final-"),
+            RenameRule::Extension {
+                operation: ExtensionOperation::Replace("zip".to_owned()),
+            },
+        ],
+        TargetPolicy::windows(),
+    );
+
+    assert_eq!(plan.rows()[0].entry_kind(), Some(EntryKind::Directory));
+    assert_eq!(plan.rows()[0].proposed_display(), "final-archive.old");
+    assert_eq!(plan.rows()[0].trace().len(), 1);
+    assert!(plan.can_apply());
 }
 
 #[test]

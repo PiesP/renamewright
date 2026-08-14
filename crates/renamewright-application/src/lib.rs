@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
@@ -34,6 +34,7 @@ pub struct ApplicationService {
     mutation_lock: Mutex<()>,
     recovery_control: Mutex<RecoveryControl>,
     ledger: Mutex<RenameLedger>,
+    journal_root: Mutex<Option<PathBuf>>,
 }
 
 #[derive(Debug, Default)]
@@ -116,7 +117,7 @@ impl StoredPlan {
 }
 
 const RULE_PIPELINE_SCHEMA_VERSION: u16 = 4;
-const PLAN_CSV_SCHEMA_VERSION: u16 = 1;
+const PLAN_CSV_SCHEMA_VERSION: u16 = 2;
 const PRESET_DOCUMENT_SCHEMA_VERSION: u16 = 2;
 const MAX_PRESETS: usize = 32;
 const MAX_PRESET_NAME_BYTES: usize = 256;
@@ -1043,6 +1044,70 @@ pub enum PrepareExecutionError {
     Freeze { kind: FreezeExecutionErrorKind },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyCommandErrorKind {
+    Busy,
+    StateUnavailable,
+    PlanUnavailable,
+    PlanChanged,
+    JournalUnavailable,
+    ExecutionFailed,
+    LedgerRefreshFailed,
+}
+
+impl ApplyCommandErrorKind {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::StateUnavailable => "stateUnavailable",
+            Self::PlanUnavailable => "planUnavailable",
+            Self::PlanChanged => "planChanged",
+            Self::JournalUnavailable => "journalUnavailable",
+            Self::ExecutionFailed => "executionFailed",
+            Self::LedgerRefreshFailed => "ledgerRefreshFailed",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyCommandResultDto {
+    performed: bool,
+    outcome: &'static str,
+    ledger: Vec<LedgerEntryDto>,
+}
+
+impl ApplyCommandResultDto {
+    #[must_use]
+    pub const fn performed(&self) -> bool {
+        self.performed
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> &'static str {
+        self.outcome
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApplyCommandErrorDto {
+    code: &'static str,
+}
+
+impl ApplyCommandErrorDto {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl From<ApplyCommandErrorKind> for ApplyCommandErrorDto {
+    fn from(kind: ApplyCommandErrorKind) -> Self {
+        Self { code: kind.code() }
+    }
+}
+
 impl std::fmt::Display for PrepareExecutionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -1090,6 +1155,7 @@ impl Default for ApplicationService {
             mutation_lock: Mutex::new(()),
             recovery_control: Mutex::new(RecoveryControl::default()),
             ledger: Mutex::new(RenameLedger::default()),
+            journal_root: Mutex::new(None),
         }
     }
 }
@@ -1102,7 +1168,10 @@ impl ApplicationService {
     pub fn initialize(&self, journal_root: &Path) -> Result<(), String> {
         std::fs::create_dir_all(journal_root)
             .map_err(|_| "the journal directory could not be prepared".to_owned())?;
-        let ledger = RenameLedger::discover(journal_root)
+        let journal_root = journal_root
+            .canonicalize()
+            .map_err(|_| "the journal directory could not be resolved".to_owned())?;
+        let ledger = RenameLedger::discover(&journal_root)
             .map_err(|_| "the rename ledger could not be loaded".to_owned())?;
         let next_plan_id = ledger
             .entries()
@@ -1119,6 +1188,10 @@ impl ApplicationService {
             .ledger
             .lock()
             .map_err(|_| "the rename ledger is unavailable".to_owned())? = ledger;
+        *self
+            .journal_root
+            .lock()
+            .map_err(|_| "the journal location is unavailable".to_owned())? = Some(journal_root);
         Ok(())
     }
 
@@ -1146,11 +1219,6 @@ impl ApplicationService {
             .collect::<Vec<_>>();
         if paths.len() > MAX_ADMITTED_SOURCES {
             return Err(PlanningCommandErrorDto::new("tooManySources"));
-        }
-        if contains_directory(&paths) {
-            return Err(PlanningCommandErrorDto::new(
-                "directoryAdmissionUnavailable",
-            ));
         }
         let mut registry = self
             .registry
@@ -1274,6 +1342,20 @@ impl ApplicationService {
         perform_undo_request(self, request, filesystem, confirm).map_err(UndoCommandErrorDto::from)
     }
 
+    pub fn apply_latest_plan<F, C>(
+        &self,
+        plan_id: u64,
+        filesystem: &F,
+        should_cancel: C,
+    ) -> Result<ApplyCommandResultDto, ApplyCommandErrorDto>
+    where
+        F: ExecutionFileSystem + ?Sized,
+        C: Fn() -> bool,
+    {
+        perform_apply_request(self, PlanId::new(plan_id), filesystem, should_cancel)
+            .map_err(ApplyCommandErrorDto::from)
+    }
+
     pub fn request_confirmed_cancellation<C>(
         &self,
         confirm: C,
@@ -1304,7 +1386,7 @@ pub struct SourceChangeDto {
     error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LedgerEntryDto {
     ledger_id: u64,
@@ -1317,6 +1399,43 @@ pub struct LedgerEntryDto {
     recovery_available: bool,
     undo_of_plan_id: Option<u64>,
     undo_available: bool,
+}
+
+impl LedgerEntryDto {
+    #[must_use]
+    pub const fn ledger_id(&self) -> u64 {
+        self.ledger_id
+    }
+
+    #[must_use]
+    pub const fn plan_id(&self) -> Option<u64> {
+        self.plan_id
+    }
+
+    #[must_use]
+    pub const fn source_count(&self) -> usize {
+        self.source_count
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> &'static str {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn attention_step(&self) -> Option<usize> {
+        self.attention_step
+    }
+
+    #[must_use]
+    pub const fn recovery_available(&self) -> bool {
+        self.recovery_available
+    }
+
+    #[must_use]
+    pub const fn undo_available(&self) -> bool {
+        self.undo_available
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1336,12 +1455,31 @@ pub struct UndoRequestDto {
     inspection: UndoInspectionDto,
 }
 
+impl UndoRequestDto {
+    #[must_use]
+    pub const fn new(inspection: UndoInspectionDto) -> Self {
+        Self { inspection }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoCommandResultDto {
     performed: bool,
     outcome: &'static str,
     ledger: Vec<LedgerEntryDto>,
+}
+
+impl UndoCommandResultDto {
+    #[must_use]
+    pub const fn performed(&self) -> bool {
+        self.performed
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> &'static str {
+        self.outcome
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1355,7 +1493,7 @@ pub enum UndoCommandErrorKind {
 }
 
 impl UndoCommandErrorKind {
-    const fn code(self) -> &'static str {
+    pub const fn code(self) -> &'static str {
         match self {
             Self::Busy => "busy",
             Self::StateUnavailable => "stateUnavailable",
@@ -1372,13 +1510,20 @@ pub struct UndoCommandErrorDto {
     code: &'static str,
 }
 
+impl UndoCommandErrorDto {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
 impl From<UndoCommandErrorKind> for UndoCommandErrorDto {
     fn from(kind: UndoCommandErrorKind) -> Self {
         Self { code: kind.code() }
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryInspectionDto {
     ledger_id: u64,
@@ -1389,6 +1534,48 @@ pub struct RecoveryInspectionDto {
     resume_available: bool,
     rollback_available: bool,
     reconcile_available: bool,
+}
+
+impl RecoveryInspectionDto {
+    #[must_use]
+    pub const fn ledger_id(&self) -> u64 {
+        self.ledger_id
+    }
+
+    #[must_use]
+    pub const fn direction(&self) -> &'static str {
+        self.direction
+    }
+
+    #[must_use]
+    pub const fn step_index(&self) -> Option<usize> {
+        self.step_index
+    }
+
+    #[must_use]
+    pub const fn readiness(&self) -> &'static str {
+        self.readiness
+    }
+
+    #[must_use]
+    pub const fn disposition(&self) -> Option<&'static str> {
+        self.disposition
+    }
+
+    #[must_use]
+    pub const fn resume_available(&self) -> bool {
+        self.resume_available
+    }
+
+    #[must_use]
+    pub const fn rollback_available(&self) -> bool {
+        self.rollback_available
+    }
+
+    #[must_use]
+    pub const fn reconcile_available(&self) -> bool {
+        self.reconcile_available
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -1419,12 +1606,43 @@ pub struct RecoveryRequestDto {
     inspection: RecoveryExpectationDto,
 }
 
+impl RecoveryRequestDto {
+    #[must_use]
+    pub fn new(action: RecoveryCommandAction, inspection: &RecoveryInspectionDto) -> Self {
+        Self {
+            action,
+            inspection: RecoveryExpectationDto {
+                ledger_id: inspection.ledger_id,
+                direction: inspection.direction.to_owned(),
+                step_index: inspection.step_index,
+                readiness: inspection.readiness.to_owned(),
+                disposition: inspection.disposition.map(str::to_owned),
+                resume_available: inspection.resume_available,
+                rollback_available: inspection.rollback_available,
+                reconcile_available: inspection.reconcile_available,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryCommandResultDto {
     performed: bool,
     outcome: &'static str,
     ledger: Vec<LedgerEntryDto>,
+}
+
+impl RecoveryCommandResultDto {
+    #[must_use]
+    pub const fn performed(&self) -> bool {
+        self.performed
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> &'static str {
+        self.outcome
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1438,7 +1656,7 @@ pub enum RecoveryCommandErrorKind {
 }
 
 impl RecoveryCommandErrorKind {
-    const fn code(self) -> &'static str {
+    pub const fn code(self) -> &'static str {
         match self {
             Self::Busy => "busy",
             Self::StateUnavailable => "stateUnavailable",
@@ -1453,6 +1671,45 @@ impl RecoveryCommandErrorKind {
 #[derive(Debug, Serialize)]
 pub struct RecoveryCommandErrorDto {
     code: &'static str,
+}
+
+impl RecoveryCommandErrorDto {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl UndoInspectionDto {
+    #[must_use]
+    pub const fn ledger_id(&self) -> u64 {
+        self.ledger_id
+    }
+
+    #[must_use]
+    pub const fn original_plan_id(&self) -> u64 {
+        self.original_plan_id
+    }
+
+    #[must_use]
+    pub const fn source_count(&self) -> usize {
+        self.source_count
+    }
+
+    #[must_use]
+    pub fn readiness(&self) -> &str {
+        &self.readiness
+    }
+
+    #[must_use]
+    pub fn block_reason(&self) -> Option<&str> {
+        self.block_reason.as_deref()
+    }
+
+    #[must_use]
+    pub const fn undo_available(&self) -> bool {
+        self.undo_available
+    }
 }
 
 impl From<RecoveryCommandErrorKind> for RecoveryCommandErrorDto {
@@ -1476,6 +1733,7 @@ pub struct PlanDto {
 #[serde(rename_all = "camelCase")]
 pub struct PlanRowDto {
     source_id: u64,
+    entry_kind: &'static str,
     original_name: String,
     proposed_name: String,
     status: &'static str,
@@ -1519,6 +1777,11 @@ impl PlanRowDto {
     #[must_use]
     pub const fn source_id(&self) -> u64 {
         self.source_id
+    }
+
+    #[must_use]
+    pub const fn entry_kind(&self) -> &'static str {
+        self.entry_kind
     }
 
     #[must_use]
@@ -1577,6 +1840,7 @@ struct PlanSummaryDocument {
 #[serde(rename_all = "camelCase")]
 struct PlanRowDocument<'a> {
     source_id: u64,
+    entry_kind: &'static str,
     original_display: &'a str,
     proposed_display: &'a str,
     status: &'static str,
@@ -1598,8 +1862,6 @@ struct TraceStepDocument<'a> {
 fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf]) {
     let outcome = if paths.len() > MAX_ADMITTED_SOURCES {
         Err("tooManySources".to_owned())
-    } else if contains_directory(paths) {
-        Err("directoryAdmissionUnavailable".to_owned())
     } else {
         state
             .registry
@@ -1617,12 +1879,6 @@ fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf
         changes.revision = changes.revision.saturating_add(1);
         changes.error = outcome.err();
     }
-}
-
-fn contains_directory(paths: &[std::path::PathBuf]) -> bool {
-    paths.iter().any(|path| {
-        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
-    })
 }
 
 fn plan_from_registry(
@@ -1869,6 +2125,7 @@ impl From<&RenamePlan> for PlanDto {
                 .iter()
                 .map(|row| PlanRowDto {
                     source_id: row.source_id().value(),
+                    entry_kind: entry_kind_name(row.entry_kind()),
                     original_name: row.original_display().to_owned(),
                     proposed_name: row.proposed_display().to_owned(),
                     status: status_name(row.status()),
@@ -2037,6 +2294,57 @@ where
     Ok(RecoveryCommandResultDto {
         performed: true,
         outcome,
+        ledger: ledger.entries().map(LedgerEntryDto::from).collect(),
+    })
+}
+
+fn perform_apply_request<F, C>(
+    state: &ApplicationService,
+    plan_id: PlanId,
+    filesystem: &F,
+    should_cancel: C,
+) -> Result<ApplyCommandResultDto, ApplyCommandErrorKind>
+where
+    F: ExecutionFileSystem + ?Sized,
+    C: Fn() -> bool,
+{
+    let recovery_session =
+        RecoverySession::begin(&state.recovery_control, true).map_err(|kind| match kind {
+            RecoveryCommandErrorKind::Busy => ApplyCommandErrorKind::Busy,
+            _ => ApplyCommandErrorKind::StateUnavailable,
+        })?;
+    let journal_root = state
+        .journal_root
+        .lock()
+        .map_err(|_| ApplyCommandErrorKind::StateUnavailable)?
+        .clone()
+        .ok_or(ApplyCommandErrorKind::JournalUnavailable)?;
+    let prepared =
+        prepare_latest_execution(state, plan_id, filesystem).map_err(|error| match error {
+            PrepareExecutionError::Busy => ApplyCommandErrorKind::Busy,
+            PrepareExecutionError::LatestPlanUnavailable => ApplyCommandErrorKind::PlanUnavailable,
+            PrepareExecutionError::PlanMismatch | PrepareExecutionError::Freeze { .. } => {
+                ApplyCommandErrorKind::PlanChanged
+            }
+            PrepareExecutionError::MutationLockUnavailable
+            | PrepareExecutionError::RegistryUnavailable => ApplyCommandErrorKind::StateUnavailable,
+        })?;
+    let journal_path = journal_root.join(format!("plan-{:016x}.rwj", plan_id.value()));
+    let outcome = prepared
+        .execute(filesystem, &journal_path, || {
+            should_cancel() || recovery_session.cancel_requested()
+        })
+        .map_err(|_| ApplyCommandErrorKind::ExecutionFailed)?;
+    let mut ledger = state
+        .ledger
+        .lock()
+        .map_err(|_| ApplyCommandErrorKind::StateUnavailable)?;
+    ledger
+        .refresh()
+        .map_err(|_| ApplyCommandErrorKind::LedgerRefreshFailed)?;
+    Ok(ApplyCommandResultDto {
+        performed: true,
+        outcome: recovery_outcome_name(outcome),
         ledger: ledger.entries().map(LedgerEntryDto::from).collect(),
     })
 }
@@ -2264,6 +2572,7 @@ fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
             "plan_id",
             "source_generation",
             "source_id",
+            "entry_kind",
             "original_display",
             "proposed_display",
             "status",
@@ -2284,6 +2593,7 @@ fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
                 &plan.plan_id.to_string(),
                 &plan.source_generation.to_string(),
                 &row.source_id.to_string(),
+                row.entry_kind,
                 row.original_display,
                 row.proposed_display,
                 row.status,
@@ -2337,7 +2647,7 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     fn from(stored: &'a StoredPlan) -> Self {
         let plan = &stored.plan;
         Self {
-            schema_version: 6,
+            schema_version: 7,
             protocol_version: PROTOCOL_VERSION,
             rule_schema_version: stored.rule_request.schema_version,
             product: "Renamewright",
@@ -2358,6 +2668,7 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
                 .iter()
                 .map(|row| PlanRowDocument {
                     source_id: row.source_id().value(),
+                    entry_kind: entry_kind_name(row.entry_kind()),
                     original_display: row.original_display(),
                     proposed_display: row.proposed_display(),
                     status: status_name(row.status()),
@@ -2425,6 +2736,16 @@ const fn diagnostic_name(code: DiagnosticCode) -> &'static str {
         DiagnosticCode::ParentUnavailable => "parentUnavailable",
         DiagnosticCode::InvalidRule => "invalidRule",
         DiagnosticCode::SequenceOverflow => "sequenceOverflow",
+        DiagnosticCode::AncestorDescendantConflict => "ancestorDescendantConflict",
+    }
+}
+
+const fn entry_kind_name(kind: Option<renamewright_core::EntryKind>) -> &'static str {
+    match kind {
+        Some(renamewright_core::EntryKind::File) => "file",
+        Some(renamewright_core::EntryKind::Directory) => "directory",
+        Some(renamewright_core::EntryKind::Symlink) => "symlink",
+        None => "unknown",
     }
 }
 
@@ -2546,7 +2867,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_admission_remains_unavailable_without_partial_registry_changes()
+    fn directory_admission_is_explicit_and_blocks_selected_descendants()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let source = directory.path().join("report.txt");
@@ -2555,33 +2876,31 @@ mod tests {
         fs::create_dir(&selected_directory)?;
         let state = ApplicationService::default();
 
-        let error = state
-            .admit_sources_with_rules(
-                [source.clone(), selected_directory.clone()],
-                ApplicationService::prefix_rule_request("final-"),
-            )
-            .err()
-            .ok_or("directory admission unexpectedly succeeded")?;
-        assert_eq!(error.code(), "directoryAdmissionUnavailable");
+        let plan = state.admit_sources_with_rules(
+            [source, selected_directory.clone()],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        assert_eq!(plan.rows().len(), 2);
         assert!(
-            state
-                .registry
-                .lock()
-                .map_err(|_| "registry lock failed")?
-                .snapshots()
-                .is_empty()
+            plan.rows()
+                .iter()
+                .any(|row| row.entry_kind() == "directory")
         );
+        assert_eq!(plan.blocked_count(), 0);
 
-        admit_dropped_sources(&state, &[source, selected_directory]);
-        let registry = state.registry.lock().map_err(|_| "registry lock failed")?;
-        let changes = state
-            .source_changes
-            .lock()
-            .map_err(|_| "change lock failed")?;
-        assert!(registry.snapshots().is_empty());
-        assert_eq!(
-            changes.error.as_deref(),
-            Some("directoryAdmissionUnavailable")
+        let nested = selected_directory.join("nested.txt");
+        fs::write(&nested, b"nested")?;
+        let nested_state = ApplicationService::default();
+        let conflicted = nested_state.admit_sources_with_rules(
+            [selected_directory, nested],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        assert_eq!(conflicted.blocked_count(), 2);
+        assert!(
+            conflicted
+                .rows()
+                .iter()
+                .all(|row| { row.diagnostics().contains(&"ancestorDescendantConflict") })
         );
         Ok(())
     }
@@ -2819,8 +3138,8 @@ mod tests {
         let document = plan_document_json(11, &state)?;
         let value: serde_json::Value = serde_json::from_str(&document)?;
 
-        assert_eq!(value["schemaVersion"], 6);
-        assert_eq!(value["protocolVersion"], 5);
+        assert_eq!(value["schemaVersion"], 7);
+        assert_eq!(value["protocolVersion"], 6);
         assert_eq!(value["ruleSchemaVersion"], 4);
         assert_eq!(value["planId"], 11);
         assert_eq!(value["rules"][0]["ruleId"], 7);
@@ -2831,6 +3150,7 @@ mod tests {
         assert_eq!(value["rules"][3]["replacement"], "_");
         assert_eq!(value["rules"][4]["form"], "nfc");
         assert_eq!(value["rows"][0]["sourceId"], 7);
+        assert_eq!(value["rows"][0]["entryKind"], "unknown");
         assert_eq!(value["rules"][5]["scope"], "allSources");
         assert_eq!(value["rules"][5]["order"], "sourceOrder");
         assert_eq!(value["rules"][5]["padding"], 3);
@@ -2888,9 +3208,9 @@ mod tests {
         let csv = plan_document_csv(19, &state)?;
 
         assert!(csv.starts_with(
-            "\"csv_schema_version\",\"plan_id\",\"source_generation\",\"source_id\",\"original_display\",\"proposed_display\",\"status\",\"diagnostics_json\",\"override_applied\",\"trace_json\"\r\n"
+            "\"csv_schema_version\",\"plan_id\",\"source_generation\",\"source_id\",\"entry_kind\",\"original_display\",\"proposed_display\",\"status\",\"diagnostics_json\",\"override_applied\",\"trace_json\"\r\n"
         ));
-        assert!(csv.contains("\"1\",\"19\",\"6\",\"17\""));
+        assert!(csv.contains("\"2\",\"19\",\"6\",\"17\",\"unknown\""));
         assert!(csv.contains("\"'=SUM(1,1)\r\n\"\"quoted\"\".txt\""));
         assert!(csv.contains("review-=SUM(1,1)"));
         assert!(csv.contains("[{\"\"ruleIndex\"\":0,\"\"ruleId\"\":23"));
@@ -3653,6 +3973,89 @@ mod tests {
             fs::read(directory.path().join("final-source.txt"))?,
             b"source"
         );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_use_case_revalidates_executes_and_refreshes_the_ledger() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source.txt");
+        let journal_root = directory.path().join("journals");
+        fs::write(&source, b"source")?;
+        let state = ApplicationService::default();
+        state.initialize(&journal_root)?;
+        let plan = state.admit_sources_with_rules(
+            [source.clone()],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+
+        let result = state
+            .apply_latest_plan(plan.plan_id(), &LinuxExecutionFileSystem::new(), || false)
+            .map_err(|error| error.code())?;
+
+        assert!(result.performed());
+        assert_eq!(result.outcome(), "completed");
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(directory.path().join("final-source.txt"))?,
+            b"source"
+        );
+        assert_eq!(state.list_ledger()?.len(), 1);
+        assert_eq!(
+            state
+                .apply_latest_plan(plan.plan_id(), &LinuxExecutionFileSystem::new(), || false,)
+                .err()
+                .ok_or("the consumed plan was applied twice")?
+                .code(),
+            "planUnavailable"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_apply_and_undo_preserve_children_and_identity() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source-directory");
+        let journal_root = root.path().join("journals");
+        fs::create_dir(&source)?;
+        fs::write(source.join("child.txt"), b"child")?;
+        let state = ApplicationService::default();
+        state.initialize(&journal_root)?;
+        let plan = state.admit_sources_with_rules(
+            [source.clone()],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        assert_eq!(plan.rows()[0].entry_kind(), "directory");
+
+        let applied = state
+            .apply_latest_plan(plan.plan_id(), &LinuxExecutionFileSystem::new(), || false)
+            .map_err(|error| error.code())?;
+        assert_eq!(applied.outcome(), "completed");
+        let renamed = root.path().join("final-source-directory");
+        assert_eq!(fs::read(renamed.join("child.txt"))?, b"child");
+
+        let ledger_id = state
+            .list_ledger()?
+            .first()
+            .ok_or("the directory transaction was not recorded")?
+            .ledger_id();
+        let inspection = state
+            .inspect_undo(ledger_id, &LinuxExecutionFileSystem::new())
+            .map_err(|error| error.code())?;
+        let undone = state
+            .apply_undo(
+                &UndoRequestDto::new(inspection),
+                &LinuxExecutionFileSystem::new(),
+                |_| true,
+            )
+            .map_err(|error| error.code())?;
+
+        assert_eq!(undone.outcome(), "completed");
+        assert_eq!(fs::read(source.join("child.txt"))?, b"child");
+        assert!(!renamed.exists());
         Ok(())
     }
 

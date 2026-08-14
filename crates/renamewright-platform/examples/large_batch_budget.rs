@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::fs::File;
+use std::fs::{File, read_to_string};
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ const ADMISSION_BUDGET: Duration = Duration::from_secs(20);
 const REPRESENTATIVE_PLAN_BUDGET: Duration = Duration::from_secs(3);
 const EXPANDING_PLAN_BUDGET: Duration = Duration::from_secs(8);
 const RETAINED_PROJECTION_BUDGET_BYTES: usize = 96 * 1_024 * 1_024;
+const PEAK_RSS_BUDGET_BYTES: u64 = 256 * 1_024 * 1_024;
 
 struct PlanMeasurement {
     elapsed: Duration,
@@ -95,8 +96,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
+    let peak_rss_bytes = linux_peak_rss_bytes();
+    if peak_rss_bytes.is_some_and(|bytes| bytes > PEAK_RSS_BUDGET_BYTES) {
+        return Err(
+            io::Error::other(format!("peak RSS exceeded {PEAK_RSS_BUDGET_BYTES} bytes")).into(),
+        );
+    }
+
     println!(
-        "{{\"sourceCount\":{SOURCE_COUNT},\"admissionMs\":{},\"representativePlanMs\":{},\"expandingPlanMs\":{},\"representativeRetainedBytes\":{},\"expandingRetainedBytes\":{},\"retainedTraceBytes\":{},\"traceTruncatedRows\":{}}}",
+        "{{\"sourceCount\":{SOURCE_COUNT},\"admissionMs\":{},\"representativePlanMs\":{},\"expandingPlanMs\":{},\"representativeRetainedBytes\":{},\"expandingRetainedBytes\":{},\"retainedTraceBytes\":{},\"traceTruncatedRows\":{},\"peakRssBytes\":{},\"peakRssBudgetBytes\":{PEAK_RSS_BUDGET_BYTES}}}",
         admission_elapsed.as_millis(),
         representative.elapsed.as_millis(),
         expanding.elapsed.as_millis(),
@@ -104,8 +112,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         expanding.retained_projection_bytes,
         expanding.retained_trace_bytes,
         expanding.trace_truncated_row_count,
+        peak_rss_bytes.map_or_else(|| "null".to_owned(), |bytes| bytes.to_string()),
     );
     Ok(())
+}
+
+fn linux_peak_rss_bytes() -> Option<u64> {
+    let status = read_to_string("/proc/self/status").ok()?;
+    let kibibytes = status.lines().find_map(|line| {
+        let value = line.strip_prefix("VmHWM:")?.trim();
+        value.strip_suffix(" kB")?.trim().parse::<u64>().ok()
+    })?;
+    kibibytes.checked_mul(1_024)
 }
 
 fn measure_plan(

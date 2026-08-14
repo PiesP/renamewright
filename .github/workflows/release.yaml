@@ -1,0 +1,84 @@
+name: Portable Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SYFT_VERSION: "1.51.0"
+  SYFT_WINDOWS_AMD64_SHA256: "fc5ffaeffb993576ece9c791da5a688fb2c8969a1479bbfe58583672c64da336"
+
+jobs:
+  portable:
+    name: release/windows-portable
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Test the production feature set
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Build only the production executable
+        run: cargo build --package renamewright-app --release --bin renamewright --locked
+
+      - name: Install the verified Syft binary
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'syft.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'syft'
+          Invoke-WebRequest `
+            -Uri "https://github.com/anchore/syft/releases/download/v${env:SYFT_VERSION}/syft_${env:SYFT_VERSION}_windows_amd64.zip" `
+            -OutFile $archive
+          $digest = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne $env:SYFT_WINDOWS_AMD64_SHA256) { throw 'Syft digest mismatch.' }
+          Expand-Archive $archive $destination
+          "SYFT_PATH=$(Join-Path $destination 'syft.exe')" | Add-Content $env:GITHUB_ENV
+
+      - name: Verify and package the portable release
+        shell: pwsh
+        run: >-
+          ./scripts/prepare-windows-portable-release.ps1
+          -RepositoryRoot $PWD.Path
+          -ExecutablePath 'target/release/renamewright.exe'
+          -OutputDirectory 'release'
+          -SourceSha $env:GITHUB_SHA
+          -SyftPath $env:SYFT_PATH
+
+      - name: Upload the unsigned portable release candidate
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: renamewright-windows-portable-${{ github.sha }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Record release boundaries
+        shell: pwsh
+        env:
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          @"
+          ## Portable release candidate
+
+          - Source SHA: ``${env:GITHUB_SHA}``
+          - GitHub artifact digest: ``${env:ARTIFACT_DIGEST}``
+          - Production automation feature: excluded and marker-checked
+          - Signing: unsigned; no public GitHub Release was created
+          "@ | Add-Content $env:GITHUB_STEP_SUMMARY

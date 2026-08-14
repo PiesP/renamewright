@@ -1,12 +1,4 @@
 /target/
-/node_modules/
-/dist/
-/coverage/
-/test-results/
-/.pnpm-store/
-/.vite/
-/.tauri/
-/src-tauri/gen/
 *.log
 *.tmp
 
