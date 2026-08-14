@@ -4097,6 +4097,7 @@ version = "0.1.0"
 dependencies = [
  "renamewright-core",
  "renamewright-platform",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",

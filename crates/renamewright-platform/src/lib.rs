@@ -53,6 +53,8 @@ pub use undo::{
     prepare_undo_transaction,
 };
 
+pub const MAX_ADMITTED_SOURCES: usize = 10_000;
+
 /// Applying a newly planned rename remains unavailable.
 #[must_use]
 pub const fn plan_execution_is_enabled() -> bool {
@@ -67,6 +69,7 @@ pub const fn recovery_execution_is_enabled() -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdmissionError {
+    TooManySources,
     Unavailable(PathBuf),
     MissingFileName(PathBuf),
 }
@@ -74,6 +77,7 @@ pub enum AdmissionError {
 impl Display for AdmissionError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TooManySources => formatter.write_str("too many sources were selected"),
             Self::Unavailable(_) => {
                 formatter.write_str("a selected source is not an available file")
             }
@@ -110,7 +114,14 @@ impl SourceRegistry {
         &mut self,
         paths: impl IntoIterator<Item = PathBuf>,
     ) -> Result<Vec<SourceSnapshot>, AdmissionError> {
-        let mut candidates = Vec::new();
+        let paths = paths
+            .into_iter()
+            .take(MAX_ADMITTED_SOURCES.saturating_add(1))
+            .collect::<Vec<_>>();
+        if paths.len() > MAX_ADMITTED_SOURCES {
+            return Err(AdmissionError::TooManySources);
+        }
+        let mut candidates = Vec::with_capacity(paths.len());
 
         for path in paths {
             candidates.push(normalize_entry_path(path)?);
@@ -118,6 +129,13 @@ impl SourceRegistry {
 
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         candidates.dedup_by(|left, right| left.0 == right.0);
+        let new_source_count = candidates
+            .iter()
+            .filter(|(path, _)| !self.source_ids.contains_key(path))
+            .count();
+        if self.source_ids.len().saturating_add(new_source_count) > MAX_ADMITTED_SOURCES {
+            return Err(AdmissionError::TooManySources);
+        }
         self.admit_candidates(candidates)
     }
 
@@ -336,8 +354,8 @@ mod tests {
     use renamewright_core::SourceId;
 
     use super::{
-        SourceRegistry, normalize_entry_path, plan_execution_is_enabled,
-        recovery_execution_is_enabled,
+        AdmissionError, MAX_ADMITTED_SOURCES, SourceRegistry, normalize_entry_path,
+        plan_execution_is_enabled, recovery_execution_is_enabled,
     };
 
     #[test]
@@ -457,6 +475,21 @@ mod tests {
         assert!(registry.paths.is_empty());
         assert!(registry.execution_identities.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn admission_rejects_oversized_batches_before_filesystem_work() {
+        let mut registry = SourceRegistry::new();
+        let paths = std::iter::repeat_n(
+            std::path::PathBuf::from("unavailable.txt"),
+            MAX_ADMITTED_SOURCES + 1,
+        );
+
+        let result = registry.admit_paths(paths);
+
+        assert_eq!(result, Err(AdmissionError::TooManySources));
+        assert_eq!(registry.generation(), 0);
+        assert!(registry.snapshots().is_empty());
     }
 
     #[cfg(unix)]

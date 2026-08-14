@@ -385,21 +385,87 @@ pub mod automation {
         Ok(())
     }
 
+    struct DeadlineStream {
+        stream: TcpStream,
+        deadline: Instant,
+    }
+
+    impl DeadlineStream {
+        const fn new(stream: TcpStream, deadline: Instant) -> Self {
+            Self { stream, deadline }
+        }
+
+        fn timeout(&self) -> std::io::Result<Duration> {
+            remaining_connection_duration(self.deadline).map(|remaining| {
+                let timeout = remaining.min(AUTOMATION_IO_TIMEOUT);
+                if timeout.is_zero() {
+                    Duration::from_millis(1)
+                } else {
+                    timeout
+                }
+            })
+        }
+
+        fn normalize_timeout(&self, error: std::io::Error) -> std::io::Error {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) && Instant::now() >= self.deadline
+            {
+                connection_timeout()
+            } else {
+                error
+            }
+        }
+    }
+
+    impl std::io::Read for DeadlineStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.stream.set_read_timeout(Some(self.timeout()?))?;
+            self.stream
+                .read(buffer)
+                .map_err(|error| self.normalize_timeout(error))
+        }
+    }
+
+    impl std::io::Write for DeadlineStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.stream.set_write_timeout(Some(self.timeout()?))?;
+            self.stream
+                .write(buffer)
+                .map_err(|error| self.normalize_timeout(error))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.stream.set_write_timeout(Some(self.timeout()?))?;
+            self.stream
+                .flush()
+                .map_err(|error| self.normalize_timeout(error))
+        }
+    }
+
+    fn connection_timeout() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the automation connection exceeded its runtime bound",
+        )
+    }
+
+    fn remaining_connection_duration(deadline: Instant) -> std::io::Result<Duration> {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(connection_timeout)
+    }
+
     fn serve_connection(stream: TcpStream, ctx: &egui::Context) -> std::io::Result<()> {
-        stream.set_read_timeout(Some(AUTOMATION_IO_TIMEOUT))?;
-        stream.set_write_timeout(Some(AUTOMATION_IO_TIMEOUT))?;
-        let mut reader = std::io::BufReader::new(stream.try_clone()?);
-        let mut writer = std::io::BufWriter::new(stream);
+        let deadline = Instant::now() + MAX_AUTOMATION_CONNECTION_DURATION;
+        let mut reader =
+            std::io::BufReader::new(DeadlineStream::new(stream.try_clone()?, deadline));
+        let mut writer = std::io::BufWriter::new(DeadlineStream::new(stream, deadline));
         egui_inspection::protocol::write_handshake(&mut writer)?;
-        let started = Instant::now();
 
         for _ in 0..MAX_AUTOMATION_REQUESTS_PER_CONNECTION {
-            if started.elapsed() > MAX_AUTOMATION_CONNECTION_DURATION {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "the automation connection exceeded its runtime bound",
-                ));
-            }
             let request: Request = match read_bounded_message(&mut reader) {
                 Ok(request) => request,
                 Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
@@ -429,11 +495,14 @@ pub mod automation {
                 );
             }
             ctx.request_repaint();
-            let response = receiver
-                .recv_timeout(AUTOMATION_REQUEST_TIMEOUT)
-                .unwrap_or_else(|_| Response::Error {
-                    message: "the automation request timed out".to_owned(),
-                });
+            let response_timeout =
+                remaining_connection_duration(deadline)?.min(AUTOMATION_REQUEST_TIMEOUT);
+            let response =
+                receiver
+                    .recv_timeout(response_timeout)
+                    .unwrap_or_else(|_| Response::Error {
+                        message: "the automation request timed out".to_owned(),
+                    });
             egui_inspection::write_message(&mut writer, &response)?;
         }
         Ok(())
@@ -573,14 +642,16 @@ pub mod automation {
 
     #[cfg(test)]
     mod tests {
-        use std::io::Cursor;
+        use std::io::{Cursor, Write as _};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
 
         use eframe::egui;
         use egui_inspection::Request;
 
         use super::{
-            MAX_AUTOMATION_EVENTS, MAX_AUTOMATION_MESSAGE_BYTES, read_bounded_message,
-            request_is_bounded, serve_bounded,
+            DeadlineStream, MAX_AUTOMATION_EVENTS, MAX_AUTOMATION_MESSAGE_BYTES,
+            read_bounded_message, request_is_bounded, serve_bounded,
         };
 
         #[test]
@@ -595,6 +666,37 @@ pub mod automation {
                 error.map(|error| error.kind()),
                 Some(std::io::ErrorKind::InvalidData)
             );
+        }
+
+        #[test]
+        fn framed_requests_cannot_trickle_past_the_connection_deadline()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let address = listener.local_addr()?;
+            let writer = std::thread::spawn(move || {
+                let mut stream = TcpStream::connect(address)?;
+                stream.write_all(&64_u32.to_be_bytes())?;
+                for _ in 0..64 {
+                    if stream.write_all(b"x").is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                Ok::<(), std::io::Error>(())
+            });
+            let (stream, _) = listener.accept()?;
+            let deadline = Instant::now() + Duration::from_millis(50);
+            let mut reader = std::io::BufReader::new(DeadlineStream::new(stream, deadline));
+
+            let error = read_bounded_message::<_, Request>(&mut reader).err();
+
+            assert_eq!(
+                error.map(|error| error.kind()),
+                Some(std::io::ErrorKind::TimedOut)
+            );
+            drop(reader);
+            writer.join().map_err(|_| "slow writer panicked")??;
+            Ok(())
         }
 
         #[test]

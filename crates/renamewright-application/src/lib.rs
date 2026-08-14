@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, TryLockError};
@@ -16,12 +16,12 @@ use renamewright_core::{
 };
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
-    FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, PreparedStepDisposition,
-    RecoveryAction, RecoveryReadiness, RecoveryTransactionInspection, RenameLedger, SourceRegistry,
-    UndoBlockReason, UndoReadiness, UndoTransactionInspection, execute_frozen_plan,
-    execute_prepared_undo, freeze_execution_plan, inspect_recovery_transaction,
-    inspect_undo_transaction, prepare_undo_transaction, reconcile_prepared_step,
-    recover_transaction,
+    FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, MAX_ADMITTED_SOURCES,
+    PreparedStepDisposition, RecoveryAction, RecoveryReadiness, RecoveryTransactionInspection,
+    RenameLedger, SourceRegistry, UndoBlockReason, UndoReadiness, UndoTransactionInspection,
+    execute_frozen_plan, execute_prepared_undo, freeze_execution_plan,
+    inspect_recovery_transaction, inspect_undo_transaction, prepare_undo_transaction,
+    reconcile_prepared_step, recover_transaction,
 };
 use serde::{Deserialize, Serialize};
 
@@ -694,7 +694,7 @@ impl PresetDocumentDto {
     }
 
     pub fn load(path: &Path) -> Result<Self, PresetDocumentError> {
-        let file = match std::fs::File::open(path) {
+        let file = match open_preset_document(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
@@ -729,21 +729,94 @@ impl PresetDocumentDto {
                 PresetDocumentErrorKind::DocumentTooLarge,
             ));
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|_| {
-                PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable)
-            })?;
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)
+        let parent = path
+            .parent()
+            .ok_or_else(|| PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable))?;
+        std::fs::create_dir_all(parent)
             .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable))?;
-        file.write_all(&serialized)
-            .and_then(|()| file.sync_all())
+        reject_reparse_path(path)?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".renamewright-preset-")
+            .tempfile_in(parent)
+            .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable))?;
+        temporary
+            .write_all(&serialized)
+            .and_then(|()| temporary.as_file().sync_all())
+            .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable))?;
+        temporary
+            .persist(path)
+            .map(|_| ())
             .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable))
     }
+}
+
+#[cfg(unix)]
+fn open_preset_document(path: &Path) -> std::io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(windows)]
+fn open_preset_document(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the preset document is a reparse point",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_preset_document(path: &Path) -> std::io::Result<File> {
+    reject_reparse_path_io(path)?;
+    File::open(path)
+}
+
+fn reject_reparse_path(path: &Path) -> Result<(), PresetDocumentError> {
+    reject_reparse_path_io(path)
+        .map_err(|_| PresetDocumentError::new(PresetDocumentErrorKind::StorageUnavailable))
+}
+
+fn reject_reparse_path_io(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata_is_reparse_point(&metadata) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the preset document is a reparse point",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn validate_preset_document(document: &PresetDocumentDto) -> Result<(), PresetDocumentError> {
@@ -1067,7 +1140,13 @@ impl ApplicationService {
         I: IntoIterator<Item = std::path::PathBuf>,
     {
         let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
-        let paths = paths.into_iter().collect::<Vec<_>>();
+        let paths = paths
+            .into_iter()
+            .take(MAX_ADMITTED_SOURCES.saturating_add(1))
+            .collect::<Vec<_>>();
+        if paths.len() > MAX_ADMITTED_SOURCES {
+            return Err(PlanningCommandErrorDto::new("tooManySources"));
+        }
         if contains_directory(&paths) {
             return Err(PlanningCommandErrorDto::new(
                 "directoryAdmissionUnavailable",
@@ -1517,7 +1596,9 @@ struct TraceStepDocument<'a> {
 }
 
 fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf]) {
-    let outcome = if contains_directory(paths) {
+    let outcome = if paths.len() > MAX_ADMITTED_SOURCES {
+        Err("tooManySources".to_owned())
+    } else if contains_directory(paths) {
         Err("directoryAdmissionUnavailable".to_owned())
     } else {
         state
@@ -2450,6 +2531,21 @@ mod tests {
     }
 
     #[test]
+    fn application_rejects_oversized_source_batches_before_planning() {
+        let state = ApplicationService::default();
+        let paths = std::iter::repeat_n(
+            std::path::PathBuf::from("unavailable.txt"),
+            renamewright_platform::MAX_ADMITTED_SOURCES + 1,
+        );
+
+        let error = state
+            .admit_sources_with_rules(paths, RulePipelineRequestDto::new(Vec::new(), Vec::new()))
+            .err();
+
+        assert_eq!(error.map(|error| error.code()), Some("tooManySources"));
+    }
+
+    #[test]
     fn directory_admission_remains_unavailable_without_partial_registry_changes()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
@@ -2575,6 +2671,34 @@ mod tests {
         loaded.remove(preset_id);
         loaded.save(&path)?;
         assert!(PresetDocumentDto::load(&path)?.presets().is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_preset_storage_rejects_symlinks_without_changing_their_targets()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("outside.json");
+        let link = directory.path().join("presets.json");
+        fs::write(&target, b"outside")?;
+        symlink(&target, &link)?;
+
+        let document = PresetDocumentDto::default();
+        assert_eq!(
+            PresetDocumentDto::load(&link)
+                .err()
+                .map(PresetDocumentError::kind),
+            Some(PresetDocumentErrorKind::StorageUnavailable)
+        );
+        assert_eq!(
+            document.save(&link).err().map(PresetDocumentError::kind),
+            Some(PresetDocumentErrorKind::StorageUnavailable)
+        );
+        assert_eq!(fs::read(&target)?, b"outside");
+        assert!(fs::symlink_metadata(&link)?.file_type().is_symlink());
         Ok(())
     }
 
