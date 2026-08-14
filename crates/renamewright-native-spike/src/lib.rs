@@ -357,10 +357,10 @@ pub mod automation {
                 validate_relative_path(relative_source)?;
                 let candidate = self.fixture_root.join(relative_source);
                 verify_existing_path(&self.fixture_root, &candidate)?;
-                let metadata = fs::metadata(&candidate).map_err(|_| {
+                let metadata = fs::symlink_metadata(&candidate).map_err(|_| {
                     AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
                 })?;
-                if !metadata.is_file() {
+                if !(metadata.is_file() || metadata.is_dir()) {
                     return Err(AutomationRootError::new(
                         AutomationRootErrorKind::FixtureUnavailable,
                     ));
@@ -1027,10 +1027,11 @@ enum DiagnosticFilter {
     StaleSource,
     ParentUnavailable,
     SequenceOverflow,
+    AncestorDescendantConflict,
 }
 
 impl DiagnosticFilter {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::All,
         Self::Unchanged,
         Self::EmptyName,
@@ -1044,6 +1045,7 @@ impl DiagnosticFilter {
         Self::StaleSource,
         Self::ParentUnavailable,
         Self::SequenceOverflow,
+        Self::AncestorDescendantConflict,
     ];
 
     const fn code(self) -> Option<&'static str> {
@@ -1061,6 +1063,7 @@ impl DiagnosticFilter {
             Self::StaleSource => Some("staleSource"),
             Self::ParentUnavailable => Some("parentUnavailable"),
             Self::SequenceOverflow => Some("sequenceOverflow"),
+            Self::AncestorDescendantConflict => Some("ancestorDescendantConflict"),
         }
     }
 
@@ -1081,6 +1084,10 @@ impl DiagnosticFilter {
             Self::StaleSource => locale.text("Source changed", "원본이 변경됨"),
             Self::ParentUnavailable => locale.text("Parent unavailable", "상위 폴더 확인 불가"),
             Self::SequenceOverflow => locale.text("Sequence overflow", "일련번호 범위 초과"),
+            Self::AncestorDescendantConflict => locale.text(
+                "Ancestor and descendant selected",
+                "상위 및 하위 항목이 함께 선택됨",
+            ),
         }
     }
 }
@@ -2299,14 +2306,23 @@ impl NativeSpikeApp {
                     })
                     .response
                     .on_hover_text(semantics::LANGUAGE);
-                ui.add_enabled(
-                    false,
-                    egui::Button::new(self.locale.text(semantics::ADD_FOLDER, "폴더 추가")),
-                )
-                .on_disabled_hover_text(self.locale.text(
-                    "Directory admission is planned for Stage 6G",
-                    "폴더 추가는 Stage 6G에서 지원할 예정입니다",
-                ));
+                if ui
+                    .button(self.locale.text(semantics::ADD_FOLDER, "폴더 추가"))
+                    .clicked()
+                {
+                    match rfd::FileDialog::new()
+                        .set_title("Add one directory entry to Renamewright")
+                        .pick_folder()
+                    {
+                        Some(path) => self.admit_sources(vec![path]),
+                        None => {
+                            self.status = self
+                                .locale
+                                .text("Folder selection cancelled", "폴더 선택을 취소했습니다")
+                                .to_owned();
+                        }
+                    }
+                }
                 if ui
                     .button(self.locale.text(semantics::ADD_FILES, "파일 추가"))
                     .clicked()
@@ -2569,7 +2585,15 @@ impl NativeSpikeApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_sized(
-                        [150.0, 20.0],
+                        [70.0, 20.0],
+                        egui::Label::new(
+                            RichText::new(self.locale.text("Kind", "종류"))
+                                .strong()
+                                .color(self.palette.ink),
+                        ),
+                    );
+                    ui.add_sized(
+                        [130.0, 20.0],
                         egui::Label::new(
                             RichText::new(self.locale.text("Source", "원본"))
                                 .strong()
@@ -2606,57 +2630,73 @@ impl NativeSpikeApp {
                     .show_rows(ui, PREVIEW_ROW_HEIGHT, visible.len(), |ui, row_range| {
                         for visible_row in row_range {
                             let index = visible[visible_row];
-                            let (source_id, source, proposed, status, diagnostics, blocked) =
-                                self.plan.as_ref().map_or_else(
-                                    || {
-                                        let source = format!("IMG_{index:05}.jpg");
-                                        let proposed =
-                                            format!("{}{source}", self.synthetic_prefix());
-                                        let blocked = Self::row_is_blocked(index);
-                                        let status = if blocked {
+                            let (
+                                source_id,
+                                entry_kind,
+                                source,
+                                proposed,
+                                status,
+                                diagnostics,
+                                blocked,
+                            ) = self.plan.as_ref().map_or_else(
+                                || {
+                                    let source = format!("IMG_{index:05}.jpg");
+                                    let proposed = format!("{}{source}", self.synthetic_prefix());
+                                    let blocked = Self::row_is_blocked(index);
+                                    let status = if blocked {
+                                        self.locale.text("Blocked", "차단됨")
+                                    } else {
+                                        self.locale.text("Changed", "변경됨")
+                                    };
+                                    (
+                                        None,
+                                        "file",
+                                        source,
+                                        proposed,
+                                        status,
+                                        if blocked {
+                                            self.locale.text("Sample conflict", "샘플 충돌")
+                                        } else {
+                                            ""
+                                        }
+                                        .to_owned(),
+                                        blocked,
+                                    )
+                                },
+                                |plan| {
+                                    let row = &plan.rows()[index];
+                                    (
+                                        Some(row.source_id()),
+                                        row.entry_kind(),
+                                        row.original_name().to_owned(),
+                                        row.proposed_name().to_owned(),
+                                        if row.status() == "blocked" {
                                             self.locale.text("Blocked", "차단됨")
+                                        } else if row.status() == "unchanged" {
+                                            self.locale.text("Unchanged", "변경 없음")
                                         } else {
                                             self.locale.text("Changed", "변경됨")
-                                        };
-                                        (
-                                            None,
-                                            source,
-                                            proposed,
-                                            status,
-                                            if blocked {
-                                                self.locale.text("Sample conflict", "샘플 충돌")
-                                            } else {
-                                                ""
-                                            }
-                                            .to_owned(),
-                                            blocked,
-                                        )
-                                    },
-                                    |plan| {
-                                        let row = &plan.rows()[index];
-                                        (
-                                            Some(row.source_id()),
-                                            row.original_name().to_owned(),
-                                            row.proposed_name().to_owned(),
-                                            if row.status() == "blocked" {
-                                                self.locale.text("Blocked", "차단됨")
-                                            } else if row.status() == "unchanged" {
-                                                self.locale.text("Unchanged", "변경 없음")
-                                            } else {
-                                                self.locale.text("Changed", "변경됨")
-                                            },
-                                            row.diagnostics()
-                                                .iter()
-                                                .map(|code| diagnostic_label(code, self.locale))
-                                                .collect::<Vec<_>>()
-                                                .join(", "),
-                                            row.status() == "blocked",
-                                        )
-                                    },
-                                );
+                                        },
+                                        row.diagnostics()
+                                            .iter()
+                                            .map(|code| diagnostic_label(code, self.locale))
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                        row.status() == "blocked",
+                                    )
+                                },
+                            );
                             ui.push_id(index, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.add_sized([150.0, 20.0], egui::Label::new(&source));
+                                    ui.add_sized(
+                                        [70.0, 20.0],
+                                        egui::Label::new(match entry_kind {
+                                            "directory" => self.locale.text("Folder", "폴더"),
+                                            "symlink" => self.locale.text("Link", "링크"),
+                                            _ => self.locale.text("File", "파일"),
+                                        }),
+                                    );
+                                    ui.add_sized([130.0, 20.0], egui::Label::new(&source));
                                     ui.add_sized([180.0, 20.0], egui::Label::new(proposed));
                                     let color = if blocked {
                                         self.palette.blocked
@@ -3240,7 +3280,7 @@ mod tests {
             add_folder.accesskit_node().role(),
             egui::accesskit::Role::Button
         );
-        assert!(add_folder.accesskit_node().is_disabled());
+        assert!(!add_folder.accesskit_node().is_disabled());
         assert_eq!(
             prefix.accesskit_node().role(),
             egui::accesskit::Role::TextInput
@@ -3428,6 +3468,24 @@ mod tests {
         harness.get_by_label("report.txt");
         harness.get_by_label("reviewed-report.txt");
         harness.get_by_label("1 shown");
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_directory_entry_is_projected_without_enumerating_children()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let selected = root.path().join("selected-folder");
+        fs::create_dir(&selected)?;
+        fs::write(selected.join("child.txt"), b"child")?;
+        let mut app = NativeSpikeApp::new(false);
+        app.set_prefix("final-");
+        app.admit_sources(vec![selected]);
+
+        let plan = app.plan.as_ref().ok_or("the directory plan was missing")?;
+        assert_eq!(plan.rows().len(), 1);
+        assert_eq!(plan.rows()[0].entry_kind(), "directory");
+        assert_eq!(plan.rows()[0].proposed_name(), "final-selected-folder");
         Ok(())
     }
 
@@ -3650,13 +3708,15 @@ mod tests {
         let fixtures = directory.path().join("fixtures");
         fs::create_dir(&fixtures)?;
         fs::write(fixtures.join("report.txt"), b"report")?;
+        fs::create_dir(fixtures.join("folder"))?;
+        fs::write(fixtures.join("folder/child.txt"), b"child")?;
         fs::write(
             fixtures.join("session.json"),
-            br#"{"schemaVersion":1,"prefix":"final-","sources":["report.txt"]}"#,
+            br#"{"schemaVersion":1,"prefix":"final-","sources":["report.txt","folder"]}"#,
         )?;
         let root = AutomationRoot::open(directory.path())?;
         let fixture = root.load_fixture(Path::new("session.json"))?;
-        assert_eq!(fixture.sources().len(), 1);
+        assert_eq!(fixture.sources().len(), 2);
 
         let harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
@@ -3666,7 +3726,9 @@ mod tests {
             );
         harness.get_by_label("report.txt");
         harness.get_by_label("final-report.txt");
-        harness.get_by_label("Automation fixture loaded · 1 sources");
+        harness.get_by_label("folder");
+        harness.get_by_label("final-folder");
+        harness.get_by_label("Automation fixture loaded · 2 sources");
         Ok(())
     }
 

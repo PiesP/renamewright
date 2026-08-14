@@ -608,9 +608,13 @@ try {
     -Elements $elements `
     -Name 'Add folder' `
     -ControlType ([System.Windows.Automation.ControlType]::Button)
-  if ($addFolderButton.Current.IsEnabled) {
-    throw 'The native read-only workbench enabled directory admission before Stage 6G.'
+  if (-not $addFolderButton.Current.IsEnabled) {
+    throw 'The native workbench did not expose explicit directory admission.'
   }
+  Invoke-And-CloseDialog `
+    -Button $addFolderButton `
+    -OwnerProcessId $application.Id `
+    -Title 'Add one directory entry to Renamewright'
 
   $dpi = [RenamewrightAcceptanceNativeMethods]::GetDpiForWindow($windowHandle)
   if (@(96, 120, 144, 192, 240) -notcontains $dpi) {

@@ -35,9 +35,12 @@ and create-new export; its retained 10,000-row synthetic view remains a UI
 performance fixture. The native shell also owns Ledger, Recovery, Undo, and
 current-plan Apply. Apply requires an unblocked current plan, visible native
 confirmation, fresh identity revalidation, a single mutation lock, and a new
-durable no-replace journal. Directory execution remains unavailable until its
-type-aware planning and Windows handle gates pass. The target artifact is one
-portable Windows executable with no Node.js, WebView2, or sidecar runtime.
+durable no-replace journal. Explicitly selected peer directories use the same
+identity, journal, rollback, Recovery, and Undo path as files; directory
+selection never enumerates children, extension rules skip directories,
+ancestor/descendant selections are blocked, and moves remain within the original
+parent. The target artifact is one portable Windows executable with no Node.js,
+WebView2, or sidecar runtime.
 
 ## Development
 

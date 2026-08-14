@@ -117,6 +117,33 @@ fn round_trips_undo_lineage_in_the_current_schema() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn current_schema_round_trips_directory_entry_kind() -> Result<(), Box<dyn std::error::Error>> {
+    let record = JournalRecord::TransactionStarted {
+        plan_id: PlanId::new(43),
+        source_generation: 47,
+        step_count: 2,
+        entries: vec![JournalEntry::with_native_parent(
+            SourceId::new(53),
+            ParentId::new(59),
+            JournalNameGraph::new(
+                OsString::from("folder"),
+                OsString::from(".renamewright-folder.tmp"),
+                OsString::from("renamed-folder"),
+            ),
+            SourceFingerprint::new(EntryKind::Directory, None, 0, None),
+            identity(61),
+            PathBuf::from("native-parent"),
+        )],
+    };
+
+    let frames = decode_journal(&encode_journal(std::slice::from_ref(&record))?)?;
+
+    assert_eq!(frames[0].schema_version(), JOURNAL_SCHEMA_VERSION);
+    assert_eq!(frames[0].record(), &record);
+    Ok(())
+}
+
+#[test]
 fn reads_and_reproduces_the_version_one_golden_frame() -> Result<(), Box<dyn std::error::Error>> {
     let frames = decode_journal(&GOLDEN_V1_TRANSACTION_COMPLETED)?;
 

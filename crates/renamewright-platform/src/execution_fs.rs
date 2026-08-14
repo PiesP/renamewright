@@ -174,7 +174,7 @@ impl ExecutionFileSystem for LinuxExecutionFileSystem {
 
         let path = entry_path(parent, native_name)?;
         let metadata = std::fs::symlink_metadata(path).map_err(map_std_io_error)?;
-        if !metadata.file_type().is_file() {
+        if !(metadata.file_type().is_file() || metadata.file_type().is_dir()) {
             return Err(ExecutionFsError::new(
                 ExecutionFsErrorKind::UnsupportedEntry,
                 None,

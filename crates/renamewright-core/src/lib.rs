@@ -31,7 +31,7 @@ pub use rules::{
 pub use windows::windows_name_comparison_key;
 
 /// Version of the frontend/backend planning protocol.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 #[cfg(test)]
 mod tests {
@@ -39,6 +39,6 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_the_rule_pipeline_contract() {
-        assert_eq!(PROTOCOL_VERSION, 5);
+        assert_eq!(PROTOCOL_VERSION, 6);
     }
 }

@@ -117,7 +117,7 @@ impl StoredPlan {
 }
 
 const RULE_PIPELINE_SCHEMA_VERSION: u16 = 4;
-const PLAN_CSV_SCHEMA_VERSION: u16 = 1;
+const PLAN_CSV_SCHEMA_VERSION: u16 = 2;
 const PRESET_DOCUMENT_SCHEMA_VERSION: u16 = 2;
 const MAX_PRESETS: usize = 32;
 const MAX_PRESET_NAME_BYTES: usize = 256;
@@ -1220,11 +1220,6 @@ impl ApplicationService {
         if paths.len() > MAX_ADMITTED_SOURCES {
             return Err(PlanningCommandErrorDto::new("tooManySources"));
         }
-        if contains_directory(&paths) {
-            return Err(PlanningCommandErrorDto::new(
-                "directoryAdmissionUnavailable",
-            ));
-        }
         let mut registry = self
             .registry
             .lock()
@@ -1738,6 +1733,7 @@ pub struct PlanDto {
 #[serde(rename_all = "camelCase")]
 pub struct PlanRowDto {
     source_id: u64,
+    entry_kind: &'static str,
     original_name: String,
     proposed_name: String,
     status: &'static str,
@@ -1781,6 +1777,11 @@ impl PlanRowDto {
     #[must_use]
     pub const fn source_id(&self) -> u64 {
         self.source_id
+    }
+
+    #[must_use]
+    pub const fn entry_kind(&self) -> &'static str {
+        self.entry_kind
     }
 
     #[must_use]
@@ -1839,6 +1840,7 @@ struct PlanSummaryDocument {
 #[serde(rename_all = "camelCase")]
 struct PlanRowDocument<'a> {
     source_id: u64,
+    entry_kind: &'static str,
     original_display: &'a str,
     proposed_display: &'a str,
     status: &'static str,
@@ -1860,8 +1862,6 @@ struct TraceStepDocument<'a> {
 fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf]) {
     let outcome = if paths.len() > MAX_ADMITTED_SOURCES {
         Err("tooManySources".to_owned())
-    } else if contains_directory(paths) {
-        Err("directoryAdmissionUnavailable".to_owned())
     } else {
         state
             .registry
@@ -1879,12 +1879,6 @@ fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf
         changes.revision = changes.revision.saturating_add(1);
         changes.error = outcome.err();
     }
-}
-
-fn contains_directory(paths: &[std::path::PathBuf]) -> bool {
-    paths.iter().any(|path| {
-        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
-    })
 }
 
 fn plan_from_registry(
@@ -2131,6 +2125,7 @@ impl From<&RenamePlan> for PlanDto {
                 .iter()
                 .map(|row| PlanRowDto {
                     source_id: row.source_id().value(),
+                    entry_kind: entry_kind_name(row.entry_kind()),
                     original_name: row.original_display().to_owned(),
                     proposed_name: row.proposed_display().to_owned(),
                     status: status_name(row.status()),
@@ -2577,6 +2572,7 @@ fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
             "plan_id",
             "source_generation",
             "source_id",
+            "entry_kind",
             "original_display",
             "proposed_display",
             "status",
@@ -2597,6 +2593,7 @@ fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
                 &plan.plan_id.to_string(),
                 &plan.source_generation.to_string(),
                 &row.source_id.to_string(),
+                row.entry_kind,
                 row.original_display,
                 row.proposed_display,
                 row.status,
@@ -2650,7 +2647,7 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
     fn from(stored: &'a StoredPlan) -> Self {
         let plan = &stored.plan;
         Self {
-            schema_version: 6,
+            schema_version: 7,
             protocol_version: PROTOCOL_VERSION,
             rule_schema_version: stored.rule_request.schema_version,
             product: "Renamewright",
@@ -2671,6 +2668,7 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
                 .iter()
                 .map(|row| PlanRowDocument {
                     source_id: row.source_id().value(),
+                    entry_kind: entry_kind_name(row.entry_kind()),
                     original_display: row.original_display(),
                     proposed_display: row.proposed_display(),
                     status: status_name(row.status()),
@@ -2738,6 +2736,16 @@ const fn diagnostic_name(code: DiagnosticCode) -> &'static str {
         DiagnosticCode::ParentUnavailable => "parentUnavailable",
         DiagnosticCode::InvalidRule => "invalidRule",
         DiagnosticCode::SequenceOverflow => "sequenceOverflow",
+        DiagnosticCode::AncestorDescendantConflict => "ancestorDescendantConflict",
+    }
+}
+
+const fn entry_kind_name(kind: Option<renamewright_core::EntryKind>) -> &'static str {
+    match kind {
+        Some(renamewright_core::EntryKind::File) => "file",
+        Some(renamewright_core::EntryKind::Directory) => "directory",
+        Some(renamewright_core::EntryKind::Symlink) => "symlink",
+        None => "unknown",
     }
 }
 
@@ -2859,7 +2867,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_admission_remains_unavailable_without_partial_registry_changes()
+    fn directory_admission_is_explicit_and_blocks_selected_descendants()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let source = directory.path().join("report.txt");
@@ -2868,33 +2876,31 @@ mod tests {
         fs::create_dir(&selected_directory)?;
         let state = ApplicationService::default();
 
-        let error = state
-            .admit_sources_with_rules(
-                [source.clone(), selected_directory.clone()],
-                ApplicationService::prefix_rule_request("final-"),
-            )
-            .err()
-            .ok_or("directory admission unexpectedly succeeded")?;
-        assert_eq!(error.code(), "directoryAdmissionUnavailable");
+        let plan = state.admit_sources_with_rules(
+            [source, selected_directory.clone()],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        assert_eq!(plan.rows().len(), 2);
         assert!(
-            state
-                .registry
-                .lock()
-                .map_err(|_| "registry lock failed")?
-                .snapshots()
-                .is_empty()
+            plan.rows()
+                .iter()
+                .any(|row| row.entry_kind() == "directory")
         );
+        assert_eq!(plan.blocked_count(), 0);
 
-        admit_dropped_sources(&state, &[source, selected_directory]);
-        let registry = state.registry.lock().map_err(|_| "registry lock failed")?;
-        let changes = state
-            .source_changes
-            .lock()
-            .map_err(|_| "change lock failed")?;
-        assert!(registry.snapshots().is_empty());
-        assert_eq!(
-            changes.error.as_deref(),
-            Some("directoryAdmissionUnavailable")
+        let nested = selected_directory.join("nested.txt");
+        fs::write(&nested, b"nested")?;
+        let nested_state = ApplicationService::default();
+        let conflicted = nested_state.admit_sources_with_rules(
+            [selected_directory, nested],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        assert_eq!(conflicted.blocked_count(), 2);
+        assert!(
+            conflicted
+                .rows()
+                .iter()
+                .all(|row| { row.diagnostics().contains(&"ancestorDescendantConflict") })
         );
         Ok(())
     }
@@ -3132,8 +3138,8 @@ mod tests {
         let document = plan_document_json(11, &state)?;
         let value: serde_json::Value = serde_json::from_str(&document)?;
 
-        assert_eq!(value["schemaVersion"], 6);
-        assert_eq!(value["protocolVersion"], 5);
+        assert_eq!(value["schemaVersion"], 7);
+        assert_eq!(value["protocolVersion"], 6);
         assert_eq!(value["ruleSchemaVersion"], 4);
         assert_eq!(value["planId"], 11);
         assert_eq!(value["rules"][0]["ruleId"], 7);
@@ -3144,6 +3150,7 @@ mod tests {
         assert_eq!(value["rules"][3]["replacement"], "_");
         assert_eq!(value["rules"][4]["form"], "nfc");
         assert_eq!(value["rows"][0]["sourceId"], 7);
+        assert_eq!(value["rows"][0]["entryKind"], "unknown");
         assert_eq!(value["rules"][5]["scope"], "allSources");
         assert_eq!(value["rules"][5]["order"], "sourceOrder");
         assert_eq!(value["rules"][5]["padding"], 3);
@@ -3201,9 +3208,9 @@ mod tests {
         let csv = plan_document_csv(19, &state)?;
 
         assert!(csv.starts_with(
-            "\"csv_schema_version\",\"plan_id\",\"source_generation\",\"source_id\",\"original_display\",\"proposed_display\",\"status\",\"diagnostics_json\",\"override_applied\",\"trace_json\"\r\n"
+            "\"csv_schema_version\",\"plan_id\",\"source_generation\",\"source_id\",\"entry_kind\",\"original_display\",\"proposed_display\",\"status\",\"diagnostics_json\",\"override_applied\",\"trace_json\"\r\n"
         ));
-        assert!(csv.contains("\"1\",\"19\",\"6\",\"17\""));
+        assert!(csv.contains("\"2\",\"19\",\"6\",\"17\",\"unknown\""));
         assert!(csv.contains("\"'=SUM(1,1)\r\n\"\"quoted\"\".txt\""));
         assert!(csv.contains("review-=SUM(1,1)"));
         assert!(csv.contains("[{\"\"ruleIndex\"\":0,\"\"ruleId\"\":23"));
@@ -4004,6 +4011,51 @@ mod tests {
                 .code(),
             "planUnavailable"
         );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_apply_and_undo_preserve_children_and_identity() -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source-directory");
+        let journal_root = root.path().join("journals");
+        fs::create_dir(&source)?;
+        fs::write(source.join("child.txt"), b"child")?;
+        let state = ApplicationService::default();
+        state.initialize(&journal_root)?;
+        let plan = state.admit_sources_with_rules(
+            [source.clone()],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        assert_eq!(plan.rows()[0].entry_kind(), "directory");
+
+        let applied = state
+            .apply_latest_plan(plan.plan_id(), &LinuxExecutionFileSystem::new(), || false)
+            .map_err(|error| error.code())?;
+        assert_eq!(applied.outcome(), "completed");
+        let renamed = root.path().join("final-source-directory");
+        assert_eq!(fs::read(renamed.join("child.txt"))?, b"child");
+
+        let ledger_id = state
+            .list_ledger()?
+            .first()
+            .ok_or("the directory transaction was not recorded")?
+            .ledger_id();
+        let inspection = state
+            .inspect_undo(ledger_id, &LinuxExecutionFileSystem::new())
+            .map_err(|error| error.code())?;
+        let undone = state
+            .apply_undo(
+                &UndoRequestDto::new(inspection),
+                &LinuxExecutionFileSystem::new(),
+                |_| true,
+            )
+            .map_err(|error| error.code())?;
+
+        assert_eq!(undone.outcome(), "completed");
+        assert_eq!(fs::read(source.join("child.txt"))?, b"child");
+        assert!(!renamed.exists());
         Ok(())
     }
 

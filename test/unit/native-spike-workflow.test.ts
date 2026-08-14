@@ -146,7 +146,8 @@ test('keeps interactive Windows acceptance source-bound, scoped, and honest abou
   expect(interactive).toContain("-Name 'Prefix text'");
   expect(interactive).toContain("-Name 'Add folder'");
   expect(interactive).toContain('$addFolderButton.Current.IsEnabled');
-  expect(interactive).toContain('enabled directory admission before Stage 6G');
+  expect(interactive).toContain('did not expose explicit directory admission');
+  expect(interactive).toContain("-Title 'Add one directory entry to Renamewright'");
   expect(interactive).toContain("$EvidenceLabel -cnotmatch '^[a-z0-9][a-z0-9-]{0,47}$'");
   expect(interactive).toContain('$ExpectedDpiPercent -ne 0');
   expect(interactive).toContain('$RequireHighContrast -and -not $highContrastObserved');
