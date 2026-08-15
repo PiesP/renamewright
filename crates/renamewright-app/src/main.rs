@@ -12,7 +12,7 @@ use eframe::egui;
 use renamewright_app::automation::AutomationFixture;
 #[cfg(feature = "automation")]
 use renamewright_app::automation::{AUTOMATION_BIND_ADDRESS, AutomationRoot, serve_bounded};
-use renamewright_app::{NativePalette, RenamewrightApp};
+use renamewright_app::{NativePalette, RenamewrightApp, install_base_fonts};
 
 #[cfg(windows)]
 fn native_data_root() -> Option<PathBuf> {
@@ -132,6 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Renamewright",
         options,
         Box::new(move |creation_context| {
+            install_base_fonts(&creation_context.egui_ctx);
             let palette = native_palette()
                 .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
             #[cfg(feature = "automation")]

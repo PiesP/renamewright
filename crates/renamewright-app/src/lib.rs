@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 use eframe::egui::{
-    self, Align, Color32, FontData, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
+    self, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
+    ScrollArea, Stroke,
 };
 use renamewright_application::{
     ApplicationService, ApplyCommandErrorDto, ApplyCommandResultDto, CaseModeDto,
@@ -49,6 +50,34 @@ const KOREAN_FONT_CANDIDATES: [&str; 4] = [
     "/usr/share/fonts/truetype/nanum/NanumGothicCoding.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 ];
+const EMOJI_FONT_CANDIDATES: [&str; 3] = [
+    "C:\\Windows\\Fonts\\seguiemj.ttf",
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/opentype/noto/NotoColorEmoji.ttf",
+];
+const BASE_FONT_NAME: &str = "renamewright-base";
+
+/// Installs the single embedded font needed to render the first application frame.
+///
+/// Korean text is added later from an operating-system font so the production
+/// binary does not carry egui's complete default font bundle.
+pub fn install_base_fonts(context: &egui::Context) {
+    context.set_fonts(base_font_definitions());
+}
+
+fn base_font_definitions() -> FontDefinitions {
+    let mut fonts = FontDefinitions::empty();
+    fonts.font_data.insert(
+        BASE_FONT_NAME.to_owned(),
+        Arc::new(FontData::from_static(epaint_default_fonts::UBUNTU_LIGHT)),
+    );
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts
+            .families
+            .insert(family, vec![BASE_FONT_NAME.to_owned()]);
+    }
+    fonts
+}
 
 fn preview_column_label(
     ui: &mut egui::Ui,
@@ -1358,7 +1387,7 @@ fn rule_kind(rule: &RuleRequestDto) -> RuleKind {
 fn concise_rule_text(value: &str) -> String {
     const LIMIT: usize = 18;
     if value.is_empty() {
-        return "∅".to_owned();
+        return "empty".to_owned();
     }
     let mut characters = value.chars();
     let start = characters.by_ref().take(LIMIT).collect::<String>();
@@ -1410,7 +1439,7 @@ fn rule_summary(rule: &RuleRequestDto, locale: Locale) -> String {
             replacement,
             ..
         } => format!(
-            "{} “{}” → “{}”",
+            "{} “{}” -> “{}”",
             RuleKind::LiteralReplace.label(locale),
             concise_rule_text(search),
             concise_rule_text(replacement)
@@ -1656,8 +1685,46 @@ enum KoreanFontState {
 
 #[derive(Debug)]
 struct KoreanFontTask {
-    receiver: Receiver<Option<(String, Vec<u8>)>>,
+    receiver: Receiver<SystemFallbackFonts>,
     handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+struct LoadedSystemFont {
+    file_name: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct SystemFallbackFonts {
+    korean: Option<LoadedSystemFont>,
+    emoji: Option<LoadedSystemFont>,
+}
+
+fn read_first_system_font(candidates: &[&str]) -> Option<LoadedSystemFont> {
+    candidates.iter().find_map(|candidate| {
+        std::fs::read(candidate).ok().map(|bytes| LoadedSystemFont {
+            file_name: std::path::Path::new(candidate).file_name().map_or_else(
+                || (*candidate).to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            bytes,
+        })
+    })
+}
+
+fn add_system_fallback_font(context: &egui::Context, name: &'static str, font: LoadedSystemFont) {
+    context.add_font(FontInsert::new(
+        name,
+        FontData::from_owned(font.bytes),
+        [FontFamily::Proportional, FontFamily::Monospace]
+            .into_iter()
+            .map(|family| InsertFontFamily {
+                family,
+                priority: FontPriority::Lowest,
+            })
+            .collect(),
+    ));
 }
 
 impl KoreanFontTask {
@@ -3776,16 +3843,11 @@ impl RenamewrightApp {
         match thread::Builder::new()
             .name("renamewright-font-loader".to_owned())
             .spawn(move || {
-                let font = KOREAN_FONT_CANDIDATES.iter().find_map(|candidate| {
-                    std::fs::read(candidate).ok().map(|bytes| {
-                        let name = std::path::Path::new(candidate).file_name().map_or_else(
-                            || (*candidate).to_owned(),
-                            |name| name.to_string_lossy().into_owned(),
-                        );
-                        (name, bytes)
-                    })
-                });
-                let _ = sender.send(font);
+                let fonts = SystemFallbackFonts {
+                    korean: read_first_system_font(&KOREAN_FONT_CANDIDATES),
+                    emoji: read_first_system_font(&EMOJI_FONT_CANDIDATES),
+                };
+                let _ = sender.send(fonts);
             }) {
             Ok(handle) => {
                 self.korean_font_state = KoreanFontState::Loading;
@@ -3807,29 +3869,30 @@ impl RenamewrightApp {
             return;
         };
         match task.receiver.try_recv() {
-            Ok(Some((name, bytes))) => {
-                context.add_font(FontInsert::new(
-                    "system-korean",
-                    FontData::from_owned(bytes),
-                    [FontFamily::Proportional, FontFamily::Monospace]
-                        .into_iter()
-                        .map(|family| InsertFontFamily {
-                            family,
-                            priority: FontPriority::Lowest,
-                        })
-                        .collect(),
-                ));
-                self.korean_font_state = KoreanFontState::Ready;
-                eprintln!("loaded Korean fallback font: {name}");
+            Ok(fonts) => {
+                if let Some(font) = fonts.korean {
+                    eprintln!("loaded Korean fallback font: {}", font.file_name);
+                    add_system_fallback_font(context, "system-korean", font);
+                    self.korean_font_state = KoreanFontState::Ready;
+                } else {
+                    self.korean_font_state = KoreanFontState::Unavailable;
+                    eprintln!("no Korean fallback font was found; IME text remains inspectable");
+                }
+                if let Some(font) = fonts.emoji {
+                    eprintln!("loaded emoji fallback font: {}", font.file_name);
+                    add_system_fallback_font(context, "system-emoji", font);
+                }
                 if let Some(task) = self.korean_font_task.take() {
                     task.finish();
                 }
                 context.request_repaint();
             }
-            Ok(None) | Err(TryRecvError::Disconnected) => {
+            Err(TryRecvError::Disconnected) => {
                 self.korean_font_state = KoreanFontState::Unavailable;
-                self.korean_font_task = None;
-                eprintln!("no Korean fallback font was found; IME text remains inspectable");
+                if let Some(task) = self.korean_font_task.take() {
+                    task.finish();
+                }
+                eprintln!("system fallback font loading ended before producing a result");
             }
             Err(TryRecvError::Empty) => context.request_repaint_after(FONT_POLL_INTERVAL),
         }
@@ -4007,7 +4070,7 @@ impl RenamewrightApp {
                 );
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("IMG_00001.jpg").color(self.palette.ink));
-                    ui.label(RichText::new("→").color(self.palette.ink_soft));
+                    ui.label(RichText::new("->").color(self.palette.ink_soft));
                     ui.label(RichText::new("Trip_0001.jpg").color(self.palette.accent));
                     ui.label(
                         RichText::new(self.locale.text("Changed", "변경됨"))
@@ -4297,7 +4360,7 @@ impl RenamewrightApp {
                                             selected_rule = Some(index);
                                         }
                                         let move_up = ui
-                                            .add_enabled(index > 0, egui::Button::new("←"))
+                                            .add_enabled(index > 0, egui::Button::new("<"))
                                             .on_hover_text(self.locale.text(
                                                 "Move earlier (Alt+Left)",
                                                 "앞으로 이동 (Alt+왼쪽)",
@@ -4318,7 +4381,7 @@ impl RenamewrightApp {
                                         let move_down = ui
                                             .add_enabled(
                                                 index + 1 < self.rules.len(),
-                                                egui::Button::new("→"),
+                                                egui::Button::new(">"),
                                             )
                                             .on_hover_text(self.locale.text(
                                                 "Move later (Alt+Right)",
@@ -5806,7 +5869,7 @@ mod tests {
         LedgerTask, Locale, MutationTask, NativePalette, PLANNING_DEBOUNCE,
         PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
         PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, adjacent_selection_index,
-        install_theme, install_theme_with_density, preview_column_label, rule_summary, semantics,
+        install_theme, install_theme_with_density, preview_column_label, semantics,
     };
 
     #[derive(Default)]
@@ -5828,6 +5891,32 @@ mod tests {
         }
 
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn embedded_base_font_covers_production_ui_glyphs() -> Result<(), Box<dyn Error>> {
+        use skrifa::MetadataProvider as _;
+
+        let definitions = super::base_font_definitions();
+        assert!(definitions.font_data.contains_key(super::BASE_FONT_NAME));
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            let Some(family_fonts) = definitions.families.get(&family) else {
+                return Err("the base font family was not installed".into());
+            };
+            assert_eq!(family_fonts, &[super::BASE_FONT_NAME]);
+        }
+        let font = skrifa::FontRef::new(epaint_default_fonts::UBUNTU_LIGHT)?;
+        let character_map = font.charmap();
+        let missing_glyphs: Vec<_> = "Renamewright 0123456789 · × “text” … <- ->"
+            .chars()
+            .filter(|character| character_map.map(*character).is_none())
+            .collect();
+
+        assert!(
+            missing_glyphs.is_empty(),
+            "the compact embedded font is missing production UI glyphs: {missing_glyphs:?}"
+        );
+        Ok(())
     }
 
     fn settle_ledger(app: &mut RenamewrightApp) {
@@ -6037,23 +6126,26 @@ mod tests {
     }
 
     #[test]
-    fn rule_drag_handle_reorders_when_dropped_on_a_visible_rule_card() {
+    fn rule_drag_handle_reorders_when_dropped_on_a_visible_rule_card() -> Result<(), Box<dyn Error>>
+    {
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.rules = vec![
             RuleKind::Prefix.create(11),
             RuleKind::Sequence.create(22),
             RuleKind::Case.create(33),
         ];
-        let target_label = format!("3 · {}", rule_summary(&app.rules[2], Locale::English));
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
         let drag_position = harness.get_by_label("Drag rule 1").rect().center();
-        let target_rect = harness.get_by_label(&target_label).rect();
-        let drop_position = egui::pos2(target_rect.right() - 2.0, target_rect.center().y);
         harness.drag_at(drag_position);
         harness.run_ok();
+        let target_remove = harness
+            .get_all_by_label(semantics::REMOVE_RULE)
+            .next_back()
+            .ok_or("the final visible rule card lost its remove control")?;
+        let drop_position = target_remove.rect().center();
         harness.hover_at(drop_position);
         harness.run_ok();
         harness.drop_at(drop_position);
@@ -6068,6 +6160,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![22, 33, 11]
         );
+        Ok(())
     }
 
     #[test]
