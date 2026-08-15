@@ -12,7 +12,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Align, Color32, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
+    self, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
+    ScrollArea, Stroke,
 };
 use renamewright_application::{
     ApplicationService, ApplyCommandErrorDto, ApplyCommandResultDto, CaseModeDto,
@@ -41,6 +42,13 @@ const MUTATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PLANNING_DEBOUNCE: Duration = Duration::from_millis(100);
 const PLANNING_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const LEDGER_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const FONT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const KOREAN_FONT_CANDIDATES: [&str; 4] = [
+    "C:\\Windows\\Fonts\\malgun.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumGothicCoding.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+];
 
 fn preview_column_label(
     ui: &mut egui::Ui,
@@ -1613,6 +1621,29 @@ struct DocumentTask {
     handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum KoreanFontState {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Debug)]
+struct KoreanFontTask {
+    receiver: Receiver<Option<(String, Vec<u8>)>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl KoreanFontTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl DocumentTask {
     fn finish(mut self) {
         if let Some(handle) = self.handle.take() {
@@ -2176,6 +2207,8 @@ pub struct RenamewrightApp {
     appearance: AppearancePreferences,
     appearance_applied: bool,
     appearance_advanced_open: bool,
+    korean_font_state: KoreanFontState,
+    korean_font_task: Option<KoreanFontTask>,
     #[cfg(feature = "automation")]
     automation_mode: bool,
     #[cfg(feature = "automation")]
@@ -2360,6 +2393,8 @@ impl RenamewrightApp {
             appearance,
             appearance_applied: false,
             appearance_advanced_open: false,
+            korean_font_state: KoreanFontState::Idle,
+            korean_font_task: None,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
             #[cfg(feature = "automation")]
@@ -3709,6 +3744,73 @@ impl RenamewrightApp {
         }
     }
 
+    fn ensure_korean_font(&mut self, context: &egui::Context) {
+        if self.korean_font_state != KoreanFontState::Idle {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        match thread::Builder::new()
+            .name("renamewright-font-loader".to_owned())
+            .spawn(move || {
+                let font = KOREAN_FONT_CANDIDATES.iter().find_map(|candidate| {
+                    std::fs::read(candidate).ok().map(|bytes| {
+                        let name = std::path::Path::new(candidate).file_name().map_or_else(
+                            || (*candidate).to_owned(),
+                            |name| name.to_string_lossy().into_owned(),
+                        );
+                        (name, bytes)
+                    })
+                });
+                let _ = sender.send(font);
+            }) {
+            Ok(handle) => {
+                self.korean_font_state = KoreanFontState::Loading;
+                self.korean_font_task = Some(KoreanFontTask {
+                    receiver,
+                    handle: Some(handle),
+                });
+                context.request_repaint_after(FONT_POLL_INTERVAL);
+            }
+            Err(error) => {
+                self.korean_font_state = KoreanFontState::Unavailable;
+                eprintln!("Korean fallback font loading was not started: {error}");
+            }
+        }
+    }
+
+    fn poll_korean_font(&mut self, context: &egui::Context) {
+        let Some(task) = self.korean_font_task.as_ref() else {
+            return;
+        };
+        match task.receiver.try_recv() {
+            Ok(Some((name, bytes))) => {
+                let mut fonts = FontDefinitions::empty();
+                fonts.font_data.insert(
+                    "system-korean".to_owned(),
+                    FontData::from_owned(bytes).into(),
+                );
+                for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                    fonts
+                        .families
+                        .insert(family, vec!["system-korean".to_owned()]);
+                }
+                context.set_fonts(fonts);
+                self.korean_font_state = KoreanFontState::Ready;
+                eprintln!("loaded Korean fallback font: {name}");
+                if let Some(task) = self.korean_font_task.take() {
+                    task.finish();
+                }
+                context.request_repaint();
+            }
+            Ok(None) | Err(TryRecvError::Disconnected) => {
+                self.korean_font_state = KoreanFontState::Unavailable;
+                self.korean_font_task = None;
+                eprintln!("no Korean fallback font was found; IME text remains inspectable");
+            }
+            Err(TryRecvError::Empty) => context.request_repaint_after(FONT_POLL_INTERVAL),
+        }
+    }
+
     fn show_appearance_menu(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
         ui.menu_button(self.locale.text(semantics::APPEARANCE, "모양"), |ui| {
@@ -3956,6 +4058,25 @@ impl RenamewrightApp {
                     })
                     .response
                     .on_hover_text(semantics::LANGUAGE);
+                match self.korean_font_state {
+                    KoreanFontState::Loading => {
+                        ui.spinner();
+                        ui.label(
+                            self.locale
+                                .text("Loading Korean text", "한글 글꼴 불러오는 중"),
+                        );
+                    }
+                    KoreanFontState::Unavailable => {
+                        ui.label(
+                            RichText::new(
+                                self.locale
+                                    .text("Korean font unavailable", "한글 글꼴을 찾을 수 없음"),
+                            )
+                            .color(self.palette.blocked),
+                        );
+                    }
+                    KoreanFontState::Idle | KoreanFontState::Ready => {}
+                }
                 appearance_changed |= self.show_appearance_menu(ui);
                 let history = ui.selectable_label(
                     self.ledger_open,
@@ -3988,6 +4109,9 @@ impl RenamewrightApp {
             self.appearance_applied = false;
             self.apply_appearance(ui.ctx());
             ui.ctx().request_repaint();
+        }
+        if self.locale == Locale::Korean {
+            self.ensure_korean_font(ui.ctx());
         }
     }
 
@@ -5297,6 +5421,17 @@ impl RenamewrightApp {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        let entered_non_ascii_text = ui.ctx().input(|input| {
+            input.events.iter().any(|event| match event {
+                egui::Event::Text(text) | egui::Event::Paste(text) => !text.is_ascii(),
+                egui::Event::Ime(_) => true,
+                _ => false,
+            })
+        });
+        if entered_non_ascii_text {
+            self.ensure_korean_font(ui.ctx());
+        }
+        self.poll_korean_font(ui.ctx());
         self.apply_appearance(ui.ctx());
         self.poll_admission(ui.ctx());
         self.poll_planning(ui.ctx());
@@ -5515,6 +5650,7 @@ impl Drop for RenamewrightApp {
         if let Some(task) = self.document_task.take() {
             task.finish();
         }
+        let _ = self.korean_font_task.take();
     }
 }
 
@@ -5626,11 +5762,11 @@ mod tests {
         AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
     };
     use super::{
-        AccentChoice, AppearanceTheme, InterfaceDensity, LedgerMessage, LedgerTask, Locale,
-        MutationTask, NativePalette, PLANNING_DEBOUNCE, PREVIEW_PROPOSED_COLUMN_WIDTH,
-        PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto, PlanFilter, RenamewrightApp,
-        RuleKind, RuleRequestDto, adjacent_selection_index, install_theme,
-        install_theme_with_density, preview_column_label, semantics,
+        AccentChoice, AppearanceTheme, InterfaceDensity, KoreanFontState, LedgerMessage,
+        LedgerTask, Locale, MutationTask, NativePalette, PLANNING_DEBOUNCE,
+        PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
+        PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, adjacent_selection_index,
+        install_theme, install_theme_with_density, preview_column_label, semantics,
     };
 
     #[derive(Default)]
@@ -6830,6 +6966,29 @@ mod tests {
         harness.get_by_label("미리보기");
         harness.get_by_label("전체");
         harness.get_by_label("적용 잠김");
+    }
+
+    #[test]
+    fn korean_font_loading_is_deferred_until_korean_text_is_needed() {
+        let english_app = RenamewrightApp::new(false);
+        let english_harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), english_app);
+        assert_eq!(
+            english_harness.state().korean_font_state,
+            KoreanFontState::Idle
+        );
+        assert!(english_harness.state().korean_font_task.is_none());
+
+        let mut korean_app = RenamewrightApp::new(false);
+        korean_app.locale = Locale::Korean;
+        let korean_harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), korean_app);
+        assert_ne!(
+            korean_harness.state().korean_font_state,
+            KoreanFontState::Idle
+        );
     }
 
     #[test]

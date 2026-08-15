@@ -1,11 +1,10 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
+use eframe::egui;
 #[cfg(feature = "automation")]
 use renamewright_app::automation::AutomationFixture;
 #[cfg(feature = "automation")]
@@ -49,52 +48,6 @@ fn native_palette() -> Result<NativePalette, std::io::Error> {
 #[cfg(not(windows))]
 fn native_palette() -> Result<NativePalette, std::io::Error> {
     Ok(NativePalette::default())
-}
-
-fn install_korean_font(ctx: &egui::Context) -> Option<String> {
-    const CANDIDATES: [&str; 4] = [
-        "C:\\Windows\\Fonts\\malgun.ttf",
-        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-        "/usr/share/fonts/truetype/nanum/NanumGothicCoding.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    ];
-
-    for candidate in CANDIDATES {
-        let Ok(bytes) = fs::read(candidate) else {
-            continue;
-        };
-        let mut fonts = FontDefinitions::empty();
-        fonts.font_data.insert(
-            "system-korean".to_owned(),
-            FontData::from_owned(bytes).into(),
-        );
-        for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            fonts
-                .families
-                .insert(family, vec!["system-korean".to_owned()]);
-        }
-        ctx.set_fonts(fonts);
-        return Path::new(candidate)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
-    }
-    None
-}
-
-fn install_korean_font_in_background(ctx: egui::Context) {
-    let spawn = std::thread::Builder::new()
-        .name("renamewright-font-loader".to_owned())
-        .spawn(move || {
-            if let Some(font) = install_korean_font(&ctx) {
-                eprintln!("loaded Korean fallback font: {font}");
-            } else {
-                eprintln!("no Korean fallback font was found; IME text remains inspectable");
-            }
-            ctx.request_repaint();
-        });
-    if let Err(error) = spawn {
-        eprintln!("Korean fallback font loading was not started: {error}");
-    }
 }
 
 #[cfg(feature = "automation")]
@@ -178,7 +131,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(move |creation_context| {
             let palette = native_palette()
                 .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
-            install_korean_font_in_background(creation_context.egui_ctx.clone());
             #[cfg(feature = "automation")]
             if automation_mode {
                 attach_automation(&creation_context.egui_ctx).map_err(
