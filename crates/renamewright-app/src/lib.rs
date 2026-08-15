@@ -5949,6 +5949,12 @@ mod tests {
         }
     }
 
+    fn ascii_synthetic_app() -> RenamewrightApp {
+        let mut app = RenamewrightApp::new(false);
+        app.set_prefix("sample_");
+        app
+    }
+
     #[test]
     fn source_admission_runs_off_frame_and_queues_a_second_selection() -> Result<(), Box<dyn Error>>
     {
@@ -6033,7 +6039,7 @@ mod tests {
     fn accesskit_exposes_primary_workbench_controls() {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
-            .build_ui_state(|ui, app| app.show(ui), RenamewrightApp::new(false));
+            .build_ui_state(|ui, app| app.show(ui), ascii_synthetic_app());
 
         let add_files = harness.get_by_label(semantics::ADD_FILES);
         let add_folder = harness.get_by_label(semantics::ADD_FOLDER);
@@ -6236,7 +6242,7 @@ mod tests {
     fn review_count_chip_filters_and_focuses_the_first_matching_row() {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_180.0, 760.0))
-            .build_ui_state(|ui, app| app.show(ui), RenamewrightApp::new(false));
+            .build_ui_state(|ui, app| app.show(ui), ascii_synthetic_app());
 
         harness.get_by_label("Blocked 10").click();
         harness.run_ok();
@@ -6283,7 +6289,7 @@ mod tests {
     fn preview_column_divider_resizes_and_resets_the_view_only() {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_180.0, 760.0))
-            .build_ui_state(|ui, app| app.show(ui), RenamewrightApp::new(false));
+            .build_ui_state(|ui, app| app.show(ui), ascii_synthetic_app());
         let divider = harness
             .get_by_label("Resize source and proposed columns")
             .rect()
@@ -6511,7 +6517,7 @@ mod tests {
 
     #[test]
     fn hidden_diagnostic_details_keep_blocker_reasons_visible() {
-        let mut app = RenamewrightApp::new(false);
+        let mut app = ascii_synthetic_app();
         app.appearance.show_diagnostics = false;
         app.filter = PlanFilter::Blocked;
         let harness = Harness::builder()
@@ -6605,11 +6611,9 @@ mod tests {
 
     #[test]
     fn blocked_filter_updates_the_accessible_result_count() {
-        let mut app = RenamewrightApp::new(false);
-        app.set_prefix("sample_");
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
-            .build_ui_state(|ui, app| app.show(ui), app);
+            .build_ui_state(|ui, app| app.show(ui), ascii_synthetic_app());
 
         assert_eq!(
             harness.state().korean_font_state,
@@ -6786,7 +6790,7 @@ mod tests {
     fn ten_thousand_entry_preview_keeps_the_accessibility_tree_bounded() {
         let harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
-            .build_ui_state(|ui, app| app.show(ui), RenamewrightApp::new(false));
+            .build_ui_state(|ui, app| app.show(ui), ascii_synthetic_app());
 
         assert!(harness.query_by_label("IMG_00000.jpg").is_some());
         assert!(harness.query_by_label("IMG_09999.jpg").is_none());
@@ -6817,7 +6821,7 @@ mod tests {
     fn minimum_window_keeps_rules_preview_and_apply_state_reachable() {
         let harness = Harness::builder()
             .with_size(egui::vec2(820.0, 560.0))
-            .build_ui_state(|ui, app| app.show(ui), RenamewrightApp::new(false));
+            .build_ui_state(|ui, app| app.show(ui), ascii_synthetic_app());
 
         harness.get_by_label(semantics::RULES_HEADING);
         harness.get_by_role_and_label(
