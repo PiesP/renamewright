@@ -4225,42 +4225,8 @@ impl RenamewrightApp {
             .id_salt("active-rule-chain")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for insertion_index in 0..=self.rules.len() {
-                        let drop_response = ui.allocate_response(
-                            egui::vec2(10.0, ui.spacing().interact_size.y),
-                            egui::Sense::hover(),
-                        );
-                        drop_response.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Other,
-                                true,
-                                format!("Rule insertion position {}", insertion_index + 1),
-                            )
-                        });
-                        if drop_response
-                            .dnd_hover_payload::<RuleDragPayload>()
-                            .is_some()
-                        {
-                            ui.painter().vline(
-                                drop_response.rect.center().x,
-                                drop_response.rect.y_range(),
-                                Stroke::new(3.0, self.palette.accent),
-                            );
-                        }
-                        if let Some(payload) =
-                            drop_response.dnd_release_payload::<RuleDragPayload>()
-                        {
-                            dropped_rule = Some((payload.rule_id, insertion_index));
-                        }
-
-                        let Some((index, rule)) = self
-                            .rules
-                            .get(insertion_index)
-                            .map(|rule| (insertion_index, rule))
-                        else {
-                            continue;
-                        };
-                        ui.push_id(rule.rule_id(), |ui| {
+                    for (index, rule) in self.rules.iter().enumerate() {
+                        let rule_card = ui.push_id(rule.rule_id(), |ui| {
                             egui::Frame::new()
                                 .fill(self.palette.paper_raised)
                                 .stroke(Stroke::new(1.0, self.palette.rule))
@@ -4275,18 +4241,22 @@ impl RenamewrightApp {
                                                 format!("규칙 {} 드래그", index + 1)
                                             }
                                         };
-                                        let drag_handle = ui
-                                            .add(egui::Label::new("::").sense(egui::Sense::drag()));
-                                        drag_handle.widget_info(|| {
-                                            egui::WidgetInfo::labeled(
-                                                egui::WidgetType::Other,
-                                                true,
-                                                drag_label.clone(),
-                                            )
-                                        });
-                                        drag_handle.dnd_set_drag_payload(RuleDragPayload {
-                                            rule_id: rule.rule_id(),
-                                        });
+                                        ui.dnd_drag_source(
+                                            ui.id().with("rule-drag-handle"),
+                                            RuleDragPayload {
+                                                rule_id: rule.rule_id(),
+                                            },
+                                            |ui| {
+                                                let drag_handle = ui.label("::");
+                                                drag_handle.widget_info(|| {
+                                                    egui::WidgetInfo::labeled(
+                                                        egui::WidgetType::Other,
+                                                        true,
+                                                        drag_label.clone(),
+                                                    )
+                                                });
+                                            },
+                                        );
                                         let selected =
                                             self.rule_editor_open && self.selected_rule == index;
                                         if ui
@@ -4356,8 +4326,38 @@ impl RenamewrightApp {
                                             remove_rule = Some(index);
                                         }
                                     });
-                                });
+                                })
                         });
+                        let card_response = &rule_card.inner.response;
+                        let insertion_index = ui.ctx().pointer_interact_pos().map(|pointer| {
+                            if pointer.x < card_response.rect.center().x {
+                                index
+                            } else {
+                                index + 1
+                            }
+                        });
+                        if card_response
+                            .dnd_hover_payload::<RuleDragPayload>()
+                            .is_some()
+                            && let Some(insertion_index) = insertion_index
+                        {
+                            let marker_x = if insertion_index == index {
+                                card_response.rect.left()
+                            } else {
+                                card_response.rect.right()
+                            };
+                            ui.painter().vline(
+                                marker_x,
+                                card_response.rect.y_range(),
+                                Stroke::new(3.0, self.palette.accent),
+                            );
+                        }
+                        if let (Some(payload), Some(insertion_index)) = (
+                            card_response.dnd_release_payload::<RuleDragPayload>(),
+                            insertion_index,
+                        ) {
+                            dropped_rule = Some((payload.rule_id, insertion_index));
+                        }
                     }
                 });
             });
@@ -5775,7 +5775,7 @@ mod tests {
         LedgerTask, Locale, MutationTask, NativePalette, PLANNING_DEBOUNCE,
         PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
         PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, adjacent_selection_index,
-        install_theme, install_theme_with_density, preview_column_label, semantics,
+        install_theme, install_theme_with_density, preview_column_label, rule_summary, semantics,
     };
 
     #[derive(Default)]
@@ -6006,22 +6006,21 @@ mod tests {
     }
 
     #[test]
-    fn rule_drag_handle_reorders_at_the_visible_insertion_position() {
+    fn rule_drag_handle_reorders_when_dropped_on_a_visible_rule_card() {
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.rules = vec![
             RuleKind::Prefix.create(11),
             RuleKind::Sequence.create(22),
             RuleKind::Case.create(33),
         ];
+        let target_label = format!("3 · {}", rule_summary(&app.rules[2], Locale::English));
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
         let drag_position = harness.get_by_label("Drag rule 1").rect().center();
-        let drop_position = harness
-            .get_by_label("Rule insertion position 4")
-            .rect()
-            .center();
+        let target_rect = harness.get_by_label(&target_label).rect();
+        let drop_position = egui::pos2(target_rect.right() - 2.0, target_rect.center().y);
         harness.drag_at(drag_position);
         harness.run_ok();
         harness.hover_at(drop_position);
