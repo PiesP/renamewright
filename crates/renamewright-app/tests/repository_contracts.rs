@@ -6,6 +6,8 @@ use std::process::Command;
 
 const ROOT_MANIFEST: &str = include_str!("../../../Cargo.toml");
 const APP_MANIFEST: &str = include_str!("../Cargo.toml");
+const APP_MAIN: &str = include_str!("../src/main.rs");
+const CARGO_CONFIG: &str = include_str!("../../../.cargo/config.toml");
 const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yaml");
 const REPOSITORY_SETTINGS: &str = include_str!("../../../.github/settings.yaml");
 const SECURITY_WORKFLOW: &str = include_str!("../../../.github/workflows/security.yaml");
@@ -293,7 +295,17 @@ fn portable_release_excludes_automation_and_binds_evidence() {
         );
     }
     assert!(ACCEPTANCE_PACKAGER.contains("defaultExcludesAutomationMarkers = $true"));
+    assert!(ACCEPTANCE_PACKAGER.contains("msvcRuntimeStaticallyLinked = $true"));
     assert!(ACCEPTANCE_PACKAGER.contains("cyclonedx-json=$sbomPath"));
+    assert!(RELEASE_PACKAGER.contains("msvcRuntimeStaticallyLinked = $true"));
+}
+
+#[test]
+fn portable_windows_build_statically_links_the_msvc_runtime() {
+    assert!(CARGO_CONFIG.contains("[target.x86_64-pc-windows-msvc]"));
+    assert!(CARGO_CONFIG.contains("target-feature=+crt-static"));
+    assert!(APP_MAIN.contains("not(target_feature = \"crt-static\")"));
+    assert!(APP_MAIN.contains("statically link the MSVC runtime"));
 }
 
 #[test]

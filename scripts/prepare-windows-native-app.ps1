@@ -158,6 +158,7 @@ $manifest = [ordered]@{
   checks = [ordered]@{
     sourceShaMatches = $true
     defaultExcludesAutomationMarkers = $true
+    msvcRuntimeStaticallyLinked = $true
     automationIncludesVisibleBanner = $true
     automationUsesLoopbackOnly = $true
     automationRequiresExplicitRoot = $true

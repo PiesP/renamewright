@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[cfg(all(windows, not(target_feature = "crt-static")))]
+compile_error!("the portable Windows executable must statically link the MSVC runtime");
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

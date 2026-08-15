@@ -24,11 +24,13 @@ enumerates children; extension-only rules skip directories, ancestor/descendant
 selections are blocked, reparse points are not followed, and renames remain
 within the original parent.
 
-The primary distributable is one portable `renamewright.exe`. The default
-feature set contains no custom inspection listener or fixture loader. Test
-automation is compiled only with the explicit `automation` Cargo feature and
-still requires `--automation`, an absolute disposable `--automation-root`, and
-a visible test-mode banner.
+The primary distributable is one portable `renamewright.exe`. Its Windows MSVC
+runtime is statically linked, so the executable does not require a separately
+installed Visual C++ runtime. Windows system libraries remain operating-system
+dependencies. The default feature set contains no custom inspection listener or
+fixture loader. Test automation is compiled only with the explicit `automation`
+Cargo feature and still requires `--automation`, an absolute disposable
+`--automation-root`, and a visible test-mode banner.
 
 ## Interaction design
 
