@@ -81,6 +81,22 @@ fn install_korean_font(ctx: &egui::Context) -> Option<String> {
     None
 }
 
+fn install_korean_font_in_background(ctx: egui::Context) {
+    let spawn = std::thread::Builder::new()
+        .name("renamewright-font-loader".to_owned())
+        .spawn(move || {
+            if let Some(font) = install_korean_font(&ctx) {
+                eprintln!("loaded Korean fallback font: {font}");
+            } else {
+                eprintln!("no Korean fallback font was found; IME text remains inspectable");
+            }
+            ctx.request_repaint();
+        });
+    if let Err(error) = spawn {
+        eprintln!("Korean fallback font loading was not started: {error}");
+    }
+}
+
 #[cfg(feature = "automation")]
 struct AutomationLaunch {
     root: AutomationRoot,
@@ -162,12 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(move |creation_context| {
             let palette = native_palette()
                 .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
-            let font = install_korean_font(&creation_context.egui_ctx);
-            if let Some(font) = font {
-                eprintln!("loaded Korean fallback font: {font}");
-            } else {
-                eprintln!("no Korean fallback font was found; IME text remains inspectable");
-            }
+            install_korean_font_in_background(creation_context.egui_ctx.clone());
             #[cfg(feature = "automation")]
             if automation_mode {
                 attach_automation(&creation_context.egui_ctx).map_err(

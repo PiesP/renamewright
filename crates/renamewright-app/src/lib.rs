@@ -1531,7 +1531,10 @@ struct PlanningTask {
 
 #[derive(Debug)]
 enum LedgerMessage {
-    Snapshot(Result<Vec<LedgerEntryDto>, String>),
+    Snapshot {
+        result: Result<Vec<LedgerEntryDto>, String>,
+        announce: bool,
+    },
     Recovery(Result<RecoveryInspectionDto, String>),
     Undo(Result<UndoInspectionDto, String>),
 }
@@ -1540,6 +1543,32 @@ enum LedgerMessage {
 struct LedgerTask {
     receiver: Receiver<LedgerMessage>,
     handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+enum DocumentMessage {
+    Inspection {
+        json: bool,
+        result: Result<String, String>,
+    },
+    Export {
+        extension: &'static str,
+        result: Result<(), String>,
+    },
+}
+
+#[derive(Debug)]
+struct DocumentTask {
+    receiver: Receiver<DocumentMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DocumentTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl LedgerTask {
@@ -2057,6 +2086,7 @@ pub struct RenamewrightApp {
     locale: Locale,
     override_editor: Option<OverrideEditor>,
     inspection: Option<InspectionDocument>,
+    document_task: Option<DocumentTask>,
     synthetic_fixture: bool,
     preset_path: Option<PathBuf>,
     journal_root: Option<PathBuf>,
@@ -2187,7 +2217,10 @@ impl RenamewrightApp {
                     .initialize(&root)
                     .and_then(|()| application.ledger_snapshot())
                     .map_err(|error| error.to_string());
-                let _ = sender.send(LedgerMessage::Snapshot(result));
+                let _ = sender.send(LedgerMessage::Snapshot {
+                    result,
+                    announce: false,
+                });
             });
             LedgerTask {
                 receiver,
@@ -2224,6 +2257,7 @@ impl RenamewrightApp {
             locale: Locale::English,
             override_editor: None,
             inspection: None,
+            document_task: None,
             synthetic_fixture,
             preset_path,
             journal_root,
@@ -2768,10 +2802,9 @@ impl RenamewrightApp {
                     "이름 변경 기록을 새로 고치는 중입니다",
                 )
                 .to_owned(),
-            |application| {
-                LedgerMessage::Snapshot(
-                    application.list_ledger().map_err(|error| error.to_string()),
-                )
+            |application| LedgerMessage::Snapshot {
+                result: application.list_ledger().map_err(|error| error.to_string()),
+                announce: true,
             },
         );
     }
@@ -2845,7 +2878,10 @@ impl RenamewrightApp {
                     task.finish();
                 }
                 match message {
-                    LedgerMessage::Snapshot(Ok(ledger)) => {
+                    LedgerMessage::Snapshot {
+                        result: Ok(ledger),
+                        announce,
+                    } => {
                         if self.selected_ledger_id.is_some_and(|selected| {
                             !ledger.iter().any(|entry| entry.ledger_id() == selected)
                         }) {
@@ -2855,12 +2891,16 @@ impl RenamewrightApp {
                         }
                         self.ledger = ledger;
                         self.ledger_ready = true;
-                        self.status = self
-                            .locale
-                            .text("Rename history is ready", "이름 변경 기록을 확인했습니다")
-                            .to_owned();
+                        if announce {
+                            self.status = self
+                                .locale
+                                .text("Rename history is ready", "이름 변경 기록을 확인했습니다")
+                                .to_owned();
+                        }
                     }
-                    LedgerMessage::Snapshot(Err(error)) => {
+                    LedgerMessage::Snapshot {
+                        result: Err(error), ..
+                    } => {
                         self.ledger_ready = false;
                         self.status = error;
                     }
@@ -3813,7 +3853,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some(),
+                    self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::INSPECT_JSON, "JSON 검토")),
                 )
                 .clicked()
@@ -3822,7 +3862,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some(),
+                    self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::INSPECT_CSV, "CSV 검토")),
                 )
                 .clicked()
@@ -3831,7 +3871,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some(),
+                    self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::EXPORT_JSON, "JSON 내보내기")),
                 )
                 .clicked()
@@ -3840,7 +3880,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some(),
+                    self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::EXPORT_CSV, "CSV 내보내기")),
                 )
                 .clicked()
@@ -4270,36 +4310,40 @@ impl RenamewrightApp {
     }
 
     fn inspect_plan(&mut self, json: bool) {
+        if self.document_task.is_some() {
+            return;
+        }
         let Some(plan_id) = self.plan.as_ref().map(PlanDto::plan_id) else {
             return;
         };
-        let document = if json {
-            self.application.inspect_plan_json(plan_id)
-        } else {
-            self.application.inspect_plan_csv(plan_id)
-        };
-        match document {
-            Ok(content) => {
-                self.inspection = Some(InspectionDocument {
-                    title: if json {
-                        self.locale.text("Plan JSON", "계획 JSON")
-                    } else {
-                        self.locale.text("Plan CSV", "계획 CSV")
-                    },
-                    content,
-                });
+        let application = Arc::clone(&self.application);
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let result = if json {
+                application.inspect_plan_json(plan_id)
+            } else {
+                application.inspect_plan_csv(plan_id)
             }
-            Err(error) => {
-                self.status = format!(
-                    "{} ({error})",
-                    self.locale
-                        .text("Inspection unavailable", "계획을 검토할 수 없습니다")
-                );
-            }
-        }
+            .map_err(|error| error.to_string());
+            let _ = sender.send(DocumentMessage::Inspection { json, result });
+        });
+        self.document_task = Some(DocumentTask {
+            receiver,
+            handle: Some(handle),
+        });
+        self.status = self
+            .locale
+            .text(
+                "Preparing plan inspection",
+                "계획 검토 문서를 준비 중입니다",
+            )
+            .to_owned();
     }
 
     fn export_plan(&mut self, json: bool) {
+        if self.document_task.is_some() {
+            return;
+        }
         let Some(plan_id) = self.plan.as_ref().map(PlanDto::plan_id) else {
             return;
         };
@@ -4316,19 +4360,87 @@ impl RenamewrightApp {
                 .to_owned();
             return;
         };
-        let result = if json {
-            self.application.export_plan_json(plan_id, &path)
-        } else {
-            self.application.export_plan_csv(plan_id, &path)
-        };
-        match result {
-            Ok(()) => {
-                self.status = match self.locale {
-                    Locale::English => format!("Plan {extension} exported"),
-                    Locale::Korean => format!("계획 {extension}을 내보냈습니다"),
-                };
+        let application = Arc::clone(&self.application);
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let result = if json {
+                application.export_plan_json(plan_id, &path)
+            } else {
+                application.export_plan_csv(plan_id, &path)
             }
-            Err(error) => self.status = error.to_string(),
+            .map_err(|error| error.to_string());
+            let _ = sender.send(DocumentMessage::Export { extension, result });
+        });
+        self.document_task = Some(DocumentTask {
+            receiver,
+            handle: Some(handle),
+        });
+        self.status = self
+            .locale
+            .text(
+                "Exporting the current plan",
+                "현재 계획을 내보내는 중입니다",
+            )
+            .to_owned();
+    }
+
+    fn poll_document(&mut self, context: &egui::Context) {
+        let message = self
+            .document_task
+            .as_ref()
+            .map(|task| task.receiver.try_recv());
+        match message {
+            Some(Ok(message)) => {
+                if let Some(task) = self.document_task.take() {
+                    task.finish();
+                }
+                match message {
+                    DocumentMessage::Inspection {
+                        json,
+                        result: Ok(content),
+                    } => {
+                        self.inspection = Some(InspectionDocument {
+                            title: if json {
+                                self.locale.text("Plan JSON", "계획 JSON")
+                            } else {
+                                self.locale.text("Plan CSV", "계획 CSV")
+                            },
+                            content,
+                        });
+                    }
+                    DocumentMessage::Inspection {
+                        result: Err(error), ..
+                    }
+                    | DocumentMessage::Export {
+                        result: Err(error), ..
+                    } => self.status = error,
+                    DocumentMessage::Export {
+                        extension,
+                        result: Ok(()),
+                    } => {
+                        self.status = match self.locale {
+                            Locale::English => format!("Plan {extension} exported"),
+                            Locale::Korean => format!("계획 {extension}을 내보냈습니다"),
+                        };
+                    }
+                }
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                if let Some(task) = self.document_task.take() {
+                    task.finish();
+                }
+                self.status = self
+                    .locale
+                    .text(
+                        "Plan document task ended unexpectedly",
+                        "계획 문서 작업이 예기치 않게 종료되었습니다",
+                    )
+                    .to_owned();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+        if self.document_task.is_some() {
+            context.request_repaint_after(PLANNING_POLL_INTERVAL);
         }
     }
 
@@ -4494,6 +4606,7 @@ impl RenamewrightApp {
         self.apply_appearance(ui.ctx());
         self.poll_planning(ui.ctx());
         self.poll_ledger(ui.ctx());
+        self.poll_document(ui.ctx());
         self.poll_mutation(ui.ctx());
         let add_folder_shortcut = egui::KeyboardShortcut::new(
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
@@ -4676,6 +4789,9 @@ impl Drop for RenamewrightApp {
         if let Some(task) = self.ledger_task.take() {
             task.finish();
         }
+        if let Some(task) = self.document_task.take() {
+            task.finish();
+        }
     }
 }
 
@@ -4820,6 +4936,16 @@ mod tests {
         while app.ledger_task.is_some() {
             app.poll_ledger(&context);
             assert!(Instant::now() < deadline, "ledger task did not settle");
+            thread::yield_now();
+        }
+    }
+
+    fn settle_document(app: &mut RenamewrightApp) {
+        let context = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.document_task.is_some() {
+            app.poll_document(&context);
+            assert!(Instant::now() < deadline, "document task did not settle");
             thread::yield_now();
         }
     }
@@ -5558,6 +5684,8 @@ mod tests {
         assert_eq!(plan.blocked_count(), 1);
         assert!(plan.rows()[0].diagnostics().contains(&"reservedName"));
         app.inspect_plan(true);
+        assert!(app.document_task.is_some());
+        settle_document(&mut app);
         let inspection = app
             .inspection
             .as_ref()

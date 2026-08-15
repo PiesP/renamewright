@@ -348,6 +348,9 @@ impl JournalWriter {
         &mut self,
         record: &JournalRecord,
     ) -> Result<(), JournalStorageError> {
+        // Prepared is already durable before the rename. If the process stops
+        // before the next durable boundary flushes this completion, replay sees
+        // the prepared-only step and requires identity-based reconciliation.
         self.appender.append_buffered_completion(record)
     }
 
