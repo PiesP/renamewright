@@ -32,6 +32,9 @@ opt-level = "s"
 panic = "abort"
 strip = "symbols"
 
+[profile.release.package.renamewright-app]
+opt-level = 3
+
 [profile.release.package.renamewright-application]
 opt-level = 3
 

@@ -60,10 +60,30 @@ fn repository_has_one_rust_owned_product_shell() {
 }
 
 #[test]
-fn production_ui_keeps_default_fonts_and_adds_korean_as_fallback() {
+fn production_ui_embeds_one_base_font_and_adds_korean_as_fallback() {
     assert!(
-        APP_MANIFEST.contains("\"default_fonts\""),
-        "the production eframe feature set must include egui's built-in glyph fonts"
+        !APP_MANIFEST.contains("\"default_fonts\""),
+        "the production binary must not retain egui's complete default font bundle"
+    );
+    assert!(
+        APP_MANIFEST.contains("epaint_default_fonts = \"0.36.1\""),
+        "the production binary must retain one deterministic embedded base font"
+    );
+    assert!(
+        APP_MAIN.contains("install_base_fonts(&creation_context.egui_ctx)"),
+        "the base font must be installed before the first application frame"
+    );
+    assert!(
+        APP_SOURCE.contains("epaint_default_fonts::UBUNTU_LIGHT"),
+        "the compact font setup must use the audited Ubuntu font dependency"
+    );
+    assert!(
+        APP_SOURCE.contains("let mut fonts = FontDefinitions::empty()"),
+        "the embedded base font must replace the disabled default bundle deterministically"
+    );
+    assert!(
+        APP_SOURCE.contains("context.set_fonts(base_font_definitions())"),
+        "the embedded base font definitions must be installed before application rendering"
     );
     assert!(
         APP_SOURCE.contains("context.add_font(FontInsert::new("),
@@ -73,10 +93,22 @@ fn production_ui_keeps_default_fonts_and_adds_korean_as_fallback() {
         APP_SOURCE.contains("priority: FontPriority::Lowest"),
         "the system Korean font must remain a fallback behind the built-in fonts"
     );
-    assert!(!APP_SOURCE.contains("FontDefinitions::empty()"));
-    assert!(!APP_SOURCE.contains("context.set_fonts(fonts)"));
+    assert!(
+        APP_SOURCE.contains("C:\\\\Windows\\\\Fonts\\\\seguiemj.ttf")
+            && APP_SOURCE.contains("system-emoji"),
+        "emoji filenames must retain an operating-system fallback after bundle reduction"
+    );
     assert!(CARGO_POLICY.contains("\"OFL-1.1\""));
     assert!(CARGO_POLICY.contains("\"Ubuntu-font-1.0\""));
+}
+
+#[test]
+fn release_profile_optimizes_the_ui_hot_path_without_expanding_all_dependencies() {
+    assert!(
+        ROOT_MANIFEST
+            .contains("[profile.release]\ncodegen-units = 1\nlto = \"fat\"\nopt-level = \"s\"")
+    );
+    assert!(ROOT_MANIFEST.contains("[profile.release.package.renamewright-app]\nopt-level = 3"));
 }
 
 #[test]

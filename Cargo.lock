@@ -957,7 +957,6 @@ dependencies = [
  "bytemuck",
  "ecolor",
  "emath",
- "epaint_default_fonts",
  "font-types",
  "harfrust",
  "log",
@@ -2401,6 +2400,7 @@ dependencies = [
  "egui_inspection",
  "egui_kittest",
  "embed-resource",
+ "epaint_default_fonts",
  "kittest",
  "pico-args",
  "renamewright-application",
@@ -2409,6 +2409,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "skrifa",
  "tempfile",
 ]
 
