@@ -154,10 +154,11 @@ repository does not contain.
 These exclusions are not suppression authority for a concrete invariant
 violation. Validate source, reachability, and impact for each candidate.
 
-## Known limitations and accepted pre-release risk
+## Known limitations and accepted release risk
 
-- No stable release is supported yet. Review the exact commit and artifact SHA.
-- Portable acceptance artifacts are explicitly disclosed as unsigned.
+- Only the latest public native release and the current `master` line receive
+  security fixes. Review the exact source SHA and artifact checksums.
+- Public portable and acceptance artifacts are explicitly disclosed as unsigned.
   SignPath Foundation is the selected future signing path, subject to external
   project acceptance and trusted-build configuration. Never infer a signature
   from checksums alone.

@@ -28,7 +28,9 @@ environment and are not implied by ordinary CI success:
 - ReFS behavior, code signing, SmartScreen reputation, and signed-artifact
   provenance.
 
-For the Stage 6H cutover these manual checks are intentionally skipped. A release
-must bind any later evidence to the exact source SHA and artifact digest, keep
-untested configurations explicit, and never infer ReFS, signing, or full visual
-matrix coverage from hosted Windows tests.
+The native cutover did not complete this full external manual matrix. Publishing
+version `0.2.0` adds source-bound packaging, checksum, SBOM, and public-release
+verification; it does not close or imply the interactive gaps above. Any later
+evidence must bind to the exact source SHA and artifact digest, keep untested
+configurations explicit, and never infer ReFS, signing, or full visual matrix
+coverage from hosted Windows tests.
