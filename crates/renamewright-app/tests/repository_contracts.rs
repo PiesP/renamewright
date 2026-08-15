@@ -361,6 +361,37 @@ fn portable_release_excludes_automation_and_binds_evidence() {
 }
 
 #[test]
+fn tagged_portable_release_is_published_with_scoped_write_permission() {
+    assert!(RELEASE_WORKFLOW.contains("permissions:\n  contents: read"));
+
+    let publish_job = RELEASE_WORKFLOW
+        .split_once("\n  publish:\n")
+        .map_or("", |(_, publish_job)| publish_job);
+    for required in [
+        "if: github.ref_type == 'tag'",
+        "needs: portable",
+        "actions: read",
+        "contents: write",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "sha256sum --check SHA256SUMS.txt",
+        "gh release create",
+        "release/*",
+        "--verify-tag",
+        "--generate-notes",
+        "--fail-on-no-commits",
+        "--latest",
+        "SHA256SUMS.txt",
+        "unsigned",
+    ] {
+        assert!(
+            publish_job.contains(required),
+            "release publisher omitted {required}"
+        );
+    }
+    assert!(!RELEASE_WORKFLOW.contains("permissions:\n  contents: write"));
+}
+
+#[test]
 fn portable_windows_build_statically_links_the_msvc_runtime() {
     assert!(CARGO_CONFIG.contains("[target.x86_64-pc-windows-msvc]"));
     assert!(CARGO_CONFIG.contains("target-feature=+crt-static"));
