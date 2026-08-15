@@ -103,6 +103,15 @@ fn production_ui_embeds_one_base_font_and_adds_korean_as_fallback() {
 }
 
 #[test]
+fn release_profile_optimizes_the_ui_hot_path_without_expanding_all_dependencies() {
+    assert!(
+        ROOT_MANIFEST
+            .contains("[profile.release]\ncodegen-units = 1\nlto = \"fat\"\nopt-level = \"s\"")
+    );
+    assert!(ROOT_MANIFEST.contains("[profile.release.package.renamewright-app]\nopt-level = 3"));
+}
+
+#[test]
 fn hosted_gates_are_cargo_only() {
     let workflows = [CI_WORKFLOW, SECURITY_WORKFLOW, ACCEPTANCE_WORKFLOW];
     for workflow in workflows {
