@@ -1882,6 +1882,8 @@ pub struct PlanRowDto {
     status: &'static str,
     diagnostics: Vec<&'static str>,
     override_applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_changed_rule_id: Option<u64>,
 }
 
 impl PlanDto {
@@ -1950,6 +1952,11 @@ impl PlanRowDto {
     #[must_use]
     pub const fn override_applied(&self) -> bool {
         self.override_applied
+    }
+
+    #[must_use]
+    pub const fn last_changed_rule_id(&self) -> Option<u64> {
+        self.last_changed_rule_id
     }
 }
 
@@ -2066,7 +2073,7 @@ fn plan_from_snapshot(
         TargetPolicy::windows(),
         &environment,
     );
-    let dto = PlanDto::from(&plan);
+    let dto = PlanDto::from_plan(&plan, &compiled.active_rule_ids);
     let registry = state
         .registry
         .lock()
@@ -2264,24 +2271,47 @@ pub fn prepare_latest_execution<'a, F: ExecutionFileSystem + ?Sized>(
 
 impl From<&RenamePlan> for PlanDto {
     fn from(plan: &RenamePlan) -> Self {
+        Self::from_plan(plan, &[])
+    }
+}
+
+impl PlanDto {
+    fn from_plan(plan: &RenamePlan, active_rule_ids: &[u64]) -> Self {
         Self {
             plan_id: plan.id().value(),
             generation: plan.generation(),
             rows: plan
                 .rows()
                 .iter()
-                .map(|row| PlanRowDto {
-                    source_id: row.source_id().value(),
-                    entry_kind: entry_kind_name(row.entry_kind()),
-                    original_name: row.original_display_shared(),
-                    proposed_name: row.proposed_display_shared(),
-                    status: status_name(row.status()),
-                    diagnostics: row
-                        .diagnostics()
-                        .iter()
-                        .map(|diagnostic| diagnostic_name(diagnostic.code()))
-                        .collect(),
-                    override_applied: row.override_applied(),
+                .map(|row| {
+                    let trace_reached_last_rule = row.trace().last().is_some_and(|step| {
+                        step.rule_index().checked_add(1) == Some(active_rule_ids.len())
+                    });
+                    let last_changed_rule_id = (!row.override_applied()
+                        && !row.trace_truncated()
+                        && trace_reached_last_rule)
+                        .then(|| {
+                            row.trace()
+                                .iter()
+                                .rev()
+                                .find(|step| step.before() != step.after())
+                                .and_then(|step| active_rule_ids.get(step.rule_index()).copied())
+                        })
+                        .flatten();
+                    PlanRowDto {
+                        source_id: row.source_id().value(),
+                        entry_kind: entry_kind_name(row.entry_kind()),
+                        original_name: row.original_display_shared(),
+                        proposed_name: row.proposed_display_shared(),
+                        status: status_name(row.status()),
+                        diagnostics: row
+                            .diagnostics()
+                            .iter()
+                            .map(|diagnostic| diagnostic_name(diagnostic.code()))
+                            .collect(),
+                        override_applied: row.override_applied(),
+                        last_changed_rule_id,
+                    }
                 })
                 .collect(),
             changed_count: plan.changed_count(),
@@ -3164,6 +3194,7 @@ mod tests {
         assert_eq!(row.status(), "changed");
         assert!(row.diagnostics().is_empty());
         assert!(!row.override_applied());
+        assert_eq!(row.last_changed_rule_id(), Some(1));
         assert!(row.source_id() > 0);
         let stored = state.latest_plan.lock().map_err(|_| "plan lock failed")?;
         let core_name = stored
@@ -3817,9 +3848,10 @@ mod tests {
         );
         assert_eq!(row.trace().len(), 1);
 
-        let dto = PlanDto::from(&plan);
+        let dto = PlanDto::from_plan(&plan, &compiled.active_rule_ids);
         assert_eq!(dto.rows[0].status, "blocked");
         assert_eq!(dto.rows[0].diagnostics, vec!["nameTooLong"]);
+        assert_eq!(dto.rows[0].last_changed_rule_id, None);
         Ok(())
     }
 

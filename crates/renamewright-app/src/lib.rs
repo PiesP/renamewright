@@ -2066,16 +2066,18 @@ fn rule_editor(
 enum PlanFilter {
     All,
     Changed,
+    Unchanged,
     Blocked,
 }
 
 impl PlanFilter {
-    const ALL: [Self; 3] = [Self::All, Self::Changed, Self::Blocked];
+    const ALL: [Self; 4] = [Self::All, Self::Changed, Self::Unchanged, Self::Blocked];
 
     const fn label(self, locale: Locale) -> &'static str {
         match self {
             Self::All => locale.text(semantics::FILTER_ALL, "전체"),
             Self::Changed => locale.text(semantics::FILTER_CHANGED, "변경됨"),
+            Self::Unchanged => locale.text("Unchanged", "변경 없음"),
             Self::Blocked => locale.text(semantics::FILTER_BLOCKED, "차단됨"),
         }
     }
@@ -2091,6 +2093,8 @@ pub struct RenamewrightApp {
     source_query: String,
     filter: PlanFilter,
     diagnostic_filter: DiagnosticFilter,
+    selected_preview_row: Option<usize>,
+    preview_focus_requested: bool,
     selected_rule: usize,
     rule_editor_open: bool,
     focused_rule_id: Option<u64>,
@@ -2262,6 +2266,8 @@ impl RenamewrightApp {
             source_query: String::new(),
             filter: PlanFilter::All,
             diagnostic_filter: DiagnosticFilter::All,
+            selected_preview_row: None,
+            preview_focus_requested: false,
             selected_rule: 0,
             rule_editor_open: has_initial_rule,
             focused_rule_id: None,
@@ -2412,6 +2418,7 @@ impl RenamewrightApp {
                     let matches_filter = match self.filter {
                         PlanFilter::All => true,
                         PlanFilter::Changed => row.status() == "changed",
+                        PlanFilter::Unchanged => row.status() == "unchanged",
                         PlanFilter::Blocked => row.status() == "blocked",
                     };
                     let matches_query = query.is_empty()
@@ -2428,7 +2435,9 @@ impl RenamewrightApp {
                 } else if self.synthetic_fixture {
                     let blocked = Self::row_is_blocked(*index);
                     let matches_filter = match self.filter {
-                        PlanFilter::All | PlanFilter::Changed => true,
+                        PlanFilter::All => true,
+                        PlanFilter::Changed => !blocked,
+                        PlanFilter::Unchanged => false,
                         PlanFilter::Blocked => blocked,
                     };
                     let matches_query = query.is_empty()
@@ -2758,6 +2767,45 @@ impl RenamewrightApp {
         }
         self.refresh_plan();
         true
+    }
+
+    fn focus_rule(&mut self, rule_id: u64) {
+        let Some(index) = self.rules.iter().position(|rule| rule.rule_id() == rule_id) else {
+            return;
+        };
+        self.selected_rule = index;
+        self.rule_editor_open = true;
+        self.focused_rule_id = Some(rule_id);
+        self.draft_rule_id = None;
+        self.draft_rule_changed = false;
+    }
+
+    fn open_override_for_row(&mut self, row_index: usize) {
+        let Some((source_id, original_name)) = self.plan.as_ref().and_then(|plan| {
+            plan.rows()
+                .get(row_index)
+                .map(|row| (row.source_id(), row.original_name().to_owned()))
+        }) else {
+            return;
+        };
+        let value = self
+            .overrides
+            .get(&source_id)
+            .cloned()
+            .unwrap_or_else(|| original_name.clone());
+        self.override_editor = Some(OverrideEditor {
+            source_id,
+            original_name,
+            value,
+        });
+    }
+
+    fn select_preview_filter(&mut self, filter: PlanFilter) {
+        self.filter = filter;
+        self.diagnostic_filter = DiagnosticFilter::All;
+        self.source_query.clear();
+        self.selected_preview_row = None;
+        self.preview_focus_requested = true;
     }
 
     fn synthetic_prefix(&self) -> &str {
@@ -4104,6 +4152,12 @@ impl RenamewrightApp {
 
     fn show_preview(&mut self, ui: &mut egui::Ui) {
         let visible = self.visible_indices();
+        if self.preview_focus_requested {
+            self.selected_preview_row = visible.first().copied();
+            if self.selected_preview_row.is_none() {
+                self.preview_focus_requested = false;
+            }
+        }
         let kind_width = if self.appearance.show_kind {
             PREVIEW_KIND_COLUMN_WIDTH
         } else {
@@ -4140,7 +4194,7 @@ impl RenamewrightApp {
                     .selectable_label(self.filter == candidate, candidate.label(self.locale))
                     .clicked()
                 {
-                    self.filter = candidate;
+                    self.select_preview_filter(candidate);
                 }
             }
             ui.separator();
@@ -4216,7 +4270,11 @@ impl RenamewrightApp {
                     );
                 });
                 ui.separator();
-                let mut requested_override = None;
+                let mut requested_override_row = None;
+                let mut requested_rule = None;
+                let mut selected_preview_row = self.selected_preview_row;
+                let request_preview_focus = self.preview_focus_requested;
+                let mut preview_focus_fulfilled = false;
                 ScrollArea::vertical()
                     .id_salt("preview.rows")
                     .auto_shrink([false, false])
@@ -4235,6 +4293,7 @@ impl RenamewrightApp {
                                     status,
                                     diagnostics,
                                     blocked,
+                                    last_changed_rule_id,
                                 ) = self.plan.as_ref().map_or_else(
                                     || {
                                         let source = format!("IMG_{index:05}.jpg");
@@ -4259,6 +4318,7 @@ impl RenamewrightApp {
                                             }
                                             .to_owned(),
                                             blocked,
+                                            None,
                                         )
                                     },
                                     |plan| {
@@ -4281,78 +4341,156 @@ impl RenamewrightApp {
                                                 .collect::<Vec<_>>()
                                                 .join(", "),
                                             row.status() == "blocked",
+                                            row.last_changed_rule_id(),
                                         )
                                     },
                                 );
-                                ui.push_id(index, |ui| {
-                                    ui.horizontal(|ui| {
-                                        if self.appearance.show_kind {
-                                            preview_column_label(
-                                                ui,
-                                                PREVIEW_KIND_COLUMN_WIDTH,
-                                                match entry_kind {
-                                                    "directory" => {
-                                                        self.locale.text("Folder", "폴더")
-                                                    }
-                                                    "symlink" => self.locale.text("Link", "링크"),
-                                                    _ => self.locale.text("File", "파일"),
-                                                },
-                                            );
-                                        }
-                                        preview_column_label(
-                                            ui,
-                                            source_column_width,
-                                            source.as_ref(),
-                                        );
-                                        preview_column_label(
-                                            ui,
-                                            proposed_column_width,
-                                            proposed.as_ref(),
-                                        );
-                                        let color = if blocked {
-                                            self.palette.blocked
-                                        } else {
-                                            self.palette.accent
-                                        };
-                                        preview_column_label(
-                                            ui,
-                                            PREVIEW_STATUS_COLUMN_WIDTH,
-                                            RichText::new(status).color(color).strong(),
-                                        );
-                                        if self.appearance.show_diagnostics || blocked {
-                                            ui.label(diagnostics);
-                                        }
-                                        if let Some(source_id) = source_id
-                                            && ui
-                                                .small_button(
-                                                    if self.overrides.contains_key(&source_id) {
-                                                        self.locale
-                                                            .text("Edit override", "재정의 편집")
-                                                    } else {
-                                                        self.locale.text("Override", "재정의")
-                                                    },
-                                                )
-                                                .clicked()
-                                        {
-                                            requested_override =
-                                                Some((source_id, source.into_owned()));
-                                        }
+                                let related_rule_position =
+                                    last_changed_rule_id.and_then(|rule_id| {
+                                        self.rules
+                                            .iter()
+                                            .position(|rule| rule.rule_id() == rule_id)
+                                            .map(|position| (rule_id, position + 1))
                                     });
+                                ui.push_id(index, |ui| {
+                                    let selected = selected_preview_row == Some(index);
+                                    let row_rect = egui::Rect::from_min_size(
+                                        ui.cursor().min,
+                                        egui::vec2(
+                                            ui.available_width(),
+                                            self.appearance.density.preview_row_height(),
+                                        ),
+                                    );
+                                    let row_response = ui.interact(
+                                        row_rect,
+                                        ui.id().with("preview-row"),
+                                        egui::Sense::click(),
+                                    );
+                                    egui::Frame::new()
+                                        .fill(if selected {
+                                            self.palette.accent_soft
+                                        } else {
+                                            Color32::TRANSPARENT
+                                        })
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                if self.appearance.show_kind {
+                                                    preview_column_label(
+                                                        ui,
+                                                        PREVIEW_KIND_COLUMN_WIDTH,
+                                                        match entry_kind {
+                                                            "directory" => {
+                                                                self.locale.text("Folder", "폴더")
+                                                            }
+                                                            "symlink" => {
+                                                                self.locale.text("Link", "링크")
+                                                            }
+                                                            _ => self.locale.text("File", "파일"),
+                                                        },
+                                                    );
+                                                }
+                                                preview_column_label(
+                                                    ui,
+                                                    source_column_width,
+                                                    source.as_ref(),
+                                                );
+                                                preview_column_label(
+                                                    ui,
+                                                    proposed_column_width,
+                                                    proposed.as_ref(),
+                                                );
+                                                let color = if blocked {
+                                                    self.palette.blocked
+                                                } else {
+                                                    self.palette.accent
+                                                };
+                                                preview_column_label(
+                                                    ui,
+                                                    PREVIEW_STATUS_COLUMN_WIDTH,
+                                                    RichText::new(status).color(color).strong(),
+                                                );
+                                                if self.appearance.show_diagnostics || blocked {
+                                                    ui.label(&diagnostics);
+                                                }
+                                                if let Some((rule_id, position)) =
+                                                    related_rule_position
+                                                    && !diagnostics.is_empty()
+                                                    && ui
+                                                        .small_button(match self.locale {
+                                                            Locale::English => {
+                                                                format!("Related rule {position}")
+                                                            }
+                                                            Locale::Korean => {
+                                                                format!("관련 규칙 {position}")
+                                                            }
+                                                        })
+                                                        .clicked()
+                                                {
+                                                    requested_rule = Some(rule_id);
+                                                }
+                                                if let Some(source_id) = source_id
+                                                    && ui
+                                                        .small_button(
+                                                            if self
+                                                                .overrides
+                                                                .contains_key(&source_id)
+                                                            {
+                                                                self.locale.text(
+                                                                    "Edit override",
+                                                                    "재정의 편집",
+                                                                )
+                                                            } else {
+                                                                self.locale
+                                                                    .text("Override", "재정의")
+                                                            },
+                                                        )
+                                                        .clicked()
+                                                {
+                                                    requested_override_row = Some(index);
+                                                }
+                                            });
+                                        });
+                                    row_response.widget_info(|| {
+                                        egui::WidgetInfo::selected(
+                                            egui::WidgetType::SelectableLabel,
+                                            true,
+                                            selected,
+                                            format!("Preview row {}", source.as_ref()),
+                                        )
+                                    });
+                                    if row_response.clicked() {
+                                        selected_preview_row = Some(index);
+                                        row_response.request_focus();
+                                    }
+                                    if request_preview_focus && selected {
+                                        row_response.scroll_to_me(Some(Align::Center));
+                                        row_response.request_focus();
+                                        preview_focus_fulfilled = true;
+                                    }
+                                    if source_id.is_some()
+                                        && (row_response.double_clicked()
+                                            || (row_response.clicked() && selected)
+                                            || (selected
+                                                && row_response.has_focus()
+                                                && ui.ctx().input(|input| {
+                                                    input.key_pressed(egui::Key::Enter)
+                                                })))
+                                    {
+                                        requested_override_row = Some(index);
+                                    }
                                 });
                             }
                         },
                     );
-                if let Some((source_id, original_name)) = requested_override {
-                    let value = self
-                        .overrides
-                        .get(&source_id)
-                        .cloned()
-                        .unwrap_or_else(|| original_name.clone());
-                    self.override_editor = Some(OverrideEditor {
-                        source_id,
-                        original_name,
-                        value,
-                    });
+                self.selected_preview_row = selected_preview_row;
+                if preview_focus_fulfilled {
+                    self.preview_focus_requested = false;
+                }
+                if let Some(row_index) = requested_override_row {
+                    self.open_override_for_row(row_index);
+                }
+                if let Some(rule_id) = requested_rule {
+                    self.focus_rule(rule_id);
                 }
             });
     }
@@ -4434,18 +4572,22 @@ impl RenamewrightApp {
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(
-                    RichText::new(match self.locale {
-                        Locale::English => format!(
-                            "Total {total_count} · Changed {changed_count} · Unchanged {unchanged_count} · Blocked {blocked_count}"
-                        ),
-                        Locale::Korean => format!(
-                            "전체 {total_count} · 변경 {changed_count} · 변경 없음 {unchanged_count} · 차단 {blocked_count}"
-                        ),
-                    })
-                    .strong()
-                    .color(self.palette.ink),
-                );
+                ui.horizontal_wrapped(|ui| {
+                    for (filter, count) in [
+                        (PlanFilter::All, total_count),
+                        (PlanFilter::Changed, changed_count),
+                        (PlanFilter::Unchanged, unchanged_count),
+                        (PlanFilter::Blocked, blocked_count),
+                    ] {
+                        let label = format!("{} {count}", filter.label(self.locale));
+                        if ui
+                            .selectable_label(self.filter == filter, RichText::new(label).strong())
+                            .clicked()
+                        {
+                            self.select_preview_filter(filter);
+                        }
+                    }
+                });
                 ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -4460,13 +4602,11 @@ impl RenamewrightApp {
                 };
                 let apply = ui.add_enabled(can_apply, egui::Button::new(apply_text));
                 apply.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Button,
-                        can_apply,
-                        semantics::APPLY,
-                    )
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, can_apply, semantics::APPLY)
                 });
-                if apply.clicked() && let Some(plan) = &self.plan {
+                if apply.clicked()
+                    && let Some(plan) = &self.plan
+                {
                     self.pending_confirmation = Some(PendingConfirmation::Apply {
                         plan_id: plan.plan_id(),
                         changed_count: plan.changed_count(),
@@ -5331,6 +5471,104 @@ mod tests {
 
         harness.get_by_label("Add files or folder entries");
         harness.get_by_label("Release to add 2 entries");
+    }
+
+    #[test]
+    fn selected_preview_row_opens_its_override_with_enter() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        harness.get_by_label("Preview row report.txt").click();
+        harness.run_ok();
+        assert_eq!(harness.state().selected_preview_row, Some(0));
+        harness.key_press(egui::Key::Enter);
+        harness.run_ok();
+
+        harness.get_by_label("Filename override");
+        assert_eq!(
+            harness
+                .state()
+                .override_editor
+                .as_ref()
+                .map(|editor| editor.original_name.as_str()),
+            Some("report.txt")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preview_row_double_click_opens_its_override() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        let row = harness.get_by_label("Preview row report.txt");
+        row.click();
+        row.click();
+        harness.run_ok();
+
+        assert!(harness.state().override_editor.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn review_count_chip_filters_and_focuses_the_first_matching_row() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), RenamewrightApp::new(false));
+
+        harness.get_by_label("Blocked 10").click();
+        harness.run_ok();
+
+        assert_eq!(harness.state().filter, PlanFilter::Blocked);
+        assert_eq!(harness.state().selected_preview_row, Some(997));
+        harness.get_by_label("10 shown");
+        harness.get_by_label("Preview row IMG_00997.jpg");
+    }
+
+    #[test]
+    fn blocked_diagnostic_navigates_to_the_last_changed_rule() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.rules = vec![RuleRequestDto::LiteralReplace {
+            rule_id: 7,
+            enabled: true,
+            search: "report".to_owned(),
+            replacement: "CON".to_owned(),
+        }];
+        app.next_rule_id = 8;
+        app.admit_sources(vec![source]);
+        assert_eq!(
+            app.plan
+                .as_ref()
+                .and_then(|plan| plan.rows()[0].last_changed_rule_id()),
+            Some(7)
+        );
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        harness.get_by_label("Related rule 1").click();
+        harness.run_ok();
+
+        assert!(harness.state().rule_editor_open);
+        assert_eq!(harness.state().selected_rule, 0);
+        Ok(())
     }
 
     #[test]
