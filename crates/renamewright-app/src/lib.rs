@@ -35,6 +35,7 @@ const PREVIEW_KIND_COLUMN_WIDTH: f32 = 70.0;
 const PREVIEW_SOURCE_COLUMN_WIDTH: f32 = 130.0;
 const PREVIEW_PROPOSED_COLUMN_WIDTH: f32 = 180.0;
 const PREVIEW_STATUS_COLUMN_WIDTH: f32 = 80.0;
+const PREVIEW_COLUMN_RESIZE_HANDLE_WIDTH: f32 = 8.0;
 const APPEARANCE_STORAGE_KEY: &str = "renamewright.appearance.v1";
 const MUTATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PLANNING_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -56,6 +57,23 @@ fn preview_column_label(
         },
     )
     .inner
+}
+
+fn adjacent_selection_index(
+    item_count: usize,
+    current_index: Option<usize>,
+    direction: i8,
+) -> Option<usize> {
+    if item_count == 0 {
+        return None;
+    }
+    match (current_index, direction) {
+        (Some(index), -1) => Some(index.saturating_sub(1)),
+        (Some(index), 1) => Some(index.saturating_add(1).min(item_count - 1)),
+        (None, -1 | 1) => Some(0),
+        (Some(index), _) => Some(index.min(item_count - 1)),
+        (None, _) => None,
+    }
 }
 
 pub mod semantics {
@@ -87,6 +105,7 @@ pub mod semantics {
     pub const MOVE_RULE_DOWN: &str = "Move rule down";
     pub const DRAG_RULE: &str = "Drag rule";
     pub const REMOVE_RULE: &str = "Remove rule";
+    pub const EXCLUDE_SOURCE: &str = "Remove from plan";
     pub const ENABLE_RULE: &str = "Enable rule";
     pub const LANGUAGE: &str = "Language";
     pub const APPEARANCE: &str = "Appearance";
@@ -992,6 +1011,7 @@ struct AppearancePreferences {
     density: InterfaceDensity,
     show_kind: bool,
     show_diagnostics: bool,
+    preview_source_column_width: Option<u16>,
 }
 
 impl Default for AppearancePreferences {
@@ -1003,6 +1023,7 @@ impl Default for AppearancePreferences {
             density: InterfaceDensity::Standard,
             show_kind: true,
             show_diagnostics: true,
+            preview_source_column_width: None,
         }
     }
 }
@@ -2095,6 +2116,7 @@ pub struct RenamewrightApp {
     diagnostic_filter: DiagnosticFilter,
     selected_preview_row: Option<usize>,
     preview_focus_requested: bool,
+    source_query_focus_requested: bool,
     selected_rule: usize,
     rule_editor_open: bool,
     focused_rule_id: Option<u64>,
@@ -2268,6 +2290,7 @@ impl RenamewrightApp {
             diagnostic_filter: DiagnosticFilter::All,
             selected_preview_row: None,
             preview_focus_requested: false,
+            source_query_focus_requested: false,
             selected_rule: 0,
             rule_editor_open: has_initial_rule,
             focused_rule_id: None,
@@ -2769,6 +2792,22 @@ impl RenamewrightApp {
         true
     }
 
+    fn move_selected_rule(&mut self, direction: i8) -> bool {
+        let Some(rule_id) = self
+            .rules
+            .get(self.selected_rule)
+            .map(RuleRequestDto::rule_id)
+        else {
+            return false;
+        };
+        let insertion_index = match direction {
+            -1 if self.selected_rule > 0 => self.selected_rule - 1,
+            1 if self.selected_rule + 1 < self.rules.len() => self.selected_rule + 2,
+            _ => return false,
+        };
+        self.move_rule_to_insertion(rule_id, insertion_index)
+    }
+
     fn focus_rule(&mut self, rule_id: u64) {
         let Some(index) = self.rules.iter().position(|rule| rule.rule_id() == rule_id) else {
             return;
@@ -2798,6 +2837,53 @@ impl RenamewrightApp {
             original_name,
             value,
         });
+    }
+
+    fn exclude_source_for_row(&mut self, row_index: usize) {
+        let Some(source_id) = self
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.rows().get(row_index))
+            .map(|row| row.source_id())
+        else {
+            return;
+        };
+        self.supersede_pending_plan_refresh();
+        let previous_override = self.overrides.remove(&source_id);
+        let request = self.rule_request();
+        match self
+            .application
+            .exclude_sources_with_rules(&[source_id], request)
+        {
+            Ok(plan) => {
+                self.status = match self.locale {
+                    Locale::English => format!(
+                        "Removed 1 entry from the plan · {}",
+                        self.plan_status(&plan)
+                    ),
+                    Locale::Korean => {
+                        format!("계획에서 항목 1개 제거 · {}", self.plan_status(&plan))
+                    }
+                };
+                self.plan = Some(plan);
+                self.plan_is_current = true;
+                self.selected_preview_row = None;
+            }
+            Err(error) => {
+                if let Some(previous_override) = previous_override {
+                    self.overrides.insert(source_id, previous_override);
+                }
+                self.plan_is_current = false;
+                self.status = format!(
+                    "{} ({})",
+                    self.locale.text(
+                        "The entry could not be removed from the plan",
+                        "계획에서 항목을 제거하지 못했습니다",
+                    ),
+                    error.code()
+                );
+            }
+        }
     }
 
     fn select_preview_filter(&mut self, filter: PlanFilter) {
@@ -3240,7 +3326,41 @@ impl RenamewrightApp {
             return;
         }
 
+        ui.label(
+            RichText::new(self.locale.text(
+                "Up/Down: select · Enter: inspect available action",
+                "위/아래: 선택 · Enter: 가능한 작업 검사",
+            ))
+            .color(self.palette.ink_soft),
+        );
+        let move_selection_up = ui
+            .ctx()
+            .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+        let move_selection_down = ui
+            .ctx()
+            .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+        let inspect_selection = ui
+            .ctx()
+            .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         let mut selected = self.selected_ledger_id;
+        let current_index = selected.and_then(|ledger_id| {
+            self.ledger
+                .iter()
+                .position(|entry| entry.ledger_id() == ledger_id)
+        });
+        let direction = if move_selection_down {
+            1
+        } else if move_selection_up {
+            -1
+        } else {
+            0
+        };
+        if let Some(next_index) =
+            adjacent_selection_index(self.ledger.len(), current_index, direction)
+            && direction != 0
+        {
+            selected = self.ledger.get(next_index).map(LedgerEntryDto::ledger_id);
+        }
         ScrollArea::vertical().max_height(240.0).show_rows(
             ui,
             self.appearance.density.preview_row_height(),
@@ -3296,6 +3416,13 @@ impl RenamewrightApp {
                 self.inspect_selected_undo();
             }
         });
+        if inspect_selection && mutation_idle {
+            if undo_available {
+                self.inspect_selected_undo();
+            } else if recovery_available {
+                self.inspect_selected_recovery();
+            }
+        }
 
         if let Some(inspection) = &self.recovery_inspection {
             ui.separator();
@@ -3895,8 +4022,12 @@ impl RenamewrightApp {
                                         {
                                             selected_rule = Some(index);
                                         }
-                                        let move_up =
-                                            ui.add_enabled(index > 0, egui::Button::new("←"));
+                                        let move_up = ui
+                                            .add_enabled(index > 0, egui::Button::new("←"))
+                                            .on_hover_text(self.locale.text(
+                                                "Move earlier (Alt+Left)",
+                                                "앞으로 이동 (Alt+왼쪽)",
+                                            ));
                                         move_up.widget_info(|| {
                                             egui::WidgetInfo::labeled(
                                                 egui::WidgetType::Button,
@@ -3910,10 +4041,15 @@ impl RenamewrightApp {
                                         if move_up.clicked() {
                                             move_rule = Some((index, index - 1));
                                         }
-                                        let move_down = ui.add_enabled(
-                                            index + 1 < self.rules.len(),
-                                            egui::Button::new("→"),
-                                        );
+                                        let move_down = ui
+                                            .add_enabled(
+                                                index + 1 < self.rules.len(),
+                                                egui::Button::new("→"),
+                                            )
+                                            .on_hover_text(self.locale.text(
+                                                "Move later (Alt+Right)",
+                                                "뒤로 이동 (Alt+오른쪽)",
+                                            ));
                                         move_down.widget_info(|| {
                                             egui::WidgetInfo::labeled(
                                                 egui::WidgetType::Button,
@@ -4170,10 +4306,20 @@ impl RenamewrightApp {
         };
         let available_for_names =
             (ui.available_width() - kind_width - PREVIEW_STATUS_COLUMN_WIDTH - diagnostic_width)
-                .max(PREVIEW_SOURCE_COLUMN_WIDTH + PREVIEW_PROPOSED_COLUMN_WIDTH);
-        let source_column_width = (available_for_names * 0.45).max(PREVIEW_SOURCE_COLUMN_WIDTH);
-        let proposed_column_width =
-            (available_for_names - source_column_width).max(PREVIEW_PROPOSED_COLUMN_WIDTH);
+                .max(
+                    PREVIEW_SOURCE_COLUMN_WIDTH
+                        + PREVIEW_PROPOSED_COLUMN_WIDTH
+                        + PREVIEW_COLUMN_RESIZE_HANDLE_WIDTH,
+                )
+                - PREVIEW_COLUMN_RESIZE_HANDLE_WIDTH;
+        let maximum_source_width =
+            (available_for_names - PREVIEW_PROPOSED_COLUMN_WIDTH).max(PREVIEW_SOURCE_COLUMN_WIDTH);
+        let source_column_width = self
+            .appearance
+            .preview_source_column_width
+            .map_or(available_for_names * 0.45, f32::from)
+            .clamp(PREVIEW_SOURCE_COLUMN_WIDTH, maximum_source_width);
+        let proposed_column_width = available_for_names - source_column_width;
         ui.horizontal(|ui| {
             ui.heading(
                 RichText::new(self.locale.text(semantics::PREVIEW_HEADING, "미리보기"))
@@ -4186,6 +4332,13 @@ impl RenamewrightApp {
                 })
                 .color(self.palette.ink_soft),
             );
+            if self.appearance.preview_source_column_width.is_some()
+                && ui
+                    .small_button(self.locale.text("Reset column widths", "열 너비 초기화"))
+                    .clicked()
+            {
+                self.appearance.preview_source_column_width = None;
+            }
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -4214,12 +4367,21 @@ impl RenamewrightApp {
             ui.separator();
             let source_query_label =
                 ui.label(self.locale.text(semantics::SOURCE_QUERY_LABEL, "이름 필터"));
-            ui.add(
-                egui::TextEdit::singleline(&mut self.source_query)
-                    .id_salt("preview.source-query")
-                    .hint_text(self.locale.text("Name contains", "이름에 포함")),
-            )
-            .labelled_by(source_query_label.id);
+            let source_query = ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.source_query)
+                        .id_salt("preview.source-query")
+                        .hint_text(self.locale.text("Name contains", "이름에 포함")),
+                )
+                .labelled_by(source_query_label.id);
+            if self.source_query_focus_requested {
+                source_query.request_focus();
+                self.source_query_focus_requested = false;
+            }
+            source_query.on_hover_text(
+                self.locale
+                    .text("Press / to focus this filter", "/ 키로 이 필터에 포커스"),
+            );
         });
         ui.add_space(8.0);
 
@@ -4245,6 +4407,33 @@ impl RenamewrightApp {
                             .strong()
                             .color(self.palette.ink),
                     );
+                    let resize_handle = ui
+                        .allocate_response(
+                            egui::vec2(PREVIEW_COLUMN_RESIZE_HANDLE_WIDTH, PREVIEW_CELL_HEIGHT),
+                            egui::Sense::drag(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                    resize_handle.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Other,
+                            true,
+                            "Resize source and proposed columns",
+                        )
+                    });
+                    ui.painter().vline(
+                        resize_handle.rect.center().x,
+                        resize_handle.rect.y_range(),
+                        Stroke::new(1.0, self.palette.rule),
+                    );
+                    if resize_handle.dragged() {
+                        let next_width = (source_column_width + resize_handle.drag_delta().x)
+                            .clamp(PREVIEW_SOURCE_COLUMN_WIDTH, maximum_source_width);
+                        self.appearance.preview_source_column_width =
+                            Some(next_width.round() as u16);
+                        ui.ctx().request_repaint();
+                    } else if resize_handle.double_clicked() {
+                        self.appearance.preview_source_column_width = None;
+                    }
                     preview_column_label(
                         ui,
                         proposed_column_width,
@@ -4271,6 +4460,7 @@ impl RenamewrightApp {
                 });
                 ui.separator();
                 let mut requested_override_row = None;
+                let mut requested_exclude_row = None;
                 let mut requested_rule = None;
                 let mut selected_preview_row = self.selected_preview_row;
                 let request_preview_focus = self.preview_focus_requested;
@@ -4394,6 +4584,10 @@ impl RenamewrightApp {
                                                     source_column_width,
                                                     source.as_ref(),
                                                 );
+                                                ui.allocate_space(egui::vec2(
+                                                    PREVIEW_COLUMN_RESIZE_HANDLE_WIDTH,
+                                                    PREVIEW_CELL_HEIGHT,
+                                                ));
                                                 preview_column_label(
                                                     ui,
                                                     proposed_column_width,
@@ -4448,6 +4642,20 @@ impl RenamewrightApp {
                                                 {
                                                     requested_override_row = Some(index);
                                                 }
+                                                if source_id.is_some()
+                                                    && ui
+                                                        .small_button(self.locale.text(
+                                                            semantics::EXCLUDE_SOURCE,
+                                                            "계획에서 제거",
+                                                        ))
+                                                        .on_hover_text(self.locale.text(
+                                                            "Keeps the file or folder unchanged",
+                                                            "파일 또는 폴더는 변경하지 않습니다",
+                                                        ))
+                                                        .clicked()
+                                                {
+                                                    requested_exclude_row = Some(index);
+                                                }
                                             });
                                         });
                                     row_response.widget_info(|| {
@@ -4488,6 +4696,9 @@ impl RenamewrightApp {
                 }
                 if let Some(row_index) = requested_override_row {
                     self.open_override_for_row(row_index);
+                }
+                if let Some(row_index) = requested_exclude_row {
+                    self.exclude_source_for_row(row_index);
                 }
                 if let Some(rule_id) = requested_rule {
                     self.focus_rule(rule_id);
@@ -4928,6 +5139,10 @@ impl RenamewrightApp {
             egui::Key::O,
         );
         let add_files_shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::O);
+        let move_rule_before =
+            egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::ArrowLeft);
+        let move_rule_after =
+            egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::ArrowRight);
         if ui
             .ctx()
             .input_mut(|input| input.consume_shortcut(&add_folder_shortcut))
@@ -4938,6 +5153,24 @@ impl RenamewrightApp {
             .input_mut(|input| input.consume_shortcut(&add_files_shortcut))
         {
             self.choose_files();
+        }
+        if ui
+            .ctx()
+            .input_mut(|input| input.consume_shortcut(&move_rule_before))
+        {
+            self.move_selected_rule(-1);
+        } else if ui
+            .ctx()
+            .input_mut(|input| input.consume_shortcut(&move_rule_after))
+        {
+            self.move_selected_rule(1);
+        }
+        if !ui.ctx().egui_wants_keyboard_input()
+            && ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Slash))
+        {
+            self.source_query_focus_requested = true;
         }
         let hovered_source_count = ui.ctx().input(|input| input.raw.hovered_files.len());
         let dropped_paths = ui.ctx().input(|input| {
@@ -5226,7 +5459,8 @@ mod tests {
         AccentChoice, AppearanceTheme, InterfaceDensity, Locale, MutationTask, NativePalette,
         PLANNING_DEBOUNCE, PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH,
         PendingConfirmation, PlanDto, PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto,
-        install_theme, install_theme_with_density, preview_column_label, semantics,
+        adjacent_selection_index, install_theme, install_theme_with_density, preview_column_label,
+        semantics,
     };
 
     #[derive(Default)]
@@ -5572,6 +5806,115 @@ mod tests {
     }
 
     #[test]
+    fn preview_column_divider_resizes_and_resets_the_view_only() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), RenamewrightApp::new(false));
+        let divider = harness
+            .get_by_label("Resize source and proposed columns")
+            .rect()
+            .center();
+
+        harness.drag_at(divider);
+        harness.run_ok();
+        harness.hover_at(divider + egui::vec2(64.0, 0.0));
+        harness.run_ok();
+        harness.drop_at(divider + egui::vec2(64.0, 0.0));
+        harness.run_ok();
+
+        assert!(
+            harness
+                .state()
+                .appearance
+                .preview_source_column_width
+                .is_some()
+        );
+        harness.get_by_label("Reset column widths").click();
+        harness.run_ok();
+        assert_eq!(harness.state().appearance.preview_source_column_width, None);
+    }
+
+    #[test]
+    fn keyboard_shortcuts_reorder_rules_and_focus_preview_search() {
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.rules = vec![
+            RuleKind::Prefix.create(11),
+            RuleKind::Sequence.create(22),
+            RuleKind::Case.create(33),
+        ];
+        app.selected_rule = 1;
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowLeft);
+        harness.run_ok();
+        assert_eq!(
+            harness
+                .state()
+                .rules
+                .iter()
+                .map(RuleRequestDto::rule_id)
+                .collect::<Vec<_>>(),
+            vec![22, 11, 33]
+        );
+        harness.key_press(egui::Key::Slash);
+        harness.run_ok();
+        assert!(
+            harness
+                .get_by_role_and_label(
+                    egui::accesskit::Role::TextInput,
+                    semantics::SOURCE_QUERY_LABEL,
+                )
+                .accesskit_node()
+                .is_focused()
+        );
+    }
+
+    #[test]
+    fn removing_a_source_from_the_plan_keeps_the_filesystem_entry() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.set_prefix("final-");
+        app.admit_sources(vec![source.clone()]);
+        app.pending_confirmation = Some(PendingConfirmation::Apply {
+            plan_id: app.plan.as_ref().map_or(0, PlanDto::plan_id),
+            changed_count: 1,
+        });
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        harness.get_by_label(semantics::EXCLUDE_SOURCE).click();
+        harness.run_ok();
+
+        assert!(source.is_file());
+        assert_eq!(
+            harness.state().plan.as_ref().map(|plan| plan.rows().len()),
+            Some(0)
+        );
+        assert!(harness.state().pending_confirmation.is_none());
+        assert!(
+            harness
+                .state()
+                .status
+                .starts_with("Removed 1 entry from the plan")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ledger_keyboard_selection_is_bounded_and_starts_at_the_first_entry() {
+        assert_eq!(adjacent_selection_index(3, None, 1), Some(0));
+        assert_eq!(adjacent_selection_index(3, Some(1), -1), Some(0));
+        assert_eq!(adjacent_selection_index(3, Some(1), 1), Some(2));
+        assert_eq!(adjacent_selection_index(3, Some(2), 1), Some(2));
+        assert_eq!(adjacent_selection_index(0, None, 1), None);
+    }
+
+    #[test]
     fn appearance_keeps_theme_choices_disclosed_until_requested() {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
@@ -5602,6 +5945,7 @@ mod tests {
         app.appearance.density = InterfaceDensity::Compact;
         app.appearance.show_kind = false;
         app.appearance.show_diagnostics = false;
+        app.appearance.preview_source_column_width = Some(240);
         eframe::App::save(&mut app, &mut storage);
 
         let restored = RenamewrightApp::new_product_with_persistence(
@@ -5615,6 +5959,7 @@ mod tests {
         assert_eq!(restored.appearance.density, InterfaceDensity::Compact);
         assert!(!restored.appearance.show_kind);
         assert!(!restored.appearance.show_diagnostics);
+        assert_eq!(restored.appearance.preview_source_column_width, Some(240));
         assert!(restored.plan.is_none());
         assert!(restored.pending_confirmation.is_none());
     }

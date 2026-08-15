@@ -12,7 +12,7 @@ use renamewright_core::{
     FilenamePart, MAX_OVERRIDE_TEXT_BYTES, MAX_OVERRIDES, MAX_RULE_TEXT_BYTES, MAX_RULES,
     MAX_SEQUENCE_PADDING, NameOverride, NameStatus, PROTOCOL_VERSION, PlanId, RangeOperation,
     RangeOrigin, RenamePlan, RenameRule, RulePipeline, RuleValidationErrorKind, SequenceOrder,
-    SequencePlacement, SequenceScope, TargetPolicy, UnicodeNormalizationForm,
+    SequencePlacement, SequenceScope, SourceId, TargetPolicy, UnicodeNormalizationForm,
     build_plan_with_rule_pipeline_overrides_and_environment,
 };
 use renamewright_platform::{
@@ -1300,6 +1300,48 @@ impl ApplicationService {
 
     pub fn admit_dropped_sources(&self, paths: &[std::path::PathBuf]) {
         admit_dropped_sources(self, paths);
+    }
+
+    pub fn exclude_sources_with_rules(
+        &self,
+        source_ids: &[u64],
+        request: RulePipelineRequestDto,
+    ) -> Result<PlanDto, PlanningCommandErrorDto> {
+        let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
+        let source_ids = source_ids.iter().copied().collect::<BTreeSet<_>>();
+        let snapshot = {
+            let mut registry = self
+                .registry
+                .lock()
+                .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
+            for source_id in &source_ids {
+                if *source_id == 0 || registry.path_for(SourceId::new(*source_id)).is_none() {
+                    return Err(PlanningCommandErrorDto::source(
+                        "unknownSourceId",
+                        *source_id,
+                    ));
+                }
+            }
+            if let Some(name_override) = request
+                .overrides
+                .iter()
+                .find(|name_override| source_ids.contains(&name_override.source_id))
+            {
+                return Err(PlanningCommandErrorDto::source(
+                    "excludedOverrideSource",
+                    name_override.source_id,
+                ));
+            }
+            registry.remove_sources(
+                &source_ids
+                    .iter()
+                    .copied()
+                    .map(SourceId::new)
+                    .collect::<Vec<_>>(),
+            );
+            registry.planning_snapshot()
+        };
+        plan_from_snapshot(snapshot, request, compiled, self)
     }
 
     pub fn preview_prefix(&self, prefix: String) -> Result<PlanDto, PlanningCommandErrorDto> {
@@ -3204,6 +3246,47 @@ mod tests {
             .rows()[0]
             .proposed_display_shared();
         assert!(std::sync::Arc::ptr_eq(&core_name, &row.proposed_name));
+        Ok(())
+    }
+
+    #[test]
+    fn source_exclusion_replans_by_opaque_id_without_exposing_or_deleting_paths()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("first.txt");
+        let second = directory.path().join("second.txt");
+        fs::write(&first, b"first")?;
+        fs::write(&second, b"second")?;
+        let state = ApplicationService::default();
+        let initial = state.admit_sources_with_rules(
+            [first.clone(), second.clone()],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        let excluded_id = initial
+            .rows()
+            .iter()
+            .find(|row| row.original_name() == "first.txt")
+            .map(|row| row.source_id())
+            .ok_or("first source was not projected")?;
+
+        let replanned = state.exclude_sources_with_rules(
+            &[excluded_id],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+
+        assert_eq!(replanned.rows().len(), 1);
+        assert_eq!(replanned.rows()[0].original_name(), "second.txt");
+        assert!(replanned.generation() > initial.generation());
+        assert!(first.is_file());
+        assert!(second.is_file());
+        let Err(error) = state.exclude_sources_with_rules(
+            &[excluded_id],
+            ApplicationService::prefix_rule_request("final-"),
+        ) else {
+            return Err("an unknown source id was accepted".into());
+        };
+        assert_eq!(error.code(), "unknownSourceId");
+        assert_eq!(error.source_id(), Some(excluded_id));
         Ok(())
     }
 
