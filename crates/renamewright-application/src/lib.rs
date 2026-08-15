@@ -18,9 +18,9 @@ use renamewright_core::{
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
     FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, MAX_ADMITTED_SOURCES,
-    PreparedStepDisposition, RecoveryAction, RecoveryReadiness, RecoveryTransactionInspection,
-    RenameLedger, SourceRegistry, UndoBlockReason, UndoReadiness, UndoTransactionInspection,
-    execute_frozen_plan, execute_prepared_undo, freeze_execution_plan,
+    PlanningSnapshot, PreparedStepDisposition, RecoveryAction, RecoveryReadiness,
+    RecoveryTransactionInspection, RenameLedger, SourceRegistry, UndoBlockReason, UndoReadiness,
+    UndoTransactionInspection, execute_frozen_plan, execute_prepared_undo, freeze_execution_plan,
     inspect_recovery_transaction, inspect_undo_transaction, inspect_undo_transaction_snapshot,
     prepare_undo_transaction_from_snapshot, reconcile_prepared_step, recover_transaction,
 };
@@ -1285,14 +1285,17 @@ impl ApplicationService {
         if paths.len() > MAX_ADMITTED_SOURCES {
             return Err(PlanningCommandErrorDto::new("tooManySources"));
         }
-        let mut registry = self
-            .registry
-            .lock()
-            .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
-        registry
-            .admit_paths(paths)
-            .map_err(|_| PlanningCommandErrorDto::new("sourceAdmissionFailed"))?;
-        plan_from_registry_with_compiled(&mut registry, request, compiled, self)
+        let snapshot = {
+            let mut registry = self
+                .registry
+                .lock()
+                .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
+            registry
+                .admit_paths(paths)
+                .map_err(|_| PlanningCommandErrorDto::new("sourceAdmissionFailed"))?;
+            registry.planning_snapshot()
+        };
+        plan_from_snapshot(snapshot, request, compiled, self)
     }
 
     pub fn admit_dropped_sources(&self, paths: &[std::path::PathBuf]) {
@@ -1307,11 +1310,13 @@ impl ApplicationService {
         &self,
         request: RulePipelineRequestDto,
     ) -> Result<PlanDto, PlanningCommandErrorDto> {
-        let mut registry = self
+        let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
+        let snapshot = self
             .registry
             .lock()
-            .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
-        plan_from_registry(&mut registry, request, self)
+            .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?
+            .planning_snapshot();
+        plan_from_snapshot(snapshot, request, compiled, self)
     }
 
     pub fn poll_source_changes(
@@ -2019,23 +2024,14 @@ fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf
     }
 }
 
-fn plan_from_registry(
-    registry: &mut SourceRegistry,
-    request: RulePipelineRequestDto,
-    state: &ApplicationService,
-) -> Result<PlanDto, PlanningCommandErrorDto> {
-    let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
-    plan_from_registry_with_compiled(registry, request, compiled, state)
-}
-
-fn plan_from_registry_with_compiled(
-    registry: &mut SourceRegistry,
+fn plan_from_snapshot(
+    snapshot: PlanningSnapshot,
     request: RulePipelineRequestDto,
     compiled: CompiledRuleRequest,
     state: &ApplicationService,
 ) -> Result<PlanDto, PlanningCommandErrorDto> {
-    let snapshots = registry.snapshots();
-    let source_ids = snapshots
+    let source_ids = snapshot
+        .snapshots()
         .iter()
         .map(|source| source.id().value())
         .collect::<BTreeSet<_>>();
@@ -2059,17 +2055,25 @@ fn plan_from_registry_with_compiled(
         .ok_or_else(|| PlanningCommandErrorDto::new("planSequenceExhausted"))?;
     let plan_id = PlanId::new(plan_id_value);
     *next_plan_id = following_plan_id;
-    let environment = registry.validation_environment();
+    drop(next_plan_id);
+    let environment = snapshot.validation_environment();
     let plan = build_plan_with_rule_pipeline_overrides_and_environment(
         plan_id,
-        registry.generation(),
-        &snapshots,
+        snapshot.generation(),
+        snapshot.snapshots(),
         &compiled.pipeline,
         &compiled.overrides,
         TargetPolicy::windows(),
         &environment,
     );
     let dto = PlanDto::from(&plan);
+    let registry = state
+        .registry
+        .lock()
+        .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
+    if registry.generation() != snapshot.generation() {
+        return Err(PlanningCommandErrorDto::new("stalePlanningSnapshot"));
+    }
     let mut latest_plan = state
         .latest_plan
         .lock()
@@ -2079,6 +2083,7 @@ fn plan_from_registry_with_compiled(
         rule_request: request,
         active_rule_ids: compiled.active_rule_ids,
     });
+    drop(registry);
     Ok(dto)
 }
 
@@ -3049,7 +3054,7 @@ mod tests {
         RuleRequestDto, RuleRequestErrorKind, SequenceOrderDto, SequencePlacementDto,
         SequenceScopeDto, SourceOverrideDto, StoredPlan, UnicodeNormalizationFormDto,
         admit_dropped_sources, compile_rule_request, csv_cell, plan_document_csv,
-        plan_document_json, plan_from_registry,
+        plan_document_json, plan_from_snapshot,
     };
     #[cfg(target_os = "linux")]
     use super::{
@@ -3759,8 +3764,13 @@ mod tests {
             }],
         };
         let unknown_json = {
-            let mut registry = state.registry.lock().map_err(|_| "registry lock failed")?;
-            let error = plan_from_registry(&mut registry, unknown_override, &state)
+            let compiled = compile_rule_request(&unknown_override)?;
+            let snapshot = state
+                .registry
+                .lock()
+                .map_err(|_| "registry lock failed")?
+                .planning_snapshot();
+            let error = plan_from_snapshot(snapshot, unknown_override, compiled, &state)
                 .err()
                 .ok_or("expected unknown override error")?;
             serde_json::to_value(error)?

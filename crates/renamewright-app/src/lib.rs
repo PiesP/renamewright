@@ -3,12 +3,13 @@
 // Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V4
 // Hallmark · macrostructure: direct-command workbench · theme: Cobalt · slop: pass (native-app scope)
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
@@ -16,8 +17,8 @@ use eframe::egui::{
 use renamewright_application::{
     ApplicationService, ApplyCommandErrorDto, ApplyCommandResultDto, CaseModeDto,
     CharacterClassDto, CharacterClassOperationDto, ExtensionOperationDto, FilenamePartDto,
-    LedgerEntryDto, PlanDto, PresetDocumentDto, RangeOperationDto, RangeOriginDto,
-    RecoveryCommandAction, RecoveryCommandErrorDto, RecoveryCommandResultDto,
+    LedgerEntryDto, PlanDto, PlanningCommandErrorDto, PresetDocumentDto, RangeOperationDto,
+    RangeOriginDto, RecoveryCommandAction, RecoveryCommandErrorDto, RecoveryCommandResultDto,
     RecoveryInspectionDto, RecoveryRequestDto, RulePipelineRequestDto, RuleRequestDto,
     SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, SourceOverrideDto,
     UndoCommandErrorDto, UndoCommandResultDto, UndoInspectionDto, UndoRequestDto,
@@ -36,6 +37,8 @@ const PREVIEW_PROPOSED_COLUMN_WIDTH: f32 = 180.0;
 const PREVIEW_STATUS_COLUMN_WIDTH: f32 = 80.0;
 const APPEARANCE_STORAGE_KEY: &str = "renamewright.appearance.v1";
 const MUTATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const PLANNING_DEBOUNCE: Duration = Duration::from_millis(100);
+const PLANNING_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 fn preview_column_label(
     ui: &mut egui::Ui,
@@ -1507,6 +1510,49 @@ struct MutationTask {
     handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug)]
+enum PlanningOutcome {
+    Preview(Result<PlanDto, PlanningCommandErrorDto>),
+    Validation(Result<(), PlanningCommandErrorDto>),
+}
+
+#[derive(Debug)]
+struct PlanningMessage {
+    revision: u64,
+    outcome: PlanningOutcome,
+}
+
+#[derive(Debug)]
+struct PlanningTask {
+    receiver: Receiver<PlanningMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl PlanningTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct VisibleRowsKey {
+    plan_id: Option<u64>,
+    source_query: String,
+    filter: PlanFilter,
+    diagnostic_filter: DiagnosticFilter,
+    synthetic_fixture: bool,
+}
+
+#[derive(Debug, Default)]
+struct VisibleRowsCache {
+    key: Option<VisibleRowsKey>,
+    search_plan_id: Option<u64>,
+    search_text: Vec<String>,
+    indices: Arc<[usize]>,
+}
+
 impl MutationTask {
     fn finish(mut self) {
         if let Some(handle) = self.handle.take() {
@@ -2001,6 +2047,11 @@ pub struct RenamewrightApp {
     undo_inspection: Option<UndoInspectionDto>,
     pending_confirmation: Option<PendingConfirmation>,
     mutation_task: Option<MutationTask>,
+    planning_revision: u64,
+    planning_due: Option<Instant>,
+    planning_task: Option<PlanningTask>,
+    plan_is_current: bool,
+    visible_rows: VisibleRowsCache,
     native_palette: NativePalette,
     palette: NativePalette,
     appearance: AppearancePreferences,
@@ -2160,6 +2211,11 @@ impl RenamewrightApp {
             undo_inspection: None,
             pending_confirmation: None,
             mutation_task: None,
+            planning_revision: 0,
+            planning_due: None,
+            planning_task: None,
+            plan_is_current: true,
+            visible_rows: VisibleRowsCache::default(),
             native_palette: palette,
             palette,
             appearance,
@@ -2221,43 +2277,34 @@ impl RenamewrightApp {
         index > 0 && index.is_multiple_of(997)
     }
 
-    fn row_is_visible(&self, index: usize) -> bool {
-        if let Some(plan) = &self.plan {
-            let Some(row) = plan.rows().get(index) else {
-                return false;
-            };
-            let matches_filter = match self.filter {
-                PlanFilter::All => true,
-                PlanFilter::Changed => row.status() == "changed",
-                PlanFilter::Blocked => row.status() == "blocked",
-            };
-            let query = self.source_query.trim().to_lowercase();
-            let matches_query = query.is_empty()
-                || row.original_name().to_lowercase().contains(&query)
-                || row.proposed_name().to_lowercase().contains(&query);
-            let matches_diagnostic = self
-                .diagnostic_filter
-                .code()
-                .is_none_or(|code| row.diagnostics().contains(&code));
-            return matches_filter && matches_query && matches_diagnostic;
-        }
-        if !self.synthetic_fixture {
-            return false;
+    fn visible_indices(&mut self) -> Arc<[usize]> {
+        let plan_id = self.plan.as_ref().map(PlanDto::plan_id);
+        if self.visible_rows.key.as_ref().is_some_and(|key| {
+            key.plan_id == plan_id
+                && key.source_query == self.source_query
+                && key.filter == self.filter
+                && key.diagnostic_filter == self.diagnostic_filter
+                && key.synthetic_fixture == self.synthetic_fixture
+        }) {
+            return Arc::clone(&self.visible_rows.indices);
         }
 
-        let blocked = Self::row_is_blocked(index);
-        let matches_filter = match self.filter {
-            PlanFilter::All | PlanFilter::Changed => true,
-            PlanFilter::Blocked => blocked,
-        };
-        let matches_query = self.source_query.trim().is_empty()
-            || format!("IMG_{index:05}.jpg")
-                .to_ascii_lowercase()
-                .contains(&self.source_query.trim().to_ascii_lowercase());
-        matches_filter && matches_query
-    }
+        if self.visible_rows.search_plan_id != plan_id {
+            self.visible_rows.search_text.clear();
+            if let Some(plan) = &self.plan {
+                self.visible_rows.search_text.reserve(plan.rows().len());
+                self.visible_rows
+                    .search_text
+                    .extend(plan.rows().iter().map(|row| {
+                        let mut projection = row.original_name().to_lowercase();
+                        projection.push('\0');
+                        projection.push_str(&row.proposed_name().to_lowercase());
+                        projection
+                    }));
+            }
+            self.visible_rows.search_plan_id = plan_id;
+        }
 
-    fn visible_indices(&self) -> Vec<usize> {
         let row_count = self.plan.as_ref().map_or_else(
             || {
                 if self.synthetic_fixture {
@@ -2268,19 +2315,67 @@ impl RenamewrightApp {
             },
             |plan| plan.rows().len(),
         );
-        (0..row_count)
-            .filter(|index| self.row_is_visible(*index))
-            .collect()
+        let query = self.source_query.trim().to_lowercase();
+        let indices = (0..row_count)
+            .filter(|index| {
+                if let Some(plan) = &self.plan {
+                    let Some(row) = plan.rows().get(*index) else {
+                        return false;
+                    };
+                    let matches_filter = match self.filter {
+                        PlanFilter::All => true,
+                        PlanFilter::Changed => row.status() == "changed",
+                        PlanFilter::Blocked => row.status() == "blocked",
+                    };
+                    let matches_query = query.is_empty()
+                        || self
+                            .visible_rows
+                            .search_text
+                            .get(*index)
+                            .is_some_and(|projection| projection.contains(&query));
+                    let matches_diagnostic = self
+                        .diagnostic_filter
+                        .code()
+                        .is_none_or(|code| row.diagnostics().contains(&code));
+                    matches_filter && matches_query && matches_diagnostic
+                } else if self.synthetic_fixture {
+                    let blocked = Self::row_is_blocked(*index);
+                    let matches_filter = match self.filter {
+                        PlanFilter::All | PlanFilter::Changed => true,
+                        PlanFilter::Blocked => blocked,
+                    };
+                    let matches_query = query.is_empty()
+                        || format!("IMG_{index:05}.jpg")
+                            .to_ascii_lowercase()
+                            .contains(&query);
+                    matches_filter && matches_query
+                } else {
+                    false
+                }
+            })
+            .collect::<Arc<[_]>>();
+        self.visible_rows.key = Some(VisibleRowsKey {
+            plan_id,
+            source_query: self.source_query.clone(),
+            filter: self.filter,
+            diagnostic_filter: self.diagnostic_filter,
+            synthetic_fixture: self.synthetic_fixture,
+        });
+        self.visible_rows.indices = Arc::clone(&indices);
+        indices
     }
 
     fn admit_sources(&mut self, paths: Vec<PathBuf>) {
+        self.supersede_pending_plan_refresh();
         let request = self.rule_request();
         match self.application.admit_sources_with_rules(paths, request) {
             Ok(plan) => {
                 self.status = self.plan_status(&plan);
                 self.plan = Some(plan);
+                self.plan_is_current = true;
             }
             Err(error) => {
+                self.plan_is_current = false;
                 self.status = format!(
                     "{} ({})",
                     self.locale
@@ -2292,34 +2387,144 @@ impl RenamewrightApp {
     }
 
     fn refresh_plan(&mut self) {
+        self.supersede_pending_plan_refresh();
         let request = self.rule_request();
-        if let Err(error) = self.application.validate_rule_request(&request) {
-            let code = error.code().to_owned();
-            self.rule_error = Some(code.clone());
-            self.status = format!(
-                "{} ({code})",
-                self.locale
-                    .text("Rule input is invalid", "규칙 입력이 올바르지 않습니다")
-            );
-            return;
-        }
-        self.rule_error = None;
         if self.plan.is_none() {
+            match self.application.validate_rule_request(&request) {
+                Ok(()) => {
+                    self.rule_error = None;
+                    self.plan_is_current = true;
+                }
+                Err(error) => self.apply_planning_error(&error),
+            }
             return;
         }
         match self.application.preview_rules(request) {
             Ok(plan) => {
+                self.rule_error = None;
                 self.status = self.plan_status(&plan);
                 self.plan = Some(plan);
+                self.plan_is_current = true;
             }
-            Err(code) => {
-                self.status = format!(
-                    "{} ({code})",
-                    self.locale
-                        .text("Preview unavailable", "미리보기를 만들 수 없습니다")
-                );
-            }
+            Err(error) => self.apply_planning_error(&error),
         }
+    }
+
+    fn supersede_pending_plan_refresh(&mut self) {
+        self.planning_revision = self.planning_revision.saturating_add(1);
+        self.planning_due = None;
+        if matches!(
+            self.pending_confirmation.as_ref(),
+            Some(PendingConfirmation::Apply { .. })
+        ) {
+            self.pending_confirmation = None;
+        }
+    }
+
+    fn schedule_plan_refresh(&mut self, context: &egui::Context) {
+        self.planning_revision = self.planning_revision.saturating_add(1);
+        self.planning_due = Some(Instant::now() + PLANNING_DEBOUNCE);
+        self.plan_is_current = false;
+        self.rule_error = None;
+        if matches!(
+            self.pending_confirmation.as_ref(),
+            Some(PendingConfirmation::Apply { .. })
+        ) {
+            self.pending_confirmation = None;
+        }
+        self.status = self
+            .locale
+            .text("Updating preview", "미리보기를 갱신 중입니다")
+            .to_owned();
+        context.request_repaint_after(PLANNING_DEBOUNCE);
+    }
+
+    fn poll_planning(&mut self, context: &egui::Context) {
+        let message = self
+            .planning_task
+            .as_ref()
+            .map(|task| task.receiver.try_recv());
+        match message {
+            Some(Ok(message)) => {
+                if let Some(task) = self.planning_task.take() {
+                    task.finish();
+                }
+                if message.revision == self.planning_revision {
+                    match message.outcome {
+                        PlanningOutcome::Preview(Ok(plan)) => {
+                            self.rule_error = None;
+                            self.status = self.plan_status(&plan);
+                            self.plan = Some(plan);
+                            self.plan_is_current = true;
+                        }
+                        PlanningOutcome::Validation(Ok(())) => {
+                            self.rule_error = None;
+                            self.plan_is_current = true;
+                        }
+                        PlanningOutcome::Preview(Err(error))
+                        | PlanningOutcome::Validation(Err(error)) => {
+                            self.apply_planning_error(&error);
+                        }
+                    }
+                }
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                if let Some(task) = self.planning_task.take() {
+                    task.finish();
+                }
+                self.plan_is_current = false;
+                self.status = self
+                    .locale
+                    .text(
+                        "Preview calculation ended unexpectedly",
+                        "미리보기 계산이 예기치 않게 종료되었습니다",
+                    )
+                    .to_owned();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+
+        if self.planning_task.is_none()
+            && self
+                .planning_due
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.planning_due = None;
+            let revision = self.planning_revision;
+            let request = self.rule_request();
+            let has_plan = self.plan.is_some();
+            let application = Arc::clone(&self.application);
+            let (sender, receiver) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                let outcome = if has_plan {
+                    PlanningOutcome::Preview(application.preview_rules(request))
+                } else {
+                    PlanningOutcome::Validation(application.validate_rule_request(&request))
+                };
+                let _ = sender.send(PlanningMessage { revision, outcome });
+            });
+            self.planning_task = Some(PlanningTask {
+                receiver,
+                handle: Some(handle),
+            });
+        }
+
+        if self.planning_task.is_some() {
+            context.request_repaint_after(PLANNING_POLL_INTERVAL);
+        } else if let Some(deadline) = self.planning_due {
+            context.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    fn apply_planning_error(&mut self, error: &PlanningCommandErrorDto) {
+        let code = error.code().to_owned();
+        self.rule_error = Some(code.clone());
+        self.plan_is_current = false;
+        self.status = format!(
+            "{} ({code})",
+            self.locale
+                .text("Preview unavailable", "미리보기를 만들 수 없습니다")
+        );
     }
 
     fn plan_status(&self, plan: &PlanDto) -> String {
@@ -2917,10 +3122,10 @@ impl RenamewrightApp {
         if !self.appearance_applied || self.palette != palette {
             self.palette = palette;
             install_theme_with_density(context, palette, self.appearance.density);
+            context.options_mut(|options| options.fallback_theme = egui::Theme::Light);
+            context.set_theme(self.appearance.theme.preference());
             self.appearance_applied = true;
         }
-        context.options_mut(|options| options.fallback_theme = egui::Theme::Light);
-        context.set_theme(self.appearance.theme.preference());
     }
 
     fn show_appearance_menu(&mut self, ui: &mut egui::Ui) -> bool {
@@ -3417,7 +3622,7 @@ impl RenamewrightApp {
                 if self.draft_rule_id.is_some() {
                     self.draft_rule_changed = true;
                 }
-                self.refresh_plan();
+                self.schedule_plan_refresh(ui.ctx());
             }
             if !editor_opened_this_frame {
                 done |= ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
@@ -3680,8 +3885,8 @@ impl RenamewrightApp {
                                         (
                                             None,
                                             "file",
-                                            source,
-                                            proposed,
+                                            Cow::Owned(source),
+                                            Cow::Owned(proposed),
                                             status,
                                             if blocked {
                                                 self.locale.text("Sample conflict", "샘플 충돌")
@@ -3697,8 +3902,8 @@ impl RenamewrightApp {
                                         (
                                             Some(row.source_id()),
                                             row.entry_kind(),
-                                            row.original_name().to_owned(),
-                                            row.proposed_name().to_owned(),
+                                            Cow::Borrowed(row.original_name()),
+                                            Cow::Borrowed(row.proposed_name()),
                                             if row.status() == "blocked" {
                                                 self.locale.text("Blocked", "차단됨")
                                             } else if row.status() == "unchanged" {
@@ -3730,8 +3935,16 @@ impl RenamewrightApp {
                                                 },
                                             );
                                         }
-                                        preview_column_label(ui, source_column_width, &source);
-                                        preview_column_label(ui, proposed_column_width, proposed);
+                                        preview_column_label(
+                                            ui,
+                                            source_column_width,
+                                            source.as_ref(),
+                                        );
+                                        preview_column_label(
+                                            ui,
+                                            proposed_column_width,
+                                            proposed.as_ref(),
+                                        );
                                         let color = if blocked {
                                             self.palette.blocked
                                         } else {
@@ -3757,7 +3970,8 @@ impl RenamewrightApp {
                                                 )
                                                 .clicked()
                                         {
-                                            requested_override = Some((source_id, source));
+                                            requested_override =
+                                                Some((source_id, source.into_owned()));
                                         }
                                     });
                                 });
@@ -3803,7 +4017,10 @@ impl RenamewrightApp {
         let unchanged_count = total_count.saturating_sub(changed_count + blocked_count);
         let can_apply = self.plan.as_ref().is_some_and(PlanDto::can_apply)
             && self.journal_root.is_some()
-            && self.mutation_task.is_none();
+            && self.mutation_task.is_none()
+            && self.plan_is_current
+            && self.planning_due.is_none()
+            && self.planning_task.is_none();
         let lock_reason = if self.synthetic_fixture && self.plan.is_none() {
             self.locale.text(
                 "Sample preview cannot be applied",
@@ -3813,6 +4030,14 @@ impl RenamewrightApp {
             self.locale.text(
                 "Add entries to create a plan",
                 "항목을 추가해 계획을 만드세요",
+            )
+        } else if !self.plan_is_current
+            || self.planning_due.is_some()
+            || self.planning_task.is_some()
+        {
+            self.locale.text(
+                "Wait for the latest preview before applying",
+                "최신 미리보기가 준비될 때까지 기다리세요",
             )
         } else if blocked_count > 0 {
             self.locale.text(
@@ -4111,6 +4336,7 @@ impl RenamewrightApp {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.apply_appearance(ui.ctx());
+        self.poll_planning(ui.ctx());
         self.poll_mutation(ui.ctx());
         let add_folder_shortcut = egui::KeyboardShortcut::new(
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
@@ -4287,6 +4513,9 @@ impl Drop for RenamewrightApp {
         if let Some(task) = self.mutation_task.take() {
             task.finish();
         }
+        if let Some(task) = self.planning_task.take() {
+            task.finish();
+        }
     }
 }
 
@@ -4385,8 +4614,9 @@ mod tests {
     use std::fs;
     #[cfg(feature = "automation")]
     use std::path::Path;
-    use std::sync::mpsc;
+    use std::sync::{Arc, mpsc};
     use std::thread;
+    use std::time::Duration;
 
     use eframe::egui;
     use egui_kittest::Harness;
@@ -4398,9 +4628,9 @@ mod tests {
     };
     use super::{
         AccentChoice, AppearanceTheme, InterfaceDensity, Locale, MutationTask, NativePalette,
-        PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
-        PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, install_theme,
-        install_theme_with_density, preview_column_label, semantics,
+        PLANNING_DEBOUNCE, PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH,
+        PendingConfirmation, PlanDto, PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto,
+        install_theme, install_theme_with_density, preview_column_label, semantics,
     };
 
     #[derive(Default)]
@@ -4768,6 +4998,50 @@ mod tests {
         harness.get_by_label(semantics::FILTER_BLOCKED).click();
         harness.run_ok();
         harness.get_by_label("10 shown");
+    }
+
+    #[test]
+    fn unchanged_preview_filters_reuse_the_cached_index_projection() {
+        let mut app = RenamewrightApp::new(false);
+
+        let first = app.visible_indices();
+        let second = app.visible_indices();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        app.source_query = "9999".to_owned();
+        let filtered = app.visible_indices();
+        assert!(!Arc::ptr_eq(&second, &filtered));
+        assert_eq!(&*filtered, &[9_999]);
+    }
+
+    #[test]
+    fn pending_preview_refresh_keeps_apply_visibly_locked() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product_with_data(
+            NativePalette::default(),
+            Some(directory.path().join("presets.json")),
+            Some(directory.path().join("journals")),
+        );
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+        assert!(app.plan.as_ref().is_some_and(PlanDto::can_apply));
+
+        app.set_prefix("reviewed-");
+        app.schedule_plan_refresh(&egui::Context::default());
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        assert!(
+            harness
+                .get_by_label(semantics::APPLY)
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label("Wait for the latest preview before applying");
+        Ok(())
     }
 
     #[test]
@@ -5144,6 +5418,14 @@ mod tests {
         );
         harness.event(egui::Event::Text("한글_".to_owned()));
         harness.run_ok();
+        thread::sleep(PLANNING_DEBOUNCE);
+        for _ in 0..100 {
+            harness.run_ok();
+            if harness.query_by_label("한글_report.txt").is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
         harness.get_by_label("한글_report.txt");
         harness.key_press(egui::Key::Enter);
         harness.run_ok();
