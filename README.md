@@ -32,6 +32,27 @@ fixture loader. Test automation is compiled only with the explicit `automation`
 Cargo feature and still requires `--automation`, an absolute disposable
 `--automation-root`, and a visible test-mode banner.
 
+## Download
+
+Download the current Windows x86-64 portable build from the
+[latest GitHub Release](https://github.com/PiesP/renamewright/releases/latest).
+The executable is named
+`Renamewright-<version>-windows-x86_64-portable.exe`; no installer or separate
+Visual C++ runtime is required.
+
+Download `SHA256SUMS.txt` from the same release and compare the executable's
+SHA-256 digest before running it. Each release also includes a source-bound
+`release-manifest.json`, a CycloneDX SBOM, and a short `README.txt`. The current
+executable is unsigned, so Microsoft Defender SmartScreen may show a warning.
+Checksums prove file integrity; they are not a code-signing certificate.
+
+Renamewright has no runtime updater. To update, close the application and
+replace the portable executable with the newer release. Presets and rename
+journals remain in the current user's data directory. Resolve or deliberately
+archive incomplete journals before removing that data. Version `0.2.0` is the
+first public native Rust release; `0.1.0` is the unsupported historical
+Tauri-based bootstrap release.
+
 ## Interaction design
 
 The native UI follows a direct-command workbench model inspired by the short,
@@ -110,7 +131,9 @@ Windows release and acceptance builds use the checked-in PowerShell packaging
 scripts. They bind artifacts to the source SHA, reject automation markers in the
 production executable, generate a Cargo-lockfile CycloneDX SBOM, and publish
 SHA-256 manifests. See [RELEASE.md](RELEASE.md) and
-[VALIDATION.md](VALIDATION.md) for the remaining external evidence boundaries.
+[VALIDATION.md](VALIDATION.md) for the publication procedure and remaining
+external evidence boundaries. User-visible changes are summarized in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Product commitments
 
@@ -127,7 +150,7 @@ SHA-256 manifests. See [RELEASE.md](RELEASE.md) and
 
 ## Code signing policy
 
-Current acceptance and portable candidate artifacts are explicitly unsigned.
+Current acceptance and public portable artifacts are explicitly unsigned.
 Future signed releases may use SignPath.io with a SignPath Foundation
 certificate after the project and trusted-build integration are approved. A
 release must state its signing status and publish source-bound checksums; an

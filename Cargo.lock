@@ -2394,7 +2394,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "renamewright-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui_inspection",
@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "renamewright-application"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "renamewright-core",
  "renamewright-platform",
@@ -2427,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "renamewright-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "regex",
  "unicode-normalization",
@@ -2435,7 +2435,7 @@ dependencies = [
 
 [[package]]
 name = "renamewright-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "renamewright-core",
@@ -2446,7 +2446,7 @@ dependencies = [
 
 [[package]]
 name = "renamewright-windows-native"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tempfile",
  "windows-sys 0.61.2",

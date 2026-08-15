@@ -1,7 +1,13 @@
 # Security policy
 
-Renamewright is pre-release software. Security support currently applies to the
-latest commit on `master`; no stable version is supported yet.
+Security fixes are provided for the latest public native release and the current
+development line. Historical bootstrap builds do not receive fixes.
+
+| Version | Supported |
+| --- | --- |
+| `0.2.x` | Yes |
+| `master` | Best effort before the next release |
+| `0.1.x` and older | No |
 
 ## Reporting a vulnerability
 
