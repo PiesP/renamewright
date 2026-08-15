@@ -3996,7 +3996,7 @@ impl RenamewrightApp {
                                             }
                                         };
                                         let drag_handle = ui
-                                            .add(egui::Label::new("⠿").sense(egui::Sense::drag()));
+                                            .add(egui::Label::new("::").sense(egui::Sense::drag()));
                                         drag_handle.widget_info(|| {
                                             egui::WidgetInfo::labeled(
                                                 egui::WidgetType::Other,
@@ -4190,7 +4190,7 @@ impl RenamewrightApp {
 
     fn show_rule_tools(&mut self, ui: &mut egui::Ui) {
         ui.separator();
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             ui.label(
                 RichText::new(self.locale.text(semantics::PRESETS, "로컬 프리셋"))
                     .strong()
@@ -4782,25 +4782,26 @@ impl RenamewrightApp {
         };
 
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (filter, count) in [
-                        (PlanFilter::All, total_count),
-                        (PlanFilter::Changed, changed_count),
-                        (PlanFilter::Unchanged, unchanged_count),
-                        (PlanFilter::Blocked, blocked_count),
-                    ] {
-                        let label = format!("{} {count}", filter.label(self.locale));
-                        if ui
-                            .selectable_label(self.filter == filter, RichText::new(label).strong())
-                            .clicked()
-                        {
-                            self.select_preview_filter(filter);
-                        }
-                    }
-                });
-                ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
-            });
+            for (filter, count) in [
+                (PlanFilter::All, total_count),
+                (PlanFilter::Changed, changed_count),
+                (PlanFilter::Unchanged, unchanged_count),
+                (PlanFilter::Blocked, blocked_count),
+            ] {
+                let label = format!("{} {count}", filter.label(self.locale));
+                if ui
+                    .selectable_label(
+                        self.filter == filter,
+                        RichText::new(label).strong().color(self.palette.ink),
+                    )
+                    .clicked()
+                {
+                    self.select_preview_filter(filter);
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let apply_label = match self.locale {
                     Locale::English => format!("Apply {changed_count} changes"),
@@ -4829,10 +4830,14 @@ impl RenamewrightApp {
                             .color(self.palette.blocked)
                             .strong(),
                     );
-                    ui.label(RichText::new(lock_reason).color(self.palette.blocked));
                 }
             });
         });
+        if !can_apply {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(lock_reason).color(self.palette.blocked));
+            });
+        }
     }
 
     fn inspect_plan(&mut self, json: bool) {
