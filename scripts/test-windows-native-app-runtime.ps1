@@ -290,7 +290,19 @@ $automationRoot = Join-Path `
   $temporaryDirectory `
   ("renamewright-automation-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $automationRoot | Out-Null
-$automationArguments = "--automation --automation-root `"$automationRoot`""
+$fixtureDirectory = Join-Path $automationRoot 'fixtures'
+New-Item -ItemType Directory -Path $fixtureDirectory | Out-Null
+$performanceFixture = [ordered]@{
+  schemaVersion = 2
+  syntheticSample = $true
+}
+$performanceFixture |
+  ConvertTo-Json |
+  Set-Content -LiteralPath (Join-Path $fixtureDirectory 'performance.json') -Encoding utf8
+$automationArguments = (
+  "--automation --automation-root `"$automationRoot`" " +
+  '--automation-fixture "performance.json"'
+)
 $probeOutputPath = Join-Path $temporaryDirectory 'native-app-probe.stdout.txt'
 $probeErrorPath = Join-Path $temporaryDirectory 'native-app-probe.stderr.txt'
 $automationStartup = [System.Diagnostics.Stopwatch]::StartNew()

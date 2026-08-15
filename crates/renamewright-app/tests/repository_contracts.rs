@@ -304,3 +304,12 @@ fn windows_acceptance_flushes_redirected_process_streams_before_hashing() {
         assert!(script.contains("Update-ArtifactChecksums -ArtifactRoot $artifactRoot"));
     }
 }
+
+#[test]
+fn windows_performance_acceptance_requests_the_synthetic_sample_explicitly() {
+    for script in [RUNTIME_ACCEPTANCE, INTERACTIVE_ACCEPTANCE] {
+        assert!(script.contains("schemaVersion = 2"));
+        assert!(script.contains("syntheticSample = $true"));
+        assert!(script.contains("--automation-fixture \"performance.json\""));
+    }
+}
