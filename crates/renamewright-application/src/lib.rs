@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
-    CaseMode, CharacterClass, CharacterClassOperation, DiagnosticCode, ExecutionDirection,
-    FilenamePart, MAX_OVERRIDE_TEXT_BYTES, MAX_OVERRIDES, MAX_RULE_TEXT_BYTES, MAX_RULES,
-    MAX_SEQUENCE_PADDING, NameOverride, NameStatus, PROTOCOL_VERSION, PlanId, RangeOperation,
-    RangeOrigin, RenamePlan, RenameRule, RulePipeline, RuleValidationErrorKind, SequenceOrder,
-    SequencePlacement, SequenceScope, SourceId, TargetPolicy, UnicodeNormalizationForm,
-    build_plan_with_rule_pipeline_overrides_and_environment,
+    CaseMode, CharacterClass, CharacterClassOperation, Diagnostic, DiagnosticCode,
+    ExecutionDirection, FilenamePart, MAX_OVERRIDE_TEXT_BYTES, MAX_OVERRIDES, MAX_RULE_TEXT_BYTES,
+    MAX_RULES, MAX_SEQUENCE_PADDING, NameOverride, NameStatus, PROTOCOL_VERSION, PlanId, PlanRow,
+    RangeOperation, RangeOrigin, RenamePlan, RenameRule, RulePipeline, RuleValidationErrorKind,
+    SequenceOrder, SequencePlacement, SequenceScope, SourceId, TargetPolicy, TraceStep,
+    UnicodeNormalizationForm, build_plan_with_rule_pipeline_overrides_and_environment,
 };
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
@@ -24,6 +24,7 @@ use renamewright_platform::{
     inspect_recovery_transaction, inspect_undo_transaction, inspect_undo_transaction_snapshot,
     prepare_undo_transaction_from_snapshot, reconcile_prepared_step, recover_transaction,
 };
+use serde::ser::{SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -2035,7 +2036,7 @@ struct PlanDocument<'a> {
     rules: &'a [RuleRequestDto],
     overrides: &'a [SourceOverrideDto],
     summary: PlanSummaryDocument,
-    rows: Vec<PlanRowDocument<'a>>,
+    rows: PlanRowsDocument<'a>,
 }
 
 #[derive(Serialize)]
@@ -2057,10 +2058,25 @@ struct PlanRowDocument<'a> {
     original_display: &'a str,
     proposed_display: &'a str,
     status: &'static str,
-    diagnostics: Vec<&'static str>,
+    diagnostics: DiagnosticsDocument<'a>,
     override_applied: bool,
     trace_truncated: bool,
-    trace: Vec<TraceStepDocument<'a>>,
+    trace: TraceDocument<'a>,
+}
+
+struct PlanRowsDocument<'a> {
+    stored: &'a StoredPlan,
+}
+
+#[derive(Clone, Copy)]
+struct DiagnosticsDocument<'a> {
+    diagnostics: &'a [Diagnostic],
+}
+
+#[derive(Clone, Copy)]
+struct TraceDocument<'a> {
+    steps: &'a [TraceStep],
+    active_rule_ids: &'a [u64],
 }
 
 #[derive(Serialize)]
@@ -2791,7 +2807,10 @@ fn plan_document_json(plan_id: u64, state: &ApplicationService) -> Result<String
         .map_err(|_| "the latest plan is unavailable".to_owned())?;
     let stored = current_plan(plan_id, &latest_plan)?;
     let mut writer = InspectionWriter::new();
-    write_plan_json(stored, &mut writer)?;
+    let result = write_plan_json(stored, &mut writer);
+    if !writer.truncated {
+        result?;
+    }
     writer.finish()
 }
 
@@ -2818,7 +2837,10 @@ fn write_plan_json(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), S
 
 fn plan_csv(stored: &StoredPlan) -> Result<String, String> {
     let mut writer = InspectionWriter::new();
-    write_plan_csv(stored, &mut writer)?;
+    let result = write_plan_csv(stored, &mut writer);
+    if !writer.truncated {
+        result?;
+    }
     writer.finish()
 }
 
@@ -2836,7 +2858,13 @@ impl InspectionWriter {
     }
 
     fn finish(self) -> Result<String, String> {
-        let mut document = String::from_utf8(self.bytes)
+        let valid_bytes = match std::str::from_utf8(&self.bytes) {
+            Ok(_) => self.bytes.len(),
+            Err(error) => error.valid_up_to(),
+        };
+        let mut bytes = self.bytes;
+        bytes.truncate(valid_bytes);
+        let mut document = String::from_utf8(bytes)
             .map_err(|_| "the plan inspection was not valid UTF-8".to_owned())?;
         if self.truncated {
             document.push_str(
@@ -2850,10 +2878,14 @@ impl InspectionWriter {
 impl Write for InspectionWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         let remaining = MAX_PLAN_INSPECTION_BYTES.saturating_sub(self.bytes.len());
+        if remaining == 0 {
+            self.truncated = true;
+            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+        }
         let retained = remaining.min(buffer.len());
         self.bytes.extend_from_slice(&buffer[..retained]);
         self.truncated |= retained < buffer.len();
-        Ok(buffer.len())
+        Ok(retained)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -2862,7 +2894,10 @@ impl Write for InspectionWriter {
 }
 
 fn write_plan_csv(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), String> {
-    let plan = PlanDocument::from(stored);
+    let plan = &stored.plan;
+    let csv_schema_version = PLAN_CSV_SCHEMA_VERSION.to_string();
+    let plan_id = plan.id().value().to_string();
+    let source_generation = plan.generation().to_string();
     write_csv_row(
         writer,
         &[
@@ -2879,7 +2914,8 @@ fn write_plan_csv(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), St
             "trace_json",
         ],
     )?;
-    for row in plan.rows {
+    for row in plan.rows() {
+        let row = PlanRowDocument::new(row, &stored.active_rule_ids);
         let diagnostics = serde_json::to_string(&row.diagnostics)
             .map_err(|_| "the plan CSV could not be serialized".to_owned())?;
         let trace = serde_json::to_string(&row.trace)
@@ -2887,9 +2923,9 @@ fn write_plan_csv(stored: &StoredPlan, writer: &mut impl Write) -> Result<(), St
         write_csv_row(
             writer,
             &[
-                &PLAN_CSV_SCHEMA_VERSION.to_string(),
-                &plan.plan_id.to_string(),
-                &plan.source_generation.to_string(),
+                &csv_schema_version,
+                &plan_id,
+                &source_generation,
                 &row.source_id.to_string(),
                 row.entry_kind,
                 row.original_display,
@@ -2967,39 +3003,78 @@ impl<'a> From<&'a StoredPlan> for PlanDocument<'a> {
                 retained_trace_bytes: plan.retained_trace_bytes(),
                 trace_truncated_row_count: plan.trace_truncated_row_count(),
             },
-            rows: plan
-                .rows()
-                .iter()
-                .map(|row| PlanRowDocument {
-                    source_id: row.source_id().value(),
-                    entry_kind: entry_kind_name(row.entry_kind()),
-                    original_display: row.original_display(),
-                    proposed_display: row.proposed_display(),
-                    status: status_name(row.status()),
-                    diagnostics: row
-                        .diagnostics()
-                        .iter()
-                        .map(|diagnostic| diagnostic_name(diagnostic.code()))
-                        .collect(),
-                    override_applied: row.override_applied(),
-                    trace_truncated: row.trace_truncated(),
-                    trace: row
-                        .trace()
-                        .iter()
-                        .map(|step| TraceStepDocument {
-                            rule_index: step.rule_index(),
-                            rule_id: stored
-                                .active_rule_ids
-                                .get(step.rule_index())
-                                .copied()
-                                .map_or(0, |rule_id| rule_id),
-                            before: step.before(),
-                            after: step.after(),
-                        })
-                        .collect(),
-                })
-                .collect(),
+            rows: PlanRowsDocument { stored },
         }
+    }
+}
+
+impl<'a> PlanRowDocument<'a> {
+    fn new(row: &'a PlanRow, active_rule_ids: &'a [u64]) -> Self {
+        Self {
+            source_id: row.source_id().value(),
+            entry_kind: entry_kind_name(row.entry_kind()),
+            original_display: row.original_display(),
+            proposed_display: row.proposed_display(),
+            status: status_name(row.status()),
+            diagnostics: DiagnosticsDocument {
+                diagnostics: row.diagnostics(),
+            },
+            override_applied: row.override_applied(),
+            trace_truncated: row.trace_truncated(),
+            trace: TraceDocument {
+                steps: row.trace(),
+                active_rule_ids,
+            },
+        }
+    }
+}
+
+impl Serialize for PlanRowsDocument<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let rows = self.stored.plan.rows();
+        let mut sequence = serializer.serialize_seq(Some(rows.len()))?;
+        for row in rows {
+            sequence.serialize_element(&PlanRowDocument::new(row, &self.stored.active_rule_ids))?;
+        }
+        sequence.end()
+    }
+}
+
+impl Serialize for DiagnosticsDocument<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.diagnostics.len()))?;
+        for diagnostic in self.diagnostics {
+            sequence.serialize_element(diagnostic_name(diagnostic.code()))?;
+        }
+        sequence.end()
+    }
+}
+
+impl Serialize for TraceDocument<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.steps.len()))?;
+        for step in self.steps {
+            sequence.serialize_element(&TraceStepDocument {
+                rule_index: step.rule_index(),
+                rule_id: self
+                    .active_rule_ids
+                    .get(step.rule_index())
+                    .copied()
+                    .unwrap_or(0),
+                before: step.before(),
+                after: step.after(),
+            })?;
+        }
+        sequence.end()
     }
 }
 
@@ -3614,11 +3689,73 @@ mod tests {
     #[test]
     fn plan_inspection_is_bounded_and_points_to_full_export() -> Result<(), Box<dyn Error>> {
         let mut writer = InspectionWriter::new();
-        std::io::Write::write_all(&mut writer, &vec![b'x'; MAX_PLAN_INSPECTION_BYTES + 1])?;
+        let result =
+            std::io::Write::write_all(&mut writer, &vec![b'x'; MAX_PLAN_INSPECTION_BYTES + 1]);
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::WriteZero)
+        );
 
         let document = writer.finish()?;
 
         assert!(document.starts_with(&"x".repeat(MAX_PLAN_INSPECTION_BYTES)));
+        assert!(document.ends_with("Export the plan for the complete document.]"));
+        assert!(document.len() < MAX_PLAN_INSPECTION_BYTES + 128);
+        Ok(())
+    }
+
+    #[test]
+    fn plan_inspection_truncates_at_a_valid_utf8_boundary() -> Result<(), Box<dyn Error>> {
+        let mut writer = InspectionWriter::new();
+        std::io::Write::write_all(
+            &mut writer,
+            &vec![b'x'; MAX_PLAN_INSPECTION_BYTES.saturating_sub(1)],
+        )?;
+        let result = std::io::Write::write_all(&mut writer, "한".as_bytes());
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::WriteZero)
+        );
+
+        let document = writer.finish()?;
+
+        assert!(document.is_char_boundary(document.len()));
+        assert!(document.ends_with("Export the plan for the complete document.]"));
+        assert!(!document.contains('�'));
+        Ok(())
+    }
+
+    #[test]
+    fn large_korean_plan_inspection_returns_a_bounded_utf8_document() -> Result<(), Box<dyn Error>>
+    {
+        let sources = (1..=renamewright_platform::MAX_ADMITTED_SOURCES)
+            .map(|source_id| {
+                SourceSnapshot::new(
+                    SourceId::new(source_id as u64),
+                    ParentId::new(1),
+                    OsString::from(format!("{}-{source_id}.txt", "한글".repeat(30))),
+                )
+            })
+            .collect::<Vec<_>>();
+        let plan = build_plan_with_rule_pipeline_overrides_and_environment(
+            PlanId::new(97),
+            1,
+            &sources,
+            &super::RulePipeline::compile(Vec::new())?,
+            &[],
+            TargetPolicy::windows(),
+            &ValidationEnvironment::default(),
+        );
+        let state = ApplicationService::default();
+        *state.latest_plan.lock().map_err(|_| "plan lock failed")? = Some(StoredPlan {
+            plan,
+            rule_request: RulePipelineRequestDto::new(Vec::new(), Vec::new()),
+            active_rule_ids: Vec::new(),
+        });
+
+        let document = plan_document_json(97, &state)?;
+
+        assert!(document.is_char_boundary(document.len()));
         assert!(document.ends_with("Export the plan for the complete document.]"));
         assert!(document.len() < MAX_PLAN_INSPECTION_BYTES + 128);
         Ok(())
