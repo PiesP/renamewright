@@ -11,9 +11,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use eframe::egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 use eframe::egui::{
-    self, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
-    ScrollArea, Stroke,
+    self, Align, Color32, FontData, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
 };
 use renamewright_application::{
     ApplicationService, ApplyCommandErrorDto, ApplyCommandResultDto, CaseModeDto,
@@ -1366,6 +1366,30 @@ fn concise_rule_text(value: &str) -> String {
         format!("{start}…")
     } else {
         start
+    }
+}
+
+fn rule_has_non_ascii_text(rule: &RuleRequestDto) -> bool {
+    match rule {
+        RuleRequestDto::Prefix { value, .. }
+        | RuleRequestDto::Suffix { value, .. }
+        | RuleRequestDto::Extension { value, .. } => !value.is_ascii(),
+        RuleRequestDto::LiteralReplace {
+            search,
+            replacement,
+            ..
+        }
+        | RuleRequestDto::RegexReplace {
+            pattern: search,
+            replacement,
+            ..
+        } => !search.is_ascii() || !replacement.is_ascii(),
+        RuleRequestDto::Sequence { separator, .. } => !separator.is_ascii(),
+        RuleRequestDto::WhitespaceCleanup { replacement, .. } => !replacement.is_ascii(),
+        RuleRequestDto::Case { .. }
+        | RuleRequestDto::UnicodeNormalization { .. }
+        | RuleRequestDto::Range { .. }
+        | RuleRequestDto::CharacterClass { .. } => false,
     }
 }
 
@@ -3784,17 +3808,17 @@ impl RenamewrightApp {
         };
         match task.receiver.try_recv() {
             Ok(Some((name, bytes))) => {
-                let mut fonts = FontDefinitions::empty();
-                fonts.font_data.insert(
-                    "system-korean".to_owned(),
-                    FontData::from_owned(bytes).into(),
-                );
-                for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                    fonts
-                        .families
-                        .insert(family, vec!["system-korean".to_owned()]);
-                }
-                context.set_fonts(fonts);
+                context.add_font(FontInsert::new(
+                    "system-korean",
+                    FontData::from_owned(bytes),
+                    [FontFamily::Proportional, FontFamily::Monospace]
+                        .into_iter()
+                        .map(|family| InsertFontFamily {
+                            family,
+                            priority: FontPriority::Lowest,
+                        })
+                        .collect(),
+                ));
                 self.korean_font_state = KoreanFontState::Ready;
                 eprintln!("loaded Korean fallback font: {name}");
                 if let Some(task) = self.korean_font_task.take() {
@@ -4225,42 +4249,8 @@ impl RenamewrightApp {
             .id_salt("active-rule-chain")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for insertion_index in 0..=self.rules.len() {
-                        let drop_response = ui.allocate_response(
-                            egui::vec2(10.0, ui.spacing().interact_size.y),
-                            egui::Sense::hover(),
-                        );
-                        drop_response.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Other,
-                                true,
-                                format!("Rule insertion position {}", insertion_index + 1),
-                            )
-                        });
-                        if drop_response
-                            .dnd_hover_payload::<RuleDragPayload>()
-                            .is_some()
-                        {
-                            ui.painter().vline(
-                                drop_response.rect.center().x,
-                                drop_response.rect.y_range(),
-                                Stroke::new(3.0, self.palette.accent),
-                            );
-                        }
-                        if let Some(payload) =
-                            drop_response.dnd_release_payload::<RuleDragPayload>()
-                        {
-                            dropped_rule = Some((payload.rule_id, insertion_index));
-                        }
-
-                        let Some((index, rule)) = self
-                            .rules
-                            .get(insertion_index)
-                            .map(|rule| (insertion_index, rule))
-                        else {
-                            continue;
-                        };
-                        ui.push_id(rule.rule_id(), |ui| {
+                    for (index, rule) in self.rules.iter().enumerate() {
+                        let rule_card = ui.push_id(rule.rule_id(), |ui| {
                             egui::Frame::new()
                                 .fill(self.palette.paper_raised)
                                 .stroke(Stroke::new(1.0, self.palette.rule))
@@ -4275,18 +4265,22 @@ impl RenamewrightApp {
                                                 format!("규칙 {} 드래그", index + 1)
                                             }
                                         };
-                                        let drag_handle = ui
-                                            .add(egui::Label::new("::").sense(egui::Sense::drag()));
-                                        drag_handle.widget_info(|| {
-                                            egui::WidgetInfo::labeled(
-                                                egui::WidgetType::Other,
-                                                true,
-                                                drag_label.clone(),
-                                            )
-                                        });
-                                        drag_handle.dnd_set_drag_payload(RuleDragPayload {
-                                            rule_id: rule.rule_id(),
-                                        });
+                                        ui.dnd_drag_source(
+                                            ui.id().with("rule-drag-handle"),
+                                            RuleDragPayload {
+                                                rule_id: rule.rule_id(),
+                                            },
+                                            |ui| {
+                                                let drag_handle = ui.label("::");
+                                                drag_handle.widget_info(|| {
+                                                    egui::WidgetInfo::labeled(
+                                                        egui::WidgetType::Other,
+                                                        true,
+                                                        drag_label.clone(),
+                                                    )
+                                                });
+                                            },
+                                        );
                                         let selected =
                                             self.rule_editor_open && self.selected_rule == index;
                                         if ui
@@ -4356,8 +4350,38 @@ impl RenamewrightApp {
                                             remove_rule = Some(index);
                                         }
                                     });
-                                });
+                                })
                         });
+                        let card_response = &rule_card.inner.response;
+                        let insertion_index = ui.ctx().pointer_interact_pos().map(|pointer| {
+                            if pointer.x < card_response.rect.center().x {
+                                index
+                            } else {
+                                index + 1
+                            }
+                        });
+                        if card_response
+                            .dnd_hover_payload::<RuleDragPayload>()
+                            .is_some()
+                            && let Some(insertion_index) = insertion_index
+                        {
+                            let marker_x = if insertion_index == index {
+                                card_response.rect.left()
+                            } else {
+                                card_response.rect.right()
+                            };
+                            ui.painter().vline(
+                                marker_x,
+                                card_response.rect.y_range(),
+                                Stroke::new(3.0, self.palette.accent),
+                            );
+                        }
+                        if let (Some(payload), Some(insertion_index)) = (
+                            card_response.dnd_release_payload::<RuleDragPayload>(),
+                            insertion_index,
+                        ) {
+                            dropped_rule = Some((payload.rule_id, insertion_index));
+                        }
                     }
                 });
             });
@@ -5435,11 +5459,18 @@ impl RenamewrightApp {
         self.apply_appearance(ui.ctx());
         self.poll_admission(ui.ctx());
         if self.korean_font_state == KoreanFontState::Idle
-            && self.plan.as_ref().is_some_and(|plan| {
-                plan.rows()
-                    .iter()
-                    .any(|row| !row.original_name().is_ascii() || !row.proposed_name().is_ascii())
-            })
+            && (self.rules.iter().any(rule_has_non_ascii_text)
+                || self.overrides.values().any(|value| !value.is_ascii())
+                || !self.source_query.is_ascii()
+                || !self.preset_name.is_ascii()
+                || self.presets.presets().iter().any(|preset| {
+                    !preset.name().is_ascii() || preset.rules().iter().any(rule_has_non_ascii_text)
+                })
+                || self.plan.as_ref().is_some_and(|plan| {
+                    plan.rows().iter().any(|row| {
+                        !row.original_name().is_ascii() || !row.proposed_name().is_ascii()
+                    })
+                }))
         {
             self.ensure_korean_font(ui.ctx());
         }
@@ -5775,7 +5806,7 @@ mod tests {
         LedgerTask, Locale, MutationTask, NativePalette, PLANNING_DEBOUNCE,
         PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
         PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, adjacent_selection_index,
-        install_theme, install_theme_with_density, preview_column_label, semantics,
+        install_theme, install_theme_with_density, preview_column_label, rule_summary, semantics,
     };
 
     #[derive(Default)]
@@ -6006,22 +6037,21 @@ mod tests {
     }
 
     #[test]
-    fn rule_drag_handle_reorders_at_the_visible_insertion_position() {
+    fn rule_drag_handle_reorders_when_dropped_on_a_visible_rule_card() {
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.rules = vec![
             RuleKind::Prefix.create(11),
             RuleKind::Sequence.create(22),
             RuleKind::Case.create(33),
         ];
+        let target_label = format!("3 · {}", rule_summary(&app.rules[2], Locale::English));
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
         let drag_position = harness.get_by_label("Drag rule 1").rect().center();
-        let drop_position = harness
-            .get_by_label("Rule insertion position 4")
-            .rect()
-            .center();
+        let target_rect = harness.get_by_label(&target_label).rect();
+        let drop_position = egui::pos2(target_rect.right() - 2.0, target_rect.center().y);
         harness.drag_at(drag_position);
         harness.run_ok();
         harness.hover_at(drop_position);
@@ -6522,6 +6552,7 @@ mod tests {
 
         app.set_prefix("reviewed-");
         app.schedule_plan_refresh(&egui::Context::default());
+        app.planning_due = Some(Instant::now() + Duration::from_secs(5));
         let harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), app);
@@ -6979,7 +7010,7 @@ mod tests {
 
     #[test]
     fn korean_font_loading_is_deferred_until_korean_text_is_needed() {
-        let english_app = RenamewrightApp::new(false);
+        let english_app = RenamewrightApp::new_product(NativePalette::default(), None);
         let english_harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), english_app);
@@ -6989,7 +7020,7 @@ mod tests {
         );
         assert!(english_harness.state().korean_font_task.is_none());
 
-        let mut korean_app = RenamewrightApp::new(false);
+        let mut korean_app = RenamewrightApp::new_product(NativePalette::default(), None);
         korean_app.locale = Locale::Korean;
         let korean_harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
@@ -7015,6 +7046,23 @@ mod tests {
         assert_eq!(harness.state().locale, Locale::English);
         assert_ne!(harness.state().korean_font_state, KoreanFontState::Idle);
         Ok(())
+    }
+
+    #[test]
+    fn korean_rule_text_starts_font_loading_without_sources() {
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.rules = vec![RuleRequestDto::Prefix {
+            rule_id: 1,
+            enabled: true,
+            value: "정리_".to_owned(),
+        }];
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        assert_eq!(harness.state().locale, Locale::English);
+        assert_ne!(harness.state().korean_font_state, KoreanFontState::Idle);
     }
 
     #[test]
