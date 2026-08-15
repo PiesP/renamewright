@@ -3086,6 +3086,13 @@ impl RenamewrightApp {
                         }
                         self.ledger = ledger;
                         self.ledger_ready = true;
+                        if !announce && self.plan.is_some() {
+                            let status = self.status.clone();
+                            self.refresh_plan();
+                            if self.plan_is_current {
+                                self.status = status;
+                            }
+                        }
                         if announce {
                             self.status = self
                                 .locale
@@ -5461,11 +5468,11 @@ mod tests {
         AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
     };
     use super::{
-        AccentChoice, AppearanceTheme, InterfaceDensity, Locale, MutationTask, NativePalette,
-        PLANNING_DEBOUNCE, PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH,
-        PendingConfirmation, PlanDto, PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto,
-        adjacent_selection_index, install_theme, install_theme_with_density, preview_column_label,
-        semantics,
+        AccentChoice, AppearanceTheme, InterfaceDensity, LedgerMessage, LedgerTask, Locale,
+        MutationTask, NativePalette, PLANNING_DEBOUNCE, PREVIEW_PROPOSED_COLUMN_WIDTH,
+        PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto, PlanFilter, RenamewrightApp,
+        RuleKind, RuleRequestDto, adjacent_selection_index, install_theme,
+        install_theme_with_density, preview_column_label, semantics,
     };
 
     #[derive(Default)]
@@ -6394,6 +6401,44 @@ mod tests {
                 .is_disabled()
         );
         harness.get_by_label("Wait for rename history checks to finish");
+        Ok(())
+    }
+
+    #[test]
+    fn startup_history_completion_rebuilds_a_pre_initialization_plan() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        let journal_root = directory.path().join("journals");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new(false);
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+        let stale_plan_id = app
+            .plan
+            .as_ref()
+            .ok_or("the plan was not retained")?
+            .plan_id();
+        assert_eq!(stale_plan_id, 1);
+        app.application.initialize(&journal_root)?;
+        let ledger = app.application.ledger_snapshot()?;
+        let (sender, receiver) = mpsc::channel();
+        sender.send(LedgerMessage::Snapshot {
+            result: Ok(ledger),
+            announce: false,
+        })?;
+        app.ledger_task = Some(LedgerTask {
+            receiver,
+            handle: None,
+        });
+
+        app.poll_ledger(&egui::Context::default());
+
+        let authoritative = app.plan.as_ref().ok_or("the plan was not rebuilt")?;
+        assert_eq!(authoritative.plan_id(), 2);
+        assert_eq!(authoritative.rows()[0].proposed_name(), "final-report.txt");
+        assert!(app.plan_is_current);
+        assert!(app.ledger_ready);
         Ok(())
     }
 

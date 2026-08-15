@@ -1233,18 +1233,28 @@ impl ApplicationService {
             .map(PlanId::value)
             .max()
             .unwrap_or(0);
-        let next_plan_id = latest_plan_id.checked_add(1).ok_or_else(|| {
+        let discovered_next_plan_id = latest_plan_id.checked_add(1).ok_or_else(|| {
             ApplicationServiceError::new(
                 ApplicationServiceErrorKind::PlanSequenceExhausted,
                 "the plan sequence is exhausted",
             )
         })?;
-        *self.next_plan_id.lock().map_err(|_| {
+        let mut next_plan_id = self.next_plan_id.lock().map_err(|_| {
             ApplicationServiceError::new(
                 ApplicationServiceErrorKind::StateUnavailable,
                 "the plan sequence is unavailable",
             )
-        })? = next_plan_id;
+        })?;
+        let mut latest_plan = self.latest_plan.lock().map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::StateUnavailable,
+                "the latest plan is unavailable",
+            )
+        })?;
+        *next_plan_id = (*next_plan_id).max(discovered_next_plan_id);
+        *latest_plan = None;
+        drop(latest_plan);
+        drop(next_plan_id);
         *self.ledger.lock().map_err(|_| {
             ApplicationServiceError::new(
                 ApplicationServiceErrorKind::StateUnavailable,
@@ -2104,7 +2114,8 @@ fn plan_from_snapshot(
         .ok_or_else(|| PlanningCommandErrorDto::new("planSequenceExhausted"))?;
     let plan_id = PlanId::new(plan_id_value);
     *next_plan_id = following_plan_id;
-    drop(next_plan_id);
+    // Publishing the plan under the sequence lock lets initialization order itself
+    // wholly before the allocation or invalidate the completed pre-initialization plan.
     let environment = snapshot.validation_environment();
     let plan = build_plan_with_rule_pipeline_overrides_and_environment(
         plan_id,
@@ -2132,7 +2143,9 @@ fn plan_from_snapshot(
         rule_request: request,
         active_rule_ids: compiled.active_rule_ids,
     });
+    drop(latest_plan);
     drop(registry);
+    drop(next_plan_id);
     Ok(dto)
 }
 
@@ -3993,6 +4006,64 @@ mod tests {
             error.kind(),
             ApplicationServiceErrorKind::PlanSequenceExhausted
         );
+        Ok(())
+    }
+
+    #[test]
+    fn initialization_does_not_reuse_a_plan_id_issued_before_empty_ledger_discovery()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let state = ApplicationService::default();
+        let stale = state.preview_rules(RulePipelineRequestDto::new(Vec::new(), Vec::new()))?;
+        assert_eq!(stale.plan_id(), 1);
+
+        state.initialize(directory.path())?;
+
+        assert_eq!(
+            plan_document_json(stale.plan_id(), &state),
+            Err("the requested plan is no longer current".to_owned())
+        );
+        let authoritative =
+            state.preview_rules(RulePipelineRequestDto::new(Vec::new(), Vec::new()))?;
+        assert_eq!(authoritative.plan_id(), 2);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn initialization_invalidates_a_plan_that_collides_with_a_discovered_journal()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_root = directory.path().join("journals");
+        let source = directory.path().join("source.txt");
+        fs::create_dir(&journal_root)?;
+        fs::write(&source, b"source")?;
+        let state = ApplicationService::default();
+        let stale = state.admit_sources_with_rules(
+            [source.clone()],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        assert_eq!(stale.plan_id(), 1);
+        let record = renamewright_core::JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(stale.plan_id()),
+            source_generation: stale.generation(),
+            step_count: 0,
+            entries: Vec::new(),
+        };
+        fs::write(
+            journal_root.join("plan-0000000000000001.rwj"),
+            renamewright_platform::encode_journal(&[record])?,
+        )?;
+
+        state.initialize(&journal_root)?;
+
+        let error = state
+            .apply_latest_plan(stale.plan_id(), &LinuxExecutionFileSystem::new(), || false)
+            .err()
+            .ok_or("the stale plan reached execution")?;
+        assert_eq!(error.code(), "planUnavailable");
+        assert_eq!(fs::read(&source)?, b"source");
+        assert!(!directory.path().join("final-source.txt").exists());
         Ok(())
     }
 
