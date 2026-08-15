@@ -104,11 +104,17 @@ fn production_ui_embeds_one_base_font_and_adds_korean_as_fallback() {
 
 #[test]
 fn release_profile_optimizes_the_ui_hot_path_without_expanding_all_dependencies() {
-    assert!(
-        ROOT_MANIFEST
-            .contains("[profile.release]\ncodegen-units = 1\nlto = \"fat\"\nopt-level = \"s\"")
-    );
-    assert!(ROOT_MANIFEST.contains("[profile.release.package.renamewright-app]\nopt-level = 3"));
+    let normalized_manifest = ROOT_MANIFEST.replace("\r\n", "\n");
+    let windows_style_manifest = normalized_manifest.replace('\n', "\r\n");
+
+    for manifest in [&normalized_manifest, &windows_style_manifest] {
+        let manifest = manifest.replace("\r\n", "\n");
+        assert!(
+            manifest
+                .contains("[profile.release]\ncodegen-units = 1\nlto = \"fat\"\nopt-level = \"s\"")
+        );
+        assert!(manifest.contains("[profile.release.package.renamewright-app]\nopt-level = 3"));
+    }
 }
 
 #[test]
