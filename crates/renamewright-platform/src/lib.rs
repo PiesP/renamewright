@@ -237,6 +237,30 @@ impl SourceRegistry {
         self.snapshots.values().cloned().collect()
     }
 
+    pub fn remove_sources(&mut self, source_ids: &[SourceId]) -> usize {
+        let mut removed_count = 0;
+        for source_id in source_ids.iter().copied().collect::<BTreeSet<_>>() {
+            let Some(path) = self.paths.remove(&source_id) else {
+                continue;
+            };
+            self.source_ids.remove(&path);
+            self.snapshots.remove(&source_id);
+            self.execution_identities.remove(&source_id);
+            removed_count += 1;
+        }
+        if removed_count > 0 {
+            let retained_parent_ids = self
+                .snapshots
+                .values()
+                .map(SourceSnapshot::parent_id)
+                .collect::<BTreeSet<_>>();
+            self.parent_ids
+                .retain(|_, parent_id| retained_parent_ids.contains(parent_id));
+            self.generation = self.generation.saturating_add(1);
+        }
+        removed_count
+    }
+
     #[must_use]
     pub fn planning_snapshot(&self) -> PlanningSnapshot {
         PlanningSnapshot {
@@ -505,6 +529,28 @@ mod tests {
             environment.occupied_names()[0].native_name(),
             "final-report.txt"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn source_removal_uses_opaque_ids_and_advances_the_generation() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("first.txt");
+        let second = directory.path().join("second.txt");
+        fs::write(&first, b"first")?;
+        fs::write(&second, b"second")?;
+        let mut registry = SourceRegistry::new();
+        registry.admit_paths([first.clone(), second])?;
+        let admitted_generation = registry.generation();
+
+        assert_eq!(registry.remove_sources(&[SourceId::new(1)]), 1);
+        assert_eq!(registry.snapshots().len(), 1);
+        assert_eq!(registry.generation(), admitted_generation + 1);
+        assert!(registry.path_for(SourceId::new(1)).is_none());
+
+        registry.admit_paths([first])?;
+        assert_eq!(registry.snapshots().len(), 2);
+        assert!(registry.path_for(SourceId::new(3)).is_some());
         Ok(())
     }
 

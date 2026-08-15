@@ -49,6 +49,19 @@ state or unsafe mutation behavior:
 
 Common rules are buttons rather than a rule-type dropdown. Only one inline rule
 editor is open at a time, while committed rules remain visible and reorderable.
+Each committed rule has a dedicated drag handle and visible insertion marker;
+the earlier/later buttons and `Alt+Left`/`Alt+Right` remain equivalent keyboard
+and accessibility paths. Dropping Explorer entries shows an admission count
+before release and reports how many new entries were accepted.
+
+Preview rows are selectable. A second click or `Enter` opens the existing
+per-entry override editor, count chips move directly to the first matching row,
+and a diagnostic links to the last changed rule only when the complete rule
+trace supports that attribution. `/` focuses name search. The source/proposed
+column divider is resizable and resettable as a persisted view preference.
+`Remove from plan` unregisters the opaque source ID and replans without deleting
+or renaming the filesystem entry.
+
 Rename Ledger, Recovery, Undo, presets, and inspection exports are on-demand
 surfaces so the preview retains the majority of the window. A disabled Apply
 action always has persistent explanatory text; safety information never depends

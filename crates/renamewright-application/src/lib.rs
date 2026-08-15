@@ -12,7 +12,7 @@ use renamewright_core::{
     FilenamePart, MAX_OVERRIDE_TEXT_BYTES, MAX_OVERRIDES, MAX_RULE_TEXT_BYTES, MAX_RULES,
     MAX_SEQUENCE_PADDING, NameOverride, NameStatus, PROTOCOL_VERSION, PlanId, RangeOperation,
     RangeOrigin, RenamePlan, RenameRule, RulePipeline, RuleValidationErrorKind, SequenceOrder,
-    SequencePlacement, SequenceScope, TargetPolicy, UnicodeNormalizationForm,
+    SequencePlacement, SequenceScope, SourceId, TargetPolicy, UnicodeNormalizationForm,
     build_plan_with_rule_pipeline_overrides_and_environment,
 };
 use renamewright_platform::{
@@ -1302,6 +1302,48 @@ impl ApplicationService {
         admit_dropped_sources(self, paths);
     }
 
+    pub fn exclude_sources_with_rules(
+        &self,
+        source_ids: &[u64],
+        request: RulePipelineRequestDto,
+    ) -> Result<PlanDto, PlanningCommandErrorDto> {
+        let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
+        let source_ids = source_ids.iter().copied().collect::<BTreeSet<_>>();
+        let snapshot = {
+            let mut registry = self
+                .registry
+                .lock()
+                .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
+            for source_id in &source_ids {
+                if *source_id == 0 || registry.path_for(SourceId::new(*source_id)).is_none() {
+                    return Err(PlanningCommandErrorDto::source(
+                        "unknownSourceId",
+                        *source_id,
+                    ));
+                }
+            }
+            if let Some(name_override) = request
+                .overrides
+                .iter()
+                .find(|name_override| source_ids.contains(&name_override.source_id))
+            {
+                return Err(PlanningCommandErrorDto::source(
+                    "excludedOverrideSource",
+                    name_override.source_id,
+                ));
+            }
+            registry.remove_sources(
+                &source_ids
+                    .iter()
+                    .copied()
+                    .map(SourceId::new)
+                    .collect::<Vec<_>>(),
+            );
+            registry.planning_snapshot()
+        };
+        plan_from_snapshot(snapshot, request, compiled, self)
+    }
+
     pub fn preview_prefix(&self, prefix: String) -> Result<PlanDto, PlanningCommandErrorDto> {
         self.preview_rules(prefix_rule_request(prefix))
     }
@@ -1882,6 +1924,8 @@ pub struct PlanRowDto {
     status: &'static str,
     diagnostics: Vec<&'static str>,
     override_applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_changed_rule_id: Option<u64>,
 }
 
 impl PlanDto {
@@ -1950,6 +1994,11 @@ impl PlanRowDto {
     #[must_use]
     pub const fn override_applied(&self) -> bool {
         self.override_applied
+    }
+
+    #[must_use]
+    pub const fn last_changed_rule_id(&self) -> Option<u64> {
+        self.last_changed_rule_id
     }
 }
 
@@ -2066,7 +2115,7 @@ fn plan_from_snapshot(
         TargetPolicy::windows(),
         &environment,
     );
-    let dto = PlanDto::from(&plan);
+    let dto = PlanDto::from_plan(&plan, &compiled.active_rule_ids);
     let registry = state
         .registry
         .lock()
@@ -2264,24 +2313,47 @@ pub fn prepare_latest_execution<'a, F: ExecutionFileSystem + ?Sized>(
 
 impl From<&RenamePlan> for PlanDto {
     fn from(plan: &RenamePlan) -> Self {
+        Self::from_plan(plan, &[])
+    }
+}
+
+impl PlanDto {
+    fn from_plan(plan: &RenamePlan, active_rule_ids: &[u64]) -> Self {
         Self {
             plan_id: plan.id().value(),
             generation: plan.generation(),
             rows: plan
                 .rows()
                 .iter()
-                .map(|row| PlanRowDto {
-                    source_id: row.source_id().value(),
-                    entry_kind: entry_kind_name(row.entry_kind()),
-                    original_name: row.original_display_shared(),
-                    proposed_name: row.proposed_display_shared(),
-                    status: status_name(row.status()),
-                    diagnostics: row
-                        .diagnostics()
-                        .iter()
-                        .map(|diagnostic| diagnostic_name(diagnostic.code()))
-                        .collect(),
-                    override_applied: row.override_applied(),
+                .map(|row| {
+                    let trace_reached_last_rule = row.trace().last().is_some_and(|step| {
+                        step.rule_index().checked_add(1) == Some(active_rule_ids.len())
+                    });
+                    let last_changed_rule_id = (!row.override_applied()
+                        && !row.trace_truncated()
+                        && trace_reached_last_rule)
+                        .then(|| {
+                            row.trace()
+                                .iter()
+                                .rev()
+                                .find(|step| step.before() != step.after())
+                                .and_then(|step| active_rule_ids.get(step.rule_index()).copied())
+                        })
+                        .flatten();
+                    PlanRowDto {
+                        source_id: row.source_id().value(),
+                        entry_kind: entry_kind_name(row.entry_kind()),
+                        original_name: row.original_display_shared(),
+                        proposed_name: row.proposed_display_shared(),
+                        status: status_name(row.status()),
+                        diagnostics: row
+                            .diagnostics()
+                            .iter()
+                            .map(|diagnostic| diagnostic_name(diagnostic.code()))
+                            .collect(),
+                        override_applied: row.override_applied(),
+                        last_changed_rule_id,
+                    }
                 })
                 .collect(),
             changed_count: plan.changed_count(),
@@ -3164,6 +3236,7 @@ mod tests {
         assert_eq!(row.status(), "changed");
         assert!(row.diagnostics().is_empty());
         assert!(!row.override_applied());
+        assert_eq!(row.last_changed_rule_id(), Some(1));
         assert!(row.source_id() > 0);
         let stored = state.latest_plan.lock().map_err(|_| "plan lock failed")?;
         let core_name = stored
@@ -3173,6 +3246,47 @@ mod tests {
             .rows()[0]
             .proposed_display_shared();
         assert!(std::sync::Arc::ptr_eq(&core_name, &row.proposed_name));
+        Ok(())
+    }
+
+    #[test]
+    fn source_exclusion_replans_by_opaque_id_without_exposing_or_deleting_paths()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("first.txt");
+        let second = directory.path().join("second.txt");
+        fs::write(&first, b"first")?;
+        fs::write(&second, b"second")?;
+        let state = ApplicationService::default();
+        let initial = state.admit_sources_with_rules(
+            [first.clone(), second.clone()],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+        let excluded_id = initial
+            .rows()
+            .iter()
+            .find(|row| row.original_name() == "first.txt")
+            .map(|row| row.source_id())
+            .ok_or("first source was not projected")?;
+
+        let replanned = state.exclude_sources_with_rules(
+            &[excluded_id],
+            ApplicationService::prefix_rule_request("final-"),
+        )?;
+
+        assert_eq!(replanned.rows().len(), 1);
+        assert_eq!(replanned.rows()[0].original_name(), "second.txt");
+        assert!(replanned.generation() > initial.generation());
+        assert!(first.is_file());
+        assert!(second.is_file());
+        let Err(error) = state.exclude_sources_with_rules(
+            &[excluded_id],
+            ApplicationService::prefix_rule_request("final-"),
+        ) else {
+            return Err("an unknown source id was accepted".into());
+        };
+        assert_eq!(error.code(), "unknownSourceId");
+        assert_eq!(error.source_id(), Some(excluded_id));
         Ok(())
     }
 
@@ -3817,9 +3931,10 @@ mod tests {
         );
         assert_eq!(row.trace().len(), 1);
 
-        let dto = PlanDto::from(&plan);
+        let dto = PlanDto::from_plan(&plan, &compiled.active_rule_ids);
         assert_eq!(dto.rows[0].status, "blocked");
         assert_eq!(dto.rows[0].diagnostics, vec!["nameTooLong"]);
+        assert_eq!(dto.rows[0].last_changed_rule_id, None);
         Ok(())
     }
 
