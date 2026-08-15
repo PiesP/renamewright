@@ -7,6 +7,7 @@ use std::process::Command;
 const ROOT_MANIFEST: &str = include_str!("../../../Cargo.toml");
 const APP_MANIFEST: &str = include_str!("../Cargo.toml");
 const APP_MAIN: &str = include_str!("../src/main.rs");
+const APP_SOURCE: &str = include_str!("../src/lib.rs");
 const CARGO_CONFIG: &str = include_str!("../../../.cargo/config.toml");
 const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yaml");
 const REPOSITORY_SETTINGS: &str = include_str!("../../../.github/settings.yaml");
@@ -55,6 +56,24 @@ fn repository_has_one_rust_owned_product_shell() {
     assert!(!ROOT_MANIFEST.contains("src-tauri"));
     assert!(APP_MANIFEST.contains("name = \"renamewright\""));
     assert!(APP_MANIFEST.contains("default = []"));
+}
+
+#[test]
+fn production_ui_keeps_default_fonts_and_adds_korean_as_fallback() {
+    assert!(
+        APP_MANIFEST.contains("\"default_fonts\""),
+        "the production eframe feature set must include egui's built-in glyph fonts"
+    );
+    assert!(
+        APP_SOURCE.contains("context.add_font(FontInsert::new("),
+        "the Korean font must be added without replacing the existing font definitions"
+    );
+    assert!(
+        APP_SOURCE.contains("priority: FontPriority::Lowest"),
+        "the system Korean font must remain a fallback behind the built-in fonts"
+    );
+    assert!(!APP_SOURCE.contains("FontDefinitions::empty()"));
+    assert!(!APP_SOURCE.contains("context.set_fonts(fonts)"));
 }
 
 #[test]

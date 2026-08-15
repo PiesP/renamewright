@@ -11,9 +11,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use eframe::egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 use eframe::egui::{
-    self, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
-    ScrollArea, Stroke,
+    self, Align, Color32, FontData, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
 };
 use renamewright_application::{
     ApplicationService, ApplyCommandErrorDto, ApplyCommandResultDto, CaseModeDto,
@@ -3784,17 +3784,17 @@ impl RenamewrightApp {
         };
         match task.receiver.try_recv() {
             Ok(Some((name, bytes))) => {
-                let mut fonts = FontDefinitions::empty();
-                fonts.font_data.insert(
-                    "system-korean".to_owned(),
-                    FontData::from_owned(bytes).into(),
-                );
-                for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                    fonts
-                        .families
-                        .insert(family, vec!["system-korean".to_owned()]);
-                }
-                context.set_fonts(fonts);
+                context.add_font(FontInsert::new(
+                    "system-korean",
+                    FontData::from_owned(bytes),
+                    [FontFamily::Proportional, FontFamily::Monospace]
+                        .into_iter()
+                        .map(|family| InsertFontFamily {
+                            family,
+                            priority: FontPriority::Lowest,
+                        })
+                        .collect(),
+                ));
                 self.korean_font_state = KoreanFontState::Ready;
                 eprintln!("loaded Korean fallback font: {name}");
                 if let Some(task) = self.korean_font_task.take() {
