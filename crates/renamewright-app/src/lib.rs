@@ -85,6 +85,7 @@ pub mod semantics {
     pub const APPLY_LOCKED: &str = "Apply locked";
     pub const MOVE_RULE_UP: &str = "Move rule up";
     pub const MOVE_RULE_DOWN: &str = "Move rule down";
+    pub const DRAG_RULE: &str = "Drag rule";
     pub const REMOVE_RULE: &str = "Remove rule";
     pub const ENABLE_RULE: &str = "Enable rule";
     pub const LANGUAGE: &str = "Language";
@@ -130,6 +131,11 @@ pub mod semantics {
     pub const UNDO: &str = "Undo";
     pub const CANCEL_MUTATION: &str = "Cancel operation";
     pub const CONFIRM_ACTION: &str = "Confirm action";
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuleDragPayload {
+    rule_id: u64,
 }
 
 #[cfg(feature = "automation")]
@@ -2448,10 +2454,20 @@ impl RenamewrightApp {
 
     fn admit_sources(&mut self, paths: Vec<PathBuf>) {
         self.supersede_pending_plan_refresh();
+        let previous_source_count = self.plan.as_ref().map_or(0, |plan| plan.rows().len());
         let request = self.rule_request();
         match self.application.admit_sources_with_rules(paths, request) {
             Ok(plan) => {
-                self.status = self.plan_status(&plan);
+                let admitted_count = plan.rows().len().saturating_sub(previous_source_count);
+                self.status = match self.locale {
+                    Locale::English => format!(
+                        "Added {admitted_count} entries · {}",
+                        self.plan_status(&plan)
+                    ),
+                    Locale::Korean => {
+                        format!("항목 {admitted_count}개 추가 · {}", self.plan_status(&plan))
+                    }
+                };
                 self.plan = Some(plan);
                 self.plan_is_current = true;
             }
@@ -2709,6 +2725,39 @@ impl RenamewrightApp {
             self.finish_rule_edit();
         }
         self.refresh_plan();
+    }
+
+    fn move_rule_to_insertion(&mut self, rule_id: u64, insertion_index: usize) -> bool {
+        let Some(source_index) = self.rules.iter().position(|rule| rule.rule_id() == rule_id)
+        else {
+            return false;
+        };
+        let selected_rule_id = self
+            .rules
+            .get(self.selected_rule)
+            .map(RuleRequestDto::rule_id);
+        let bounded_insertion = insertion_index.min(self.rules.len());
+        let destination_index = if source_index < bounded_insertion {
+            bounded_insertion.saturating_sub(1)
+        } else {
+            bounded_insertion
+        };
+        if source_index == destination_index {
+            return false;
+        }
+
+        let rule = self.rules.remove(source_index);
+        self.rules.insert(destination_index, rule);
+        if let Some(selected_rule_id) = selected_rule_id
+            && let Some(selected_index) = self
+                .rules
+                .iter()
+                .position(|rule| rule.rule_id() == selected_rule_id)
+        {
+            self.selected_rule = selected_index;
+        }
+        self.refresh_plan();
+        true
     }
 
     fn synthetic_prefix(&self) -> &str {
@@ -3611,6 +3660,42 @@ impl RenamewrightApp {
         }
     }
 
+    fn show_source_drop_overlay(&self, context: &egui::Context, hovered_count: usize) {
+        let detail = match self.locale {
+            Locale::English => format!(
+                "Release to add {hovered_count} {}",
+                if hovered_count == 1 {
+                    "entry"
+                } else {
+                    "entries"
+                }
+            ),
+            Locale::Korean => format!("놓아서 항목 {hovered_count}개 추가"),
+        };
+        egui::Area::new(egui::Id::new("source-drop-overlay"))
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .show(context, |ui| {
+                egui::Frame::new()
+                    .fill(self.palette.accent_fill)
+                    .stroke(Stroke::new(3.0, self.palette.accent))
+                    .corner_radius(12.0)
+                    .inner_margin(24.0)
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.heading(
+                                RichText::new(self.locale.text(
+                                    "Add files or folder entries",
+                                    "파일 또는 폴더 항목 추가",
+                                ))
+                                .color(self.palette.accent_text),
+                            );
+                            ui.label(RichText::new(detail).color(self.palette.accent_text));
+                        });
+                    });
+            });
+    }
+
     fn show_rule_command_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading(
@@ -3679,60 +3764,135 @@ impl RenamewrightApp {
 
         let mut selected_rule = None;
         let mut move_rule = None;
+        let mut dropped_rule = None;
         let mut remove_rule = None;
         ScrollArea::horizontal()
             .id_salt("active-rule-chain")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (index, rule) in self.rules.iter().enumerate() {
+                    for insertion_index in 0..=self.rules.len() {
+                        let drop_response = ui.allocate_response(
+                            egui::vec2(10.0, ui.spacing().interact_size.y),
+                            egui::Sense::hover(),
+                        );
+                        drop_response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Other,
+                                true,
+                                format!("Rule insertion position {}", insertion_index + 1),
+                            )
+                        });
+                        if drop_response
+                            .dnd_hover_payload::<RuleDragPayload>()
+                            .is_some()
+                        {
+                            ui.painter().vline(
+                                drop_response.rect.center().x,
+                                drop_response.rect.y_range(),
+                                Stroke::new(3.0, self.palette.accent),
+                            );
+                        }
+                        if let Some(payload) =
+                            drop_response.dnd_release_payload::<RuleDragPayload>()
+                        {
+                            dropped_rule = Some((payload.rule_id, insertion_index));
+                        }
+
+                        let Some((index, rule)) = self
+                            .rules
+                            .get(insertion_index)
+                            .map(|rule| (insertion_index, rule))
+                        else {
+                            continue;
+                        };
                         ui.push_id(rule.rule_id(), |ui| {
-                            let selected = self.rule_editor_open && self.selected_rule == index;
-                            if ui
-                                .selectable_label(
-                                    selected,
-                                    format!("{} · {}", index + 1, rule_summary(rule, self.locale)),
-                                )
-                                .clicked()
-                            {
-                                selected_rule = Some(index);
-                            }
-                            let move_up = ui.add_enabled(index > 0, egui::Button::new("←"));
-                            move_up.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::WidgetType::Button,
-                                    index > 0,
-                                    self.locale
-                                        .text(semantics::MOVE_RULE_UP, "규칙 앞으로 이동"),
-                                )
-                            });
-                            if move_up.clicked() {
-                                move_rule = Some((index, index - 1));
-                            }
-                            let move_down = ui
-                                .add_enabled(index + 1 < self.rules.len(), egui::Button::new("→"));
-                            move_down.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::WidgetType::Button,
-                                    index + 1 < self.rules.len(),
-                                    self.locale
-                                        .text(semantics::MOVE_RULE_DOWN, "규칙 뒤로 이동"),
-                                )
-                            });
-                            if move_down.clicked() {
-                                move_rule = Some((index, index + 1));
-                            }
-                            let remove = ui.button("×");
-                            remove.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::WidgetType::Button,
-                                    true,
-                                    self.locale.text(semantics::REMOVE_RULE, "규칙 제거"),
-                                )
-                            });
-                            if remove.clicked() {
-                                remove_rule = Some(index);
-                            }
-                            ui.separator();
+                            egui::Frame::new()
+                                .fill(self.palette.paper_raised)
+                                .stroke(Stroke::new(1.0, self.palette.rule))
+                                .inner_margin(4.0)
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        let drag_label = match self.locale {
+                                            Locale::English => {
+                                                format!("{} {}", semantics::DRAG_RULE, index + 1)
+                                            }
+                                            Locale::Korean => {
+                                                format!("규칙 {} 드래그", index + 1)
+                                            }
+                                        };
+                                        let drag_handle = ui
+                                            .add(egui::Label::new("⠿").sense(egui::Sense::drag()));
+                                        drag_handle.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Other,
+                                                true,
+                                                drag_label.clone(),
+                                            )
+                                        });
+                                        drag_handle.dnd_set_drag_payload(RuleDragPayload {
+                                            rule_id: rule.rule_id(),
+                                        });
+                                        let selected =
+                                            self.rule_editor_open && self.selected_rule == index;
+                                        if ui
+                                            .selectable_label(
+                                                selected,
+                                                format!(
+                                                    "{} · {}",
+                                                    index + 1,
+                                                    rule_summary(rule, self.locale)
+                                                ),
+                                            )
+                                            .clicked()
+                                        {
+                                            selected_rule = Some(index);
+                                        }
+                                        let move_up =
+                                            ui.add_enabled(index > 0, egui::Button::new("←"));
+                                        move_up.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Button,
+                                                index > 0,
+                                                self.locale.text(
+                                                    semantics::MOVE_RULE_UP,
+                                                    "규칙 앞으로 이동",
+                                                ),
+                                            )
+                                        });
+                                        if move_up.clicked() {
+                                            move_rule = Some((index, index - 1));
+                                        }
+                                        let move_down = ui.add_enabled(
+                                            index + 1 < self.rules.len(),
+                                            egui::Button::new("→"),
+                                        );
+                                        move_down.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Button,
+                                                index + 1 < self.rules.len(),
+                                                self.locale.text(
+                                                    semantics::MOVE_RULE_DOWN,
+                                                    "규칙 뒤로 이동",
+                                                ),
+                                            )
+                                        });
+                                        if move_down.clicked() {
+                                            move_rule = Some((index, index + 1));
+                                        }
+                                        let remove = ui.button("×");
+                                        remove.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Button,
+                                                true,
+                                                self.locale
+                                                    .text(semantics::REMOVE_RULE, "규칙 제거"),
+                                            )
+                                        });
+                                        if remove.clicked() {
+                                            remove_rule = Some(index);
+                                        }
+                                    });
+                                });
                         });
                     }
                 });
@@ -3750,6 +3910,9 @@ impl RenamewrightApp {
             self.rules.swap(from, to);
             self.selected_rule = to;
             self.refresh_plan();
+        }
+        if let Some((rule_id, insertion_index)) = dropped_rule {
+            self.move_rule_to_insertion(rule_id, insertion_index);
         }
         if let Some(index) = remove_rule {
             self.remove_rule(index);
@@ -4636,6 +4799,7 @@ impl RenamewrightApp {
         {
             self.choose_files();
         }
+        let hovered_source_count = ui.ctx().input(|input| input.raw.hovered_files.len());
         let dropped_paths = ui.ctx().input(|input| {
             input
                 .raw
@@ -4768,6 +4932,10 @@ impl RenamewrightApp {
                     self.show_preview(ui);
                 }
             });
+
+        if hovered_source_count > 0 {
+            self.show_source_drop_overlay(ui.ctx(), hovered_source_count);
+        }
 
         self.show_transient_windows(ui.ctx());
     }
@@ -5034,6 +5202,7 @@ mod tests {
         );
         let apply = harness.get_by_label(semantics::APPLY);
         let move_up = harness.get_by_label(semantics::MOVE_RULE_UP);
+        let drag_rule = harness.get_by_label("Drag rule 1");
         let remove_rule = harness.get_by_label(semantics::REMOVE_RULE);
         assert_eq!(
             add_files.accesskit_node().role(),
@@ -5071,6 +5240,10 @@ mod tests {
         );
         assert!(move_up.accesskit_node().is_disabled());
         assert_eq!(
+            drag_rule.accesskit_node().role(),
+            egui::accesskit::Role::Unknown
+        );
+        assert_eq!(
             remove_rule.accesskit_node().role(),
             egui::accesskit::Role::Button
         );
@@ -5082,6 +5255,82 @@ mod tests {
         harness.get_by_label(semantics::HISTORY).click();
         harness.run_ok();
         harness.get_by_label(semantics::REFRESH_LEDGER);
+    }
+
+    #[test]
+    fn rule_reorder_uses_stable_ids_and_preserves_the_selected_rule() {
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.rules = vec![
+            RuleKind::Prefix.create(11),
+            RuleKind::Sequence.create(22),
+            RuleKind::Case.create(33),
+        ];
+        app.selected_rule = 1;
+
+        assert!(app.move_rule_to_insertion(11, 3));
+        assert_eq!(
+            app.rules
+                .iter()
+                .map(RuleRequestDto::rule_id)
+                .collect::<Vec<_>>(),
+            vec![22, 33, 11]
+        );
+        assert_eq!(app.selected_rule, 0);
+        assert!(!app.move_rule_to_insertion(33, 1));
+        assert!(!app.move_rule_to_insertion(404, 0));
+    }
+
+    #[test]
+    fn rule_drag_handle_reorders_at_the_visible_insertion_position() {
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.rules = vec![
+            RuleKind::Prefix.create(11),
+            RuleKind::Sequence.create(22),
+            RuleKind::Case.create(33),
+        ];
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        let drag_position = harness.get_by_label("Drag rule 1").rect().center();
+        let drop_position = harness
+            .get_by_label("Rule insertion position 4")
+            .rect()
+            .center();
+        harness.drag_at(drag_position);
+        harness.run_ok();
+        harness.hover_at(drop_position);
+        harness.run_ok();
+        harness.drop_at(drop_position);
+        harness.run_ok();
+
+        assert_eq!(
+            harness
+                .state()
+                .rules
+                .iter()
+                .map(RuleRequestDto::rule_id)
+                .collect::<Vec<_>>(),
+            vec![22, 33, 11]
+        );
+    }
+
+    #[test]
+    fn source_drag_hover_announces_the_drop_action_and_count() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_180.0, 760.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                RenamewrightApp::new_product(NativePalette::default(), None),
+            );
+        harness
+            .input_mut()
+            .hovered_files
+            .extend([egui::HoveredFile::default(), egui::HoveredFile::default()]);
+        harness.run_steps(1);
+
+        harness.get_by_label("Add files or folder entries");
+        harness.get_by_label("Release to add 2 entries");
     }
 
     #[test]
