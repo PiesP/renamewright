@@ -11,10 +11,11 @@ use renamewright_platform::SourceRegistry;
 
 const SOURCE_COUNT: usize = 10_000;
 const ADMISSION_BUDGET: Duration = Duration::from_secs(20);
-const REPRESENTATIVE_PLAN_BUDGET: Duration = Duration::from_secs(3);
-const EXPANDING_PLAN_BUDGET: Duration = Duration::from_secs(8);
-const RETAINED_PROJECTION_BUDGET_BYTES: usize = 96 * 1_024 * 1_024;
-const PEAK_RSS_BUDGET_BYTES: u64 = 256 * 1_024 * 1_024;
+const REPRESENTATIVE_PLAN_BUDGET: Duration = Duration::from_secs(1);
+const EXPANDING_PLAN_BUDGET: Duration = Duration::from_secs(4);
+const REPRESENTATIVE_RETAINED_PROJECTION_BUDGET_BYTES: usize = 3 * 1_024 * 1_024;
+const RETAINED_PROJECTION_BUDGET_BYTES: usize = 64 * 1_024 * 1_024;
+const PEAK_RSS_BUDGET_BYTES: u64 = 192 * 1_024 * 1_024;
 
 struct PlanMeasurement {
     elapsed: Duration,
@@ -67,6 +68,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(
             io::Error::other("the representative plan unexpectedly truncated traces").into(),
         );
+    }
+    if representative.retained_projection_bytes > REPRESENTATIVE_RETAINED_PROJECTION_BUDGET_BYTES {
+        return Err(io::Error::other(format!(
+            "representative retained projection exceeded {} bytes",
+            REPRESENTATIVE_RETAINED_PROJECTION_BUDGET_BYTES
+        ))
+        .into());
     }
 
     let expanding = measure_plan(

@@ -307,12 +307,14 @@ pub enum NameStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraceStep {
     rule_index: usize,
-    before: String,
-    after: String,
+    before: Arc<str>,
+    after: Arc<str>,
 }
 
+const _: () = assert!(std::mem::size_of::<TraceStep>() <= 40);
+
 impl TraceStep {
-    pub(crate) fn new(rule_index: usize, before: String, after: String) -> Self {
+    pub(crate) fn new(rule_index: usize, before: Arc<str>, after: Arc<str>) -> Self {
         Self {
             rule_index,
             before,
@@ -334,11 +336,6 @@ impl TraceStep {
     pub fn after(&self) -> &str {
         &self.after
     }
-
-    #[must_use]
-    pub const fn retained_bytes(&self) -> usize {
-        self.before.len().saturating_add(self.after.len())
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -351,7 +348,7 @@ pub struct PlanRow {
     original_display: Arc<str>,
     proposed_display: Arc<str>,
     status: NameStatus,
-    trace: Vec<TraceStep>,
+    trace: Box<[TraceStep]>,
     diagnostics: Vec<Diagnostic>,
     override_applied: bool,
     trace_truncated: bool,
@@ -378,7 +375,7 @@ impl PlanRow {
             original_display,
             proposed_display,
             status,
-            trace,
+            trace: trace.into_boxed_slice(),
             diagnostics,
             override_applied: false,
             trace_truncated: false,
@@ -478,7 +475,15 @@ impl PlanRow {
 
     #[must_use]
     pub fn retained_trace_bytes(&self) -> usize {
-        self.trace().iter().map(TraceStep::retained_bytes).sum()
+        self.trace
+            .first()
+            .map_or(0, |step| step.before.len())
+            .saturating_add(
+                self.trace
+                    .iter()
+                    .map(|step| step.after.len())
+                    .sum::<usize>(),
+            )
     }
 }
 
@@ -500,14 +505,35 @@ pub struct RenamePlan {
     id: PlanId,
     generation: u64,
     rows: Vec<PlanRow>,
+    changed_count: usize,
+    blocked_count: usize,
+    retained_trace_bytes: usize,
+    trace_truncated_row_count: usize,
 }
 
 impl RenamePlan {
     pub(crate) fn new(id: PlanId, generation: u64, rows: Vec<PlanRow>) -> Self {
+        let mut changed_count = 0;
+        let mut blocked_count = 0;
+        let mut retained_trace_bytes = 0usize;
+        let mut trace_truncated_row_count = 0;
+        for row in &rows {
+            match row.status() {
+                NameStatus::Changed => changed_count += 1,
+                NameStatus::Blocked => blocked_count += 1,
+                NameStatus::Unchanged => {}
+            }
+            retained_trace_bytes = retained_trace_bytes.saturating_add(row.retained_trace_bytes());
+            trace_truncated_row_count += usize::from(row.trace_truncated());
+        }
         Self {
             id,
             generation,
             rows,
+            changed_count,
+            blocked_count,
+            retained_trace_bytes,
+            trace_truncated_row_count,
         }
     }
 
@@ -527,34 +553,28 @@ impl RenamePlan {
     }
 
     #[must_use]
-    pub fn changed_count(&self) -> usize {
-        self.rows
-            .iter()
-            .filter(|row| row.status() == NameStatus::Changed)
-            .count()
+    pub const fn changed_count(&self) -> usize {
+        self.changed_count
     }
 
     #[must_use]
-    pub fn blocked_count(&self) -> usize {
-        self.rows
-            .iter()
-            .filter(|row| row.status() == NameStatus::Blocked)
-            .count()
+    pub const fn blocked_count(&self) -> usize {
+        self.blocked_count
     }
 
     #[must_use]
-    pub fn can_apply(&self) -> bool {
-        self.changed_count() > 0 && self.blocked_count() == 0
+    pub const fn can_apply(&self) -> bool {
+        self.changed_count > 0 && self.blocked_count == 0
     }
 
     #[must_use]
-    pub fn retained_trace_bytes(&self) -> usize {
-        self.rows.iter().map(PlanRow::retained_trace_bytes).sum()
+    pub const fn retained_trace_bytes(&self) -> usize {
+        self.retained_trace_bytes
     }
 
     #[must_use]
-    pub fn trace_truncated_row_count(&self) -> usize {
-        self.rows.iter().filter(|row| row.trace_truncated()).count()
+    pub const fn trace_truncated_row_count(&self) -> usize {
+        self.trace_truncated_row_count
     }
 }
 

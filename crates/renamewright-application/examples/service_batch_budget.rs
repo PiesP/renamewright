@@ -8,8 +8,8 @@ use renamewright_application::{ApplicationService, RulePipelineRequestDto, RuleR
 const SOURCE_COUNT: usize = 10_000;
 const MAX_RULE_COUNT: usize = 32;
 const RULE_TEXT_BYTES: usize = 120;
-const SERVICE_PLAN_BUDGET: Duration = Duration::from_secs(8);
-const DIRECTORY_PLAN_BUDGET: Duration = Duration::from_secs(3);
+const SERVICE_PLAN_BUDGET: Duration = Duration::from_secs(4);
+const DIRECTORY_PLAN_BUDGET: Duration = Duration::from_secs(2);
 const SERVICE_PEAK_RSS_BUDGET_BYTES: u64 = 160 * 1_024 * 1_024;
 const INSPECTION_DOCUMENT_BUDGET_BYTES: usize = 2 * 1_024 * 1_024 + 128;
 
