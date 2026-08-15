@@ -6605,12 +6605,22 @@ mod tests {
 
     #[test]
     fn blocked_filter_updates_the_accessible_result_count() {
+        let mut app = RenamewrightApp::new(false);
+        app.set_prefix("sample_");
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
-            .build_ui_state(|ui, app| app.show(ui), RenamewrightApp::new(false));
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        assert_eq!(
+            harness.state().korean_font_state,
+            KoreanFontState::Idle,
+            "this filter test must not race an operating-system font layout change"
+        );
 
         harness.get_by_label(semantics::FILTER_BLOCKED).click();
         harness.run_ok();
+
+        assert_eq!(harness.state().filter, PlanFilter::Blocked);
         harness.get_by_label("10 shown");
     }
 
