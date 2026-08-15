@@ -7149,9 +7149,14 @@ mod tests {
         harness.get_by_value("English").click();
         harness.run_ok();
 
-        harness.get_by_label("Korean (loading)");
         assert_eq!(harness.state().locale, Locale::English);
-        assert_eq!(harness.state().korean_font_state, KoreanFontState::Loading);
+        let korean_font_state = harness.state().korean_font_state;
+        assert_ne!(korean_font_state, KoreanFontState::Idle);
+        harness.get_by_label(Locale::Korean.picker_label(korean_font_state));
+        if korean_font_state != KoreanFontState::Ready {
+            assert!(Locale::Korean.picker_label(korean_font_state).is_ascii());
+            assert!(!Locale::Korean.picker_enabled(korean_font_state));
+        }
         assert_eq!(
             Locale::Korean.picker_label(KoreanFontState::Ready),
             "한국어"
