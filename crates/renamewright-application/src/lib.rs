@@ -1297,7 +1297,7 @@ impl ApplicationService {
                 .lock()
                 .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?;
             registry
-                .admit_paths(paths)
+                .admit_paths_count(paths)
                 .map_err(|_| PlanningCommandErrorDto::new("sourceAdmissionFailed"))?;
             registry.planning_snapshot()
         };
@@ -2098,7 +2098,7 @@ fn admit_dropped_sources(state: &ApplicationService, paths: &[std::path::PathBuf
             .map_err(|_| "the source registry is unavailable".to_owned())
             .and_then(|mut registry| {
                 registry
-                    .admit_paths(paths.iter().cloned())
+                    .admit_paths_count(paths.iter().cloned())
                     .map(|_| ())
                     .map_err(|error| error.to_string())
             })

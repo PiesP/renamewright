@@ -24,7 +24,7 @@ use renamewright_application::{
     UndoCommandErrorDto, UndoCommandResultDto, UndoInspectionDto, UndoRequestDto,
     UnicodeNormalizationFormDto,
 };
-use renamewright_platform::NativeExecutionFileSystem;
+use renamewright_platform::{MAX_ADMITTED_SOURCES, NativeExecutionFileSystem};
 use serde::{Deserialize, Serialize};
 
 const SAMPLE_COUNT: usize = 10_000;
@@ -1567,6 +1567,19 @@ struct PlanningTask {
 }
 
 #[derive(Debug)]
+struct AdmissionMessage {
+    revision: u64,
+    previous_source_count: usize,
+    result: Result<PlanDto, PlanningCommandErrorDto>,
+}
+
+#[derive(Debug)]
+struct AdmissionTask {
+    receiver: Receiver<AdmissionMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
 enum LedgerMessage {
     Snapshot {
         result: Result<Vec<LedgerEntryDto>, String>,
@@ -1617,6 +1630,14 @@ impl LedgerTask {
 }
 
 impl PlanningTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl AdmissionTask {
     fn finish(mut self) {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -2146,6 +2167,8 @@ pub struct RenamewrightApp {
     planning_revision: u64,
     planning_due: Option<Instant>,
     planning_task: Option<PlanningTask>,
+    admission_task: Option<AdmissionTask>,
+    pending_admission_paths: Vec<PathBuf>,
     plan_is_current: bool,
     visible_rows: VisibleRowsCache,
     native_palette: NativePalette,
@@ -2328,6 +2351,8 @@ impl RenamewrightApp {
             planning_revision: 0,
             planning_due: None,
             planning_task: None,
+            admission_task: None,
+            pending_admission_paths: Vec::new(),
             plan_is_current: true,
             visible_rows: VisibleRowsCache::default(),
             native_palette: palette,
@@ -2378,7 +2403,7 @@ impl RenamewrightApp {
             if fixture.sources().is_empty() {
                 app.status = "Automation fixture loaded".to_owned();
             } else {
-                app.admit_sources(fixture.sources().to_vec());
+                app.admit_sources_immediately(fixture.sources().to_vec());
                 app.status = format!(
                     "Automation fixture loaded · {} sources",
                     fixture.sources().len()
@@ -2484,11 +2509,124 @@ impl RenamewrightApp {
         indices
     }
 
-    fn admit_sources(&mut self, paths: Vec<PathBuf>) {
+    #[cfg(any(test, feature = "automation"))]
+    fn admit_sources_immediately(&mut self, paths: Vec<PathBuf>) {
         self.supersede_pending_plan_refresh();
         let previous_source_count = self.plan.as_ref().map_or(0, |plan| plan.rows().len());
         let request = self.rule_request();
-        match self.application.admit_sources_with_rules(paths, request) {
+        let result = self.application.admit_sources_with_rules(paths, request);
+        self.apply_admission_result(previous_source_count, result);
+    }
+
+    fn start_source_admission(&mut self, paths: Vec<PathBuf>, context: &egui::Context) {
+        if paths.is_empty() {
+            return;
+        }
+        if self.admission_task.is_some() || self.planning_task.is_some() {
+            self.supersede_pending_plan_refresh();
+            let retained = MAX_ADMITTED_SOURCES
+                .saturating_add(1)
+                .saturating_sub(self.pending_admission_paths.len());
+            self.pending_admission_paths
+                .extend(paths.into_iter().take(retained));
+            self.plan_is_current = false;
+            self.status = self
+                .locale
+                .text(
+                    "Adding entries · selection queued",
+                    "항목 추가를 대기 중입니다",
+                )
+                .to_owned();
+            context.request_repaint_after(PLANNING_POLL_INTERVAL);
+            return;
+        }
+        self.launch_source_admission(paths, context);
+    }
+
+    fn launch_source_admission(&mut self, paths: Vec<PathBuf>, context: &egui::Context) {
+        self.supersede_pending_plan_refresh();
+        let revision = self.planning_revision;
+        let previous_source_count = self.plan.as_ref().map_or(0, |plan| plan.rows().len());
+        let request = self.rule_request();
+        let application = Arc::clone(&self.application);
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let result = application.admit_sources_with_rules(paths, request);
+            let _ = sender.send(AdmissionMessage {
+                revision,
+                previous_source_count,
+                result,
+            });
+        });
+        self.admission_task = Some(AdmissionTask {
+            receiver,
+            handle: Some(handle),
+        });
+        self.plan_is_current = false;
+        self.rule_error = None;
+        self.status = self
+            .locale
+            .text("Adding entries", "항목을 추가 중입니다")
+            .to_owned();
+        context.request_repaint_after(PLANNING_POLL_INTERVAL);
+    }
+
+    fn poll_admission(&mut self, context: &egui::Context) {
+        let message = self
+            .admission_task
+            .as_ref()
+            .map(|task| task.receiver.try_recv());
+        match message {
+            Some(Ok(message)) => {
+                if let Some(task) = self.admission_task.take() {
+                    task.finish();
+                }
+                let has_pending = !self.pending_admission_paths.is_empty();
+                if message.revision == self.planning_revision && !has_pending {
+                    self.apply_admission_result(message.previous_source_count, message.result);
+                } else {
+                    match message.result {
+                        Ok(plan) => {
+                            self.plan = Some(plan);
+                            self.plan_is_current = false;
+                            if !has_pending {
+                                self.planning_due = Some(Instant::now());
+                            }
+                        }
+                        Err(error) => self.apply_admission_error(&error),
+                    }
+                }
+                if has_pending {
+                    let paths = std::mem::take(&mut self.pending_admission_paths);
+                    self.launch_source_admission(paths, context);
+                }
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                if let Some(task) = self.admission_task.take() {
+                    task.finish();
+                }
+                self.plan_is_current = false;
+                self.status = self
+                    .locale
+                    .text(
+                        "Source admission ended unexpectedly",
+                        "원본 추가가 예기치 않게 종료되었습니다",
+                    )
+                    .to_owned();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+        if self.admission_task.is_some() {
+            context.request_repaint_after(PLANNING_POLL_INTERVAL);
+        }
+    }
+
+    fn apply_admission_result(
+        &mut self,
+        previous_source_count: usize,
+        result: Result<PlanDto, PlanningCommandErrorDto>,
+    ) {
+        match result {
             Ok(plan) => {
                 let admitted_count = plan.rows().len().saturating_sub(previous_source_count);
                 self.status = match self.locale {
@@ -2503,16 +2641,18 @@ impl RenamewrightApp {
                 self.plan = Some(plan);
                 self.plan_is_current = true;
             }
-            Err(error) => {
-                self.plan_is_current = false;
-                self.status = format!(
-                    "{} ({})",
-                    self.locale
-                        .text("Sources were not admitted", "원본을 추가하지 못했습니다"),
-                    error.code()
-                );
-            }
+            Err(error) => self.apply_admission_error(&error),
         }
+    }
+
+    fn apply_admission_error(&mut self, error: &PlanningCommandErrorDto) {
+        self.plan_is_current = false;
+        self.status = format!(
+            "{} ({})",
+            self.locale
+                .text("Sources were not admitted", "원본을 추가하지 못했습니다"),
+            error.code()
+        );
     }
 
     fn refresh_plan(&mut self) {
@@ -2613,7 +2753,16 @@ impl RenamewrightApp {
             Some(Err(TryRecvError::Empty)) | None => {}
         }
 
-        if self.planning_task.is_none()
+        if self.admission_task.is_none()
+            && self.planning_task.is_none()
+            && !self.pending_admission_paths.is_empty()
+        {
+            let paths = std::mem::take(&mut self.pending_admission_paths);
+            self.launch_source_admission(paths, context);
+        }
+
+        if self.admission_task.is_none()
+            && self.planning_task.is_none()
             && self
                 .planning_due
                 .is_some_and(|deadline| Instant::now() >= deadline)
@@ -3509,12 +3658,12 @@ impl RenamewrightApp {
         }
     }
 
-    fn choose_files(&mut self) {
+    fn choose_files(&mut self, context: &egui::Context) {
         match rfd::FileDialog::new()
             .set_title("Add files to Renamewright")
             .pick_files()
         {
-            Some(paths) => self.admit_sources(paths),
+            Some(paths) => self.start_source_admission(paths, context),
             None => {
                 self.status = self
                     .locale
@@ -3524,12 +3673,12 @@ impl RenamewrightApp {
         }
     }
 
-    fn choose_folder_entry(&mut self) {
+    fn choose_folder_entry(&mut self, context: &egui::Context) {
         match rfd::FileDialog::new()
             .set_title("Add one directory entry to Renamewright")
             .pick_folder()
         {
-            Some(path) => self.admit_sources(vec![path]),
+            Some(path) => self.start_source_admission(vec![path], context),
             None => {
                 self.status = self
                     .locale
@@ -3825,13 +3974,13 @@ impl RenamewrightApp {
                     .button(self.locale.text(semantics::ADD_FOLDER, "폴더 자체 추가"))
                     .clicked()
                 {
-                    self.choose_folder_entry();
+                    self.choose_folder_entry(ui.ctx());
                 }
                 if ui
                     .button(self.locale.text(semantics::ADD_FILES, "파일 추가"))
                     .clicked()
                 {
-                    self.choose_files();
+                    self.choose_files(ui.ctx());
                 }
             });
         });
@@ -4741,6 +4890,8 @@ impl RenamewrightApp {
             && self.plan_is_current
             && self.planning_due.is_none()
             && self.planning_task.is_none()
+            && self.admission_task.is_none()
+            && self.pending_admission_paths.is_empty()
             && self.ledger_ready
             && self.ledger_task.is_none();
         let lock_reason = if self.synthetic_fixture && self.plan.is_none() {
@@ -4752,6 +4903,11 @@ impl RenamewrightApp {
             self.locale.text(
                 "Add entries to create a plan",
                 "항목을 추가해 계획을 만드세요",
+            )
+        } else if self.admission_task.is_some() || !self.pending_admission_paths.is_empty() {
+            self.locale.text(
+                "Wait for selected entries to finish loading",
+                "선택한 항목을 모두 불러올 때까지 기다리세요",
             )
         } else if !self.plan_is_current
             || self.planning_due.is_some()
@@ -5142,6 +5298,7 @@ impl RenamewrightApp {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.apply_appearance(ui.ctx());
+        self.poll_admission(ui.ctx());
         self.poll_planning(ui.ctx());
         self.poll_ledger(ui.ctx());
         self.poll_document(ui.ctx());
@@ -5159,12 +5316,12 @@ impl RenamewrightApp {
             .ctx()
             .input_mut(|input| input.consume_shortcut(&add_folder_shortcut))
         {
-            self.choose_folder_entry();
+            self.choose_folder_entry(ui.ctx());
         } else if ui
             .ctx()
             .input_mut(|input| input.consume_shortcut(&add_files_shortcut))
         {
-            self.choose_files();
+            self.choose_files(ui.ctx());
         }
         if ui
             .ctx()
@@ -5194,7 +5351,7 @@ impl RenamewrightApp {
                 .collect::<Vec<_>>()
         });
         if !dropped_paths.is_empty() {
-            self.admit_sources(dropped_paths);
+            self.start_source_admission(dropped_paths, ui.ctx());
         }
 
         #[cfg(feature = "automation")]
@@ -5351,6 +5508,7 @@ impl Drop for RenamewrightApp {
         if let Some(task) = self.planning_task.take() {
             task.finish();
         }
+        let _ = self.admission_task.take();
         if let Some(task) = self.ledger_task.take() {
             task.finish();
         }
@@ -5514,6 +5672,42 @@ mod tests {
             assert!(Instant::now() < deadline, "document task did not settle");
             thread::yield_now();
         }
+    }
+
+    fn settle_admission(app: &mut RenamewrightApp) {
+        let context = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.admission_task.is_some() {
+            app.poll_admission(&context);
+            assert!(Instant::now() < deadline, "admission task did not settle");
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn source_admission_runs_off_frame_and_queues_a_second_selection() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("first.txt");
+        let second = directory.path().join("second.txt");
+        fs::write(&first, b"first")?;
+        fs::write(&second, b"second")?;
+        let context = egui::Context::default();
+        let mut app = RenamewrightApp::new(false);
+
+        app.start_source_admission(vec![first], &context);
+        assert!(app.admission_task.is_some());
+        assert!(!app.plan_is_current);
+        app.start_source_admission(vec![second], &context);
+        assert_eq!(app.pending_admission_paths.len(), 1);
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| app.show(ui));
+        output.textures_delta.clear();
+        settle_admission(&mut app);
+
+        assert!(app.plan_is_current);
+        assert_eq!(app.plan.as_ref().map(|plan| plan.rows().len()), Some(2));
+        assert!(app.pending_admission_paths.is_empty());
+        Ok(())
     }
 
     fn relative_luminance(color: egui::Color32) -> f32 {
@@ -5726,7 +5920,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
@@ -5756,7 +5950,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
@@ -5798,7 +5992,7 @@ mod tests {
             replacement: "CON".to_owned(),
         }];
         app.next_rule_id = 8;
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         assert_eq!(
             app.plan
                 .as_ref()
@@ -5890,7 +6084,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.set_prefix("final-");
-        app.admit_sources(vec![source.clone()]);
+        app.admit_sources_immediately(vec![source.clone()]);
         app.pending_confirmation = Some(PendingConfirmation::Apply {
             plan_id: app.plan.as_ref().map_or(0, PlanDto::plan_id),
             changed_count: 1,
@@ -6011,7 +6205,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let plan_id = app.plan.as_ref().map(PlanDto::plan_id);
         let changed_count = app.plan.as_ref().map(PlanDto::changed_count);
         let mut harness = Harness::builder()
@@ -6178,7 +6372,7 @@ mod tests {
         );
         settle_ledger(&mut app);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         assert!(app.plan.as_ref().is_some_and(PlanDto::can_apply));
 
         app.set_prefix("reviewed-");
@@ -6386,7 +6580,7 @@ mod tests {
             Some(directory.path().join("journals")),
         );
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         assert!(app.ledger_task.is_some());
         assert!(!app.ledger_ready);
 
@@ -6413,7 +6607,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new(false);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let stale_plan_id = app
             .plan
             .as_ref()
@@ -6454,7 +6648,7 @@ mod tests {
         );
         settle_ledger(&mut app);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_200.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
@@ -6476,7 +6670,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new(false);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
 
         let Some(plan) = &app.plan else {
             return Err("the native workbench did not retain the service plan".into());
@@ -6547,7 +6741,7 @@ mod tests {
         fs::write(selected.join("child.txt"), b"child")?;
         let mut app = RenamewrightApp::new(false);
         app.set_prefix("final-");
-        app.admit_sources(vec![selected]);
+        app.admit_sources_immediately(vec![selected]);
 
         let plan = app.plan.as_ref().ok_or("the directory plan was missing")?;
         assert_eq!(plan.rows().len(), 1);
@@ -6586,7 +6780,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new(false);
         app.set_prefix("");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let source_id = app
             .plan
             .as_ref()
@@ -6644,7 +6838,7 @@ mod tests {
         let source = directory.path().join("report.txt");
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), app);

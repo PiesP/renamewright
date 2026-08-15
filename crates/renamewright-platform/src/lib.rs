@@ -12,6 +12,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use renamewright_core::{
@@ -99,6 +100,7 @@ pub struct SourceRegistry {
     next_source_id: u64,
     next_parent_id: u64,
     generation: u64,
+    cached_planning_snapshot: Option<PlanningSnapshot>,
 }
 
 /// An immutable, generation-bound copy of the data needed to build a preview.
@@ -108,9 +110,9 @@ pub struct SourceRegistry {
 /// evaluation begin.
 #[derive(Clone, Debug)]
 pub struct PlanningSnapshot {
-    paths: BTreeMap<SourceId, PathBuf>,
-    snapshots: Vec<SourceSnapshot>,
-    parent_ids: BTreeMap<PathBuf, ParentId>,
+    paths: Arc<BTreeMap<SourceId, PathBuf>>,
+    snapshots: Arc<[SourceSnapshot]>,
+    parent_ids: Arc<BTreeMap<PathBuf, ParentId>>,
     generation: u64,
 }
 
@@ -127,7 +129,12 @@ impl PlanningSnapshot {
 
     #[must_use]
     pub fn validation_environment(&self) -> ValidationEnvironment {
-        validation_environment(&self.paths, &self.snapshots, &self.parent_ids)
+        validation_environment(&self.paths, &self.parent_ids, |source_id| {
+            self.snapshots
+                .binary_search_by_key(&source_id, SourceSnapshot::id)
+                .ok()
+                .and_then(|index| self.snapshots.get(index))
+        })
     }
 }
 
@@ -145,6 +152,14 @@ impl SourceRegistry {
         &mut self,
         paths: impl IntoIterator<Item = PathBuf>,
     ) -> Result<Vec<SourceSnapshot>, AdmissionError> {
+        self.admit_paths_count(paths)?;
+        Ok(self.snapshots())
+    }
+
+    pub fn admit_paths_count(
+        &mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<usize, AdmissionError> {
         let paths = paths
             .into_iter()
             .take(MAX_ADMITTED_SOURCES.saturating_add(1))
@@ -173,7 +188,7 @@ impl SourceRegistry {
     fn admit_candidates(
         &mut self,
         candidates: Vec<(PathBuf, SourceFingerprint)>,
-    ) -> Result<Vec<SourceSnapshot>, AdmissionError> {
+    ) -> Result<usize, AdmissionError> {
         let mut prepared = Vec::with_capacity(candidates.len());
         for (path, fingerprint) in candidates {
             if self.source_ids.contains_key(&path) {
@@ -190,7 +205,7 @@ impl SourceRegistry {
             prepared.push((path, fingerprint, execution_identity));
         }
 
-        let mut changed = false;
+        let admitted_count = prepared.len();
 
         for (path, fingerprint, execution_identity) in prepared {
             let source_id = SourceId::new(self.next_source_id);
@@ -222,14 +237,14 @@ impl SourceRegistry {
                 self.execution_identities
                     .insert(source_id, execution_identity);
             }
-            changed = true;
         }
 
-        if changed {
+        if admitted_count > 0 {
             self.generation = self.generation.saturating_add(1);
+            self.cached_planning_snapshot = None;
         }
 
-        Ok(self.snapshots())
+        Ok(admitted_count)
     }
 
     #[must_use]
@@ -257,18 +272,21 @@ impl SourceRegistry {
             self.parent_ids
                 .retain(|_, parent_id| retained_parent_ids.contains(parent_id));
             self.generation = self.generation.saturating_add(1);
+            self.cached_planning_snapshot = None;
         }
         removed_count
     }
 
     #[must_use]
-    pub fn planning_snapshot(&self) -> PlanningSnapshot {
-        PlanningSnapshot {
-            paths: self.paths.clone(),
-            snapshots: self.snapshots(),
-            parent_ids: self.parent_ids.clone(),
-            generation: self.generation,
-        }
+    pub fn planning_snapshot(&mut self) -> PlanningSnapshot {
+        self.cached_planning_snapshot
+            .get_or_insert_with(|| PlanningSnapshot {
+                paths: Arc::new(self.paths.clone()),
+                snapshots: self.snapshots.values().cloned().collect(),
+                parent_ids: Arc::new(self.parent_ids.clone()),
+                generation: self.generation,
+            })
+            .clone()
     }
 
     #[must_use]
@@ -288,30 +306,31 @@ impl SourceRegistry {
 
     #[must_use]
     pub fn validation_environment(&self) -> ValidationEnvironment {
-        self.planning_snapshot().validation_environment()
+        validation_environment(&self.paths, &self.parent_ids, |source_id| {
+            self.snapshots.get(&source_id)
+        })
     }
 }
 
-fn validation_environment(
+fn validation_environment<'a>(
     paths: &BTreeMap<SourceId, PathBuf>,
-    snapshots: &[SourceSnapshot],
     parent_ids: &BTreeMap<PathBuf, ParentId>,
+    snapshot_for: impl Copy + Fn(SourceId) -> Option<&'a SourceSnapshot>,
 ) -> ValidationEnvironment {
-    let snapshots = snapshots
-        .iter()
-        .map(|snapshot| (snapshot.id(), snapshot))
-        .collect::<BTreeMap<_, _>>();
     let stale_sources = paths
         .iter()
         .filter_map(|(source_id, path)| {
-            let snapshot = snapshots.get(source_id)?;
+            let snapshot = snapshot_for(*source_id)?;
             let current = fs::symlink_metadata(path)
                 .ok()
                 .and_then(|metadata| fingerprint_for(&metadata));
             (current.as_ref() != snapshot.fingerprint()).then_some(*source_id)
         })
         .collect::<BTreeSet<_>>();
-    let source_paths = paths.values().cloned().collect::<BTreeSet<_>>();
+    let source_paths = paths
+        .values()
+        .map(PathBuf::as_path)
+        .collect::<BTreeSet<_>>();
     let mut unavailable_parents = BTreeSet::new();
     let mut occupied_names = Vec::new();
 
@@ -327,7 +346,8 @@ fn validation_environment(
                 parent_names.clear();
                 break;
             };
-            if !source_paths.contains(&entry.path()) {
+            let entry_path = entry.path();
+            if !source_paths.contains(entry_path.as_path()) {
                 parent_names.push(OccupiedName::new(*parent_id, entry.file_name()));
             }
         }
@@ -337,22 +357,20 @@ fn validation_environment(
         (left.parent_id(), left.native_name()).cmp(&(right.parent_id(), right.native_name()))
     });
 
-    let ancestor_conflicts = ancestor_conflicts(paths, &snapshots);
+    let ancestor_conflicts = ancestor_conflicts(paths, snapshot_for);
 
     ValidationEnvironment::new(stale_sources, unavailable_parents, occupied_names)
         .with_ancestor_conflicts(ancestor_conflicts)
 }
 
-fn ancestor_conflicts(
+fn ancestor_conflicts<'a>(
     paths: &BTreeMap<SourceId, PathBuf>,
-    snapshots: &BTreeMap<SourceId, &SourceSnapshot>,
+    snapshot_for: impl Copy + Fn(SourceId) -> Option<&'a SourceSnapshot>,
 ) -> BTreeSet<SourceId> {
     let mut selected = paths
         .iter()
         .map(|(source_id, path)| {
-            let is_directory = snapshots
-                .get(source_id)
-                .and_then(|snapshot| snapshot.entry_kind())
+            let is_directory = snapshot_for(*source_id).and_then(|snapshot| snapshot.entry_kind())
                 == Some(EntryKind::Directory);
             (path, *source_id, is_directory)
         })
@@ -473,6 +491,7 @@ const fn entry_identity_signal(_metadata: &Metadata) -> Option<EntryIdentitySign
 mod tests {
     use std::error::Error;
     use std::fs;
+    use std::sync::Arc;
 
     #[cfg(unix)]
     use renamewright_core::EntryKind;
@@ -564,13 +583,20 @@ mod tests {
         let mut registry = SourceRegistry::new();
         registry.admit_paths([first])?;
         let snapshot = registry.planning_snapshot();
+        let repeated = registry.planning_snapshot();
+
+        assert!(Arc::ptr_eq(&snapshot.paths, &repeated.paths));
+        assert!(Arc::ptr_eq(&snapshot.snapshots, &repeated.snapshots));
+        assert!(Arc::ptr_eq(&snapshot.parent_ids, &repeated.parent_ids));
 
         registry.admit_paths([second])?;
+        let changed = registry.planning_snapshot();
 
         assert_eq!(snapshot.generation(), 1);
         assert_eq!(snapshot.snapshots().len(), 1);
         assert_eq!(registry.generation(), 2);
         assert_eq!(registry.snapshots().len(), 2);
+        assert!(!Arc::ptr_eq(&snapshot.paths, &changed.paths));
         assert!(snapshot.validation_environment().stale_sources().is_empty());
         Ok(())
     }
