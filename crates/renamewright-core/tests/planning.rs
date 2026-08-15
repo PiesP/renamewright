@@ -63,6 +63,28 @@ fn prefix_rule_builds_a_deterministic_trace() {
 }
 
 #[test]
+fn adjacent_trace_steps_share_the_intermediate_projection_budget() {
+    let original = "photo.jpg";
+    let first_after = "draft-photo.jpg";
+    let final_after = "draft-photo.jpg-final";
+    let plan = build_plan(
+        PlanId::new(1),
+        1,
+        &[source(1, 10, original)],
+        &[RenameRule::prefix("draft-"), RenameRule::suffix("-final")],
+        TargetPolicy::windows(),
+    );
+
+    assert_eq!(plan.rows()[0].trace()[0].after(), first_after);
+    assert_eq!(plan.rows()[0].trace()[1].before(), first_after);
+    assert_eq!(plan.rows()[0].trace()[1].after(), final_after);
+    assert_eq!(
+        plan.retained_trace_bytes(),
+        original.len() + first_after.len() + final_after.len()
+    );
+}
+
+#[test]
 fn empty_prefix_reports_an_unchanged_row() {
     let plan = build_plan(
         PlanId::new(1),

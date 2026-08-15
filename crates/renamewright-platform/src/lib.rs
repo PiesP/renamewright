@@ -101,6 +101,36 @@ pub struct SourceRegistry {
     generation: u64,
 }
 
+/// An immutable, generation-bound copy of the data needed to build a preview.
+///
+/// Capturing this value is intentionally separate from filesystem validation so
+/// callers can release the registry lock before directory enumeration and rule
+/// evaluation begin.
+#[derive(Clone, Debug)]
+pub struct PlanningSnapshot {
+    paths: BTreeMap<SourceId, PathBuf>,
+    snapshots: Vec<SourceSnapshot>,
+    parent_ids: BTreeMap<PathBuf, ParentId>,
+    generation: u64,
+}
+
+impl PlanningSnapshot {
+    #[must_use]
+    pub fn snapshots(&self) -> &[SourceSnapshot] {
+        &self.snapshots
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub fn validation_environment(&self) -> ValidationEnvironment {
+        validation_environment(&self.paths, &self.snapshots, &self.parent_ids)
+    }
+}
+
 impl SourceRegistry {
     #[must_use]
     pub fn new() -> Self {
@@ -208,6 +238,16 @@ impl SourceRegistry {
     }
 
     #[must_use]
+    pub fn planning_snapshot(&self) -> PlanningSnapshot {
+        PlanningSnapshot {
+            paths: self.paths.clone(),
+            snapshots: self.snapshots(),
+            parent_ids: self.parent_ids.clone(),
+            generation: self.generation,
+        }
+    }
+
+    #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
     }
@@ -224,60 +264,71 @@ impl SourceRegistry {
 
     #[must_use]
     pub fn validation_environment(&self) -> ValidationEnvironment {
-        let stale_sources = self
-            .paths
-            .iter()
-            .filter_map(|(source_id, path)| {
-                let snapshot = self.snapshots.get(source_id)?;
-                let current = fs::symlink_metadata(path)
-                    .ok()
-                    .and_then(|metadata| fingerprint_for(&metadata));
-                (current.as_ref() != snapshot.fingerprint()).then_some(*source_id)
-            })
-            .collect::<BTreeSet<_>>();
-        let source_paths = self.paths.values().cloned().collect::<BTreeSet<_>>();
-        let mut unavailable_parents = BTreeSet::new();
-        let mut occupied_names = Vec::new();
-
-        for (parent, parent_id) in &self.parent_ids {
-            let Ok(entries) = fs::read_dir(parent) else {
-                unavailable_parents.insert(*parent_id);
-                continue;
-            };
-            let mut parent_names = Vec::new();
-            for entry in entries {
-                let Ok(entry) = entry else {
-                    unavailable_parents.insert(*parent_id);
-                    parent_names.clear();
-                    break;
-                };
-                if !source_paths.contains(&entry.path()) {
-                    parent_names.push(OccupiedName::new(*parent_id, entry.file_name()));
-                }
-            }
-            occupied_names.extend(parent_names);
-        }
-        occupied_names.sort_by(|left, right| {
-            (left.parent_id(), left.native_name()).cmp(&(right.parent_id(), right.native_name()))
-        });
-
-        let ancestor_conflicts = ancestor_conflicts(&self.paths, &self.snapshots);
-
-        ValidationEnvironment::new(stale_sources, unavailable_parents, occupied_names)
-            .with_ancestor_conflicts(ancestor_conflicts)
+        self.planning_snapshot().validation_environment()
     }
+}
+
+fn validation_environment(
+    paths: &BTreeMap<SourceId, PathBuf>,
+    snapshots: &[SourceSnapshot],
+    parent_ids: &BTreeMap<PathBuf, ParentId>,
+) -> ValidationEnvironment {
+    let snapshots = snapshots
+        .iter()
+        .map(|snapshot| (snapshot.id(), snapshot))
+        .collect::<BTreeMap<_, _>>();
+    let stale_sources = paths
+        .iter()
+        .filter_map(|(source_id, path)| {
+            let snapshot = snapshots.get(source_id)?;
+            let current = fs::symlink_metadata(path)
+                .ok()
+                .and_then(|metadata| fingerprint_for(&metadata));
+            (current.as_ref() != snapshot.fingerprint()).then_some(*source_id)
+        })
+        .collect::<BTreeSet<_>>();
+    let source_paths = paths.values().cloned().collect::<BTreeSet<_>>();
+    let mut unavailable_parents = BTreeSet::new();
+    let mut occupied_names = Vec::new();
+
+    for (parent, parent_id) in parent_ids {
+        let Ok(entries) = fs::read_dir(parent) else {
+            unavailable_parents.insert(*parent_id);
+            continue;
+        };
+        let mut parent_names = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                unavailable_parents.insert(*parent_id);
+                parent_names.clear();
+                break;
+            };
+            if !source_paths.contains(&entry.path()) {
+                parent_names.push(OccupiedName::new(*parent_id, entry.file_name()));
+            }
+        }
+        occupied_names.extend(parent_names);
+    }
+    occupied_names.sort_by(|left, right| {
+        (left.parent_id(), left.native_name()).cmp(&(right.parent_id(), right.native_name()))
+    });
+
+    let ancestor_conflicts = ancestor_conflicts(paths, &snapshots);
+
+    ValidationEnvironment::new(stale_sources, unavailable_parents, occupied_names)
+        .with_ancestor_conflicts(ancestor_conflicts)
 }
 
 fn ancestor_conflicts(
     paths: &BTreeMap<SourceId, PathBuf>,
-    snapshots: &BTreeMap<SourceId, SourceSnapshot>,
+    snapshots: &BTreeMap<SourceId, &SourceSnapshot>,
 ) -> BTreeSet<SourceId> {
     let mut selected = paths
         .iter()
         .map(|(source_id, path)| {
             let is_directory = snapshots
                 .get(source_id)
-                .and_then(SourceSnapshot::entry_kind)
+                .and_then(|snapshot| snapshot.entry_kind())
                 == Some(EntryKind::Directory);
             (path, *source_id, is_directory)
         })
@@ -454,6 +505,27 @@ mod tests {
             environment.occupied_names()[0].native_name(),
             "final-report.txt"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn planning_snapshot_remains_bound_to_its_captured_generation() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("first.txt");
+        let second = directory.path().join("second.txt");
+        fs::write(&first, b"first")?;
+        fs::write(&second, b"second")?;
+        let mut registry = SourceRegistry::new();
+        registry.admit_paths([first])?;
+        let snapshot = registry.planning_snapshot();
+
+        registry.admit_paths([second])?;
+
+        assert_eq!(snapshot.generation(), 1);
+        assert_eq!(snapshot.snapshots().len(), 1);
+        assert_eq!(registry.generation(), 2);
+        assert_eq!(registry.snapshots().len(), 2);
+        assert!(snapshot.validation_environment().stale_sources().is_empty());
         Ok(())
     }
 

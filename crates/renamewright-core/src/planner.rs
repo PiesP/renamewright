@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::model::{
     Diagnostic, DiagnosticCode, EntryKind, ParentId, PlanId, PlanRow, RenamePlan, SourceId,
@@ -199,6 +200,7 @@ fn build_row(
     } else {
         pipeline.rules().len()
     });
+    let mut prior_trace_value: Option<Arc<str>> = None;
     let mut trace_truncated = false;
 
     for rule_index in 0..pipeline.rules().len() {
@@ -207,7 +209,11 @@ fn build_row(
         {
             continue;
         }
-        let before = (!trace_budget.exhausted()).then(|| proposed.to_string_lossy().into_owned());
+        let before = (!trace_budget.exhausted()).then(|| {
+            prior_trace_value
+                .as_ref()
+                .map_or_else(|| Arc::from(proposed.to_string_lossy()), Arc::clone)
+        });
         let sequence_value = sequence_values
             .get(rule_index)
             .and_then(Option::as_ref)
@@ -229,11 +235,19 @@ fn build_row(
         };
         proposed = after;
         if let Some(before) = before {
-            let after = proposed.to_string_lossy().into_owned();
-            if trace_budget.retain(before.len().saturating_add(after.len())) {
-                trace.push(TraceStep::new(rule_index, before, after));
+            let after: Arc<str> = Arc::from(proposed.to_string_lossy());
+            let first_before_bytes = if prior_trace_value.is_none() {
+                before.len()
+            } else {
+                0
+            };
+            let additional_bytes = after.len().saturating_add(first_before_bytes);
+            if trace_budget.retain(additional_bytes) {
+                trace.push(TraceStep::new(rule_index, before, Arc::clone(&after)));
+                prior_trace_value = Some(after);
             } else {
                 trace_truncated = true;
+                prior_trace_value = None;
             }
         } else {
             trace_truncated = true;

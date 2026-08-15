@@ -262,11 +262,20 @@ where
 
 pub(crate) trait ExecutionJournal {
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageErrorKind>;
+
+    fn append_completion(&mut self, record: &JournalRecord) -> Result<(), JournalStorageErrorKind> {
+        self.append(record)
+    }
 }
 
 impl ExecutionJournal for JournalWriter {
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageErrorKind> {
         JournalWriter::append(self, record).map_err(|error| error.kind())
+    }
+
+    fn append_completion(&mut self, record: &JournalRecord) -> Result<(), JournalStorageErrorKind> {
+        self.append_buffered_completion(record)
+            .map_err(|error| error.kind())
     }
 }
 
@@ -328,7 +337,7 @@ where
             entry.0.execution_identity(),
         ) {
             Ok(observed_identity) => {
-                if let Err(kind) = journal.append(&JournalRecord::ForwardStepCompleted {
+                if let Err(kind) = journal.append_completion(&JournalRecord::ForwardStepCompleted {
                     step_index: step.index(),
                     observed_identity,
                 }) {
@@ -414,10 +423,12 @@ where
             entry.0.execution_identity(),
         ) {
             Ok(observed_identity) => {
-                if let Err(kind) = journal.append(&JournalRecord::RollbackStepCompleted {
-                    step_index: step.index(),
-                    observed_identity,
-                }) {
+                if let Err(kind) =
+                    journal.append_completion(&JournalRecord::RollbackStepCompleted {
+                        step_index: step.index(),
+                        observed_identity,
+                    })
+                {
                     return journal_recovery(
                         ExecutionDirection::Rollback,
                         Some(step.index()),

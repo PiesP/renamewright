@@ -344,6 +344,16 @@ impl JournalWriter {
         self.appender.append(record)
     }
 
+    pub(crate) fn append_buffered_completion(
+        &mut self,
+        record: &JournalRecord,
+    ) -> Result<(), JournalStorageError> {
+        // Prepared is already durable before the rename. If the process stops
+        // before the next durable boundary flushes this completion, replay sees
+        // the prepared-only step and requires identity-based reconciliation.
+        self.appender.append_buffered_completion(record)
+    }
+
     #[must_use]
     pub const fn next_sequence(&self) -> u64 {
         self.appender.next_sequence
@@ -411,6 +421,26 @@ impl<S: JournalSink> DurableAppender<S> {
     }
 
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageError> {
+        self.validate_append(record)?;
+        self.append_record(record, true)
+    }
+
+    fn append_buffered_completion(
+        &mut self,
+        record: &JournalRecord,
+    ) -> Result<(), JournalStorageError> {
+        if !matches!(
+            record,
+            JournalRecord::ForwardStepCompleted { .. }
+                | JournalRecord::RollbackStepCompleted { .. }
+        ) {
+            return self.append(record);
+        }
+        self.validate_append(record)?;
+        self.append_record(record, false)
+    }
+
+    fn validate_append(&self, record: &JournalRecord) -> Result<(), JournalStorageError> {
         if self.poisoned {
             return Err(JournalStorageError::new(
                 self.next_sequence,
@@ -429,10 +459,18 @@ impl<S: JournalSink> DurableAppender<S> {
                 JournalStorageErrorKind::RecordAfterTerminal,
             ));
         }
-        self.append_durable(record)
+        Ok(())
     }
 
     fn append_durable(&mut self, record: &JournalRecord) -> Result<(), JournalStorageError> {
+        self.append_record(record, true)
+    }
+
+    fn append_record(
+        &mut self,
+        record: &JournalRecord,
+        synchronize: bool,
+    ) -> Result<(), JournalStorageError> {
         let following_sequence = self.next_sequence.checked_add(1).ok_or_else(|| {
             JournalStorageError::new(
                 self.next_sequence,
@@ -463,7 +501,7 @@ impl<S: JournalSink> DurableAppender<S> {
                 },
             ));
         }
-        if let Err(error) = self.sink.sync_all() {
+        if synchronize && let Err(error) = self.sink.sync_all() {
             self.poisoned = true;
             return Err(JournalStorageError::new(
                 self.next_sequence,
@@ -1431,6 +1469,93 @@ mod tests {
         assert_eq!(appender.sink.sync_attempts.get(), 1);
         assert_eq!(appender.sink.frames_seen_at_sync.get(), 1);
         assert_eq!(appender.next_sequence, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn completed_step_is_flushed_with_the_next_durable_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut appender = DurableAppender::new(TestSink::default());
+        appender.append_initial(&JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(1),
+            source_generation: 1,
+            step_count: 2,
+            entries: vec![JournalEntry::new(
+                SourceId::new(1),
+                ParentId::new(1),
+                JournalNameGraph::new(
+                    OsString::from("a.txt"),
+                    OsString::from("temporary.tmp"),
+                    OsString::from("final-a.txt"),
+                ),
+                SourceFingerprint::new(EntryKind::File, None, 1, None),
+                ExecutionIdentity::new(1, [1; 16]),
+            )],
+        })?;
+        appender.append(&JournalRecord::ForwardStepPrepared { step_index: 0 })?;
+        appender.append_buffered_completion(&JournalRecord::ForwardStepCompleted {
+            step_index: 0,
+            observed_identity: ExecutionIdentity::new(1, [1; 16]),
+        })?;
+
+        assert_eq!(appender.sink.frames.len(), 3);
+        assert_eq!(appender.sink.sync_attempts.get(), 2);
+        assert_eq!(appender.sink.frames_seen_at_sync.get(), 2);
+
+        appender.append(&JournalRecord::ForwardStepPrepared { step_index: 1 })?;
+
+        assert_eq!(appender.sink.frames.len(), 4);
+        assert_eq!(appender.sink.sync_attempts.get(), 3);
+        assert_eq!(appender.sink.frames_seen_at_sync.get(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_record_flushes_the_final_buffered_completion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut appender = DurableAppender::new(TestSink::default());
+        appender.append_initial(&JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(1),
+            source_generation: 1,
+            step_count: 0,
+            entries: Vec::new(),
+        })?;
+        appender.append_buffered_completion(&JournalRecord::ForwardStepCompleted {
+            step_index: 0,
+            observed_identity: ExecutionIdentity::new(1, [1; 16]),
+        })?;
+        assert_eq!(appender.sink.sync_attempts.get(), 1);
+
+        appender.append(&JournalRecord::TransactionCompleted)?;
+
+        assert_eq!(appender.sink.sync_attempts.get(), 2);
+        assert_eq!(appender.sink.frames_seen_at_sync.get(), 3);
+        assert!(appender.terminal);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_two_source_sequence_uses_one_sync_per_prepared_step()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut appender = DurableAppender::new(TestSink::default());
+        appender.append_initial(&JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(1),
+            source_generation: 1,
+            step_count: 4,
+            entries: Vec::new(),
+        })?;
+        for step_index in 0..4 {
+            appender.append(&JournalRecord::ForwardStepPrepared { step_index })?;
+            appender.append_buffered_completion(&JournalRecord::ForwardStepCompleted {
+                step_index,
+                observed_identity: ExecutionIdentity::new(1, [1; 16]),
+            })?;
+        }
+        appender.append(&JournalRecord::TransactionCompleted)?;
+
+        assert_eq!(appender.sink.frames.len(), 10);
+        assert_eq!(appender.sink.sync_attempts.get(), 6);
+        assert_eq!(appender.sink.frames_seen_at_sync.get(), 10);
         Ok(())
     }
 

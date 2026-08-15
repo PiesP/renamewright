@@ -3,12 +3,13 @@
 // Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V4
 // Hallmark · macrostructure: direct-command workbench · theme: Cobalt · slop: pass (native-app scope)
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
@@ -16,8 +17,8 @@ use eframe::egui::{
 use renamewright_application::{
     ApplicationService, ApplyCommandErrorDto, ApplyCommandResultDto, CaseModeDto,
     CharacterClassDto, CharacterClassOperationDto, ExtensionOperationDto, FilenamePartDto,
-    LedgerEntryDto, PlanDto, PresetDocumentDto, RangeOperationDto, RangeOriginDto,
-    RecoveryCommandAction, RecoveryCommandErrorDto, RecoveryCommandResultDto,
+    LedgerEntryDto, PlanDto, PlanningCommandErrorDto, PresetDocumentDto, RangeOperationDto,
+    RangeOriginDto, RecoveryCommandAction, RecoveryCommandErrorDto, RecoveryCommandResultDto,
     RecoveryInspectionDto, RecoveryRequestDto, RulePipelineRequestDto, RuleRequestDto,
     SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, SourceOverrideDto,
     UndoCommandErrorDto, UndoCommandResultDto, UndoInspectionDto, UndoRequestDto,
@@ -36,6 +37,9 @@ const PREVIEW_PROPOSED_COLUMN_WIDTH: f32 = 180.0;
 const PREVIEW_STATUS_COLUMN_WIDTH: f32 = 80.0;
 const APPEARANCE_STORAGE_KEY: &str = "renamewright.appearance.v1";
 const MUTATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const PLANNING_DEBOUNCE: Duration = Duration::from_millis(100);
+const PLANNING_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const LEDGER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 fn preview_column_label(
     ui: &mut egui::Ui,
@@ -1507,6 +1511,99 @@ struct MutationTask {
     handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug)]
+enum PlanningOutcome {
+    Preview(Result<PlanDto, PlanningCommandErrorDto>),
+    Validation(Result<(), PlanningCommandErrorDto>),
+}
+
+#[derive(Debug)]
+struct PlanningMessage {
+    revision: u64,
+    outcome: PlanningOutcome,
+}
+
+#[derive(Debug)]
+struct PlanningTask {
+    receiver: Receiver<PlanningMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+enum LedgerMessage {
+    Snapshot {
+        result: Result<Vec<LedgerEntryDto>, String>,
+        announce: bool,
+    },
+    Recovery(Result<RecoveryInspectionDto, String>),
+    Undo(Result<UndoInspectionDto, String>),
+}
+
+#[derive(Debug)]
+struct LedgerTask {
+    receiver: Receiver<LedgerMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+enum DocumentMessage {
+    Inspection {
+        json: bool,
+        result: Result<String, String>,
+    },
+    Export {
+        extension: &'static str,
+        result: Result<(), String>,
+    },
+}
+
+#[derive(Debug)]
+struct DocumentTask {
+    receiver: Receiver<DocumentMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DocumentTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl LedgerTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl PlanningTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct VisibleRowsKey {
+    plan_id: Option<u64>,
+    source_query: String,
+    filter: PlanFilter,
+    diagnostic_filter: DiagnosticFilter,
+    synthetic_fixture: bool,
+}
+
+#[derive(Debug, Default)]
+struct VisibleRowsCache {
+    key: Option<VisibleRowsKey>,
+    search_plan_id: Option<u64>,
+    search_text: Vec<String>,
+    indices: Arc<[usize]>,
+}
+
 impl MutationTask {
     fn finish(mut self) {
         if let Some(handle) = self.handle.take() {
@@ -1989,6 +2086,7 @@ pub struct RenamewrightApp {
     locale: Locale,
     override_editor: Option<OverrideEditor>,
     inspection: Option<InspectionDocument>,
+    document_task: Option<DocumentTask>,
     synthetic_fixture: bool,
     preset_path: Option<PathBuf>,
     journal_root: Option<PathBuf>,
@@ -1996,11 +2094,18 @@ pub struct RenamewrightApp {
     preset_name: String,
     status: String,
     ledger: Vec<LedgerEntryDto>,
+    ledger_ready: bool,
+    ledger_task: Option<LedgerTask>,
     selected_ledger_id: Option<u64>,
     recovery_inspection: Option<RecoveryInspectionDto>,
     undo_inspection: Option<UndoInspectionDto>,
     pending_confirmation: Option<PendingConfirmation>,
     mutation_task: Option<MutationTask>,
+    planning_revision: u64,
+    planning_due: Option<Instant>,
+    planning_task: Option<PlanningTask>,
+    plan_is_current: bool,
+    visible_rows: VisibleRowsCache,
     native_palette: NativePalette,
     palette: NativePalette,
     appearance: AppearancePreferences,
@@ -2103,15 +2208,25 @@ impl RenamewrightApp {
             },
         );
         let application = Arc::new(ApplicationService::default());
-        let journal_status = journal_root
-            .as_ref()
-            .and_then(|root| application.initialize(root).err())
-            .map(|error| error.to_string());
-        let ledger = if journal_status.is_none() {
-            application.ledger_snapshot().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let ledger_task = journal_root.as_ref().map(|root| {
+            let application = Arc::clone(&application);
+            let root = root.clone();
+            let (sender, receiver) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                let result = application
+                    .initialize(&root)
+                    .and_then(|()| application.ledger_snapshot())
+                    .map_err(|error| error.to_string());
+                let _ = sender.send(LedgerMessage::Snapshot {
+                    result,
+                    announce: false,
+                });
+            });
+            LedgerTask {
+                receiver,
+                handle: Some(handle),
+            }
+        });
         let rules = if synthetic_fixture {
             vec![RuleRequestDto::Prefix {
                 rule_id: 1,
@@ -2142,24 +2257,34 @@ impl RenamewrightApp {
             locale: Locale::English,
             override_editor: None,
             inspection: None,
+            document_task: None,
             synthetic_fixture,
             preset_path,
             journal_root,
             presets,
             preset_name: String::new(),
-            status: journal_status.or(preset_status).unwrap_or_else(|| {
-                if synthetic_fixture {
+            status: preset_status.unwrap_or_else(|| {
+                if ledger_task.is_some() {
+                    "Checking rename history".to_owned()
+                } else if synthetic_fixture {
                     format!("{SAMPLE_COUNT} sample entries ready")
                 } else {
                     semantics::NO_SOURCES.to_owned()
                 }
             }),
-            ledger,
+            ledger: Vec::new(),
+            ledger_ready: false,
+            ledger_task,
             selected_ledger_id: None,
             recovery_inspection: None,
             undo_inspection: None,
             pending_confirmation: None,
             mutation_task: None,
+            planning_revision: 0,
+            planning_due: None,
+            planning_task: None,
+            plan_is_current: true,
+            visible_rows: VisibleRowsCache::default(),
             native_palette: palette,
             palette,
             appearance,
@@ -2221,43 +2346,34 @@ impl RenamewrightApp {
         index > 0 && index.is_multiple_of(997)
     }
 
-    fn row_is_visible(&self, index: usize) -> bool {
-        if let Some(plan) = &self.plan {
-            let Some(row) = plan.rows().get(index) else {
-                return false;
-            };
-            let matches_filter = match self.filter {
-                PlanFilter::All => true,
-                PlanFilter::Changed => row.status() == "changed",
-                PlanFilter::Blocked => row.status() == "blocked",
-            };
-            let query = self.source_query.trim().to_lowercase();
-            let matches_query = query.is_empty()
-                || row.original_name().to_lowercase().contains(&query)
-                || row.proposed_name().to_lowercase().contains(&query);
-            let matches_diagnostic = self
-                .diagnostic_filter
-                .code()
-                .is_none_or(|code| row.diagnostics().contains(&code));
-            return matches_filter && matches_query && matches_diagnostic;
-        }
-        if !self.synthetic_fixture {
-            return false;
+    fn visible_indices(&mut self) -> Arc<[usize]> {
+        let plan_id = self.plan.as_ref().map(PlanDto::plan_id);
+        if self.visible_rows.key.as_ref().is_some_and(|key| {
+            key.plan_id == plan_id
+                && key.source_query == self.source_query
+                && key.filter == self.filter
+                && key.diagnostic_filter == self.diagnostic_filter
+                && key.synthetic_fixture == self.synthetic_fixture
+        }) {
+            return Arc::clone(&self.visible_rows.indices);
         }
 
-        let blocked = Self::row_is_blocked(index);
-        let matches_filter = match self.filter {
-            PlanFilter::All | PlanFilter::Changed => true,
-            PlanFilter::Blocked => blocked,
-        };
-        let matches_query = self.source_query.trim().is_empty()
-            || format!("IMG_{index:05}.jpg")
-                .to_ascii_lowercase()
-                .contains(&self.source_query.trim().to_ascii_lowercase());
-        matches_filter && matches_query
-    }
+        if self.visible_rows.search_plan_id != plan_id {
+            self.visible_rows.search_text.clear();
+            if let Some(plan) = &self.plan {
+                self.visible_rows.search_text.reserve(plan.rows().len());
+                self.visible_rows
+                    .search_text
+                    .extend(plan.rows().iter().map(|row| {
+                        let mut projection = row.original_name().to_lowercase();
+                        projection.push('\0');
+                        projection.push_str(&row.proposed_name().to_lowercase());
+                        projection
+                    }));
+            }
+            self.visible_rows.search_plan_id = plan_id;
+        }
 
-    fn visible_indices(&self) -> Vec<usize> {
         let row_count = self.plan.as_ref().map_or_else(
             || {
                 if self.synthetic_fixture {
@@ -2268,19 +2384,67 @@ impl RenamewrightApp {
             },
             |plan| plan.rows().len(),
         );
-        (0..row_count)
-            .filter(|index| self.row_is_visible(*index))
-            .collect()
+        let query = self.source_query.trim().to_lowercase();
+        let indices = (0..row_count)
+            .filter(|index| {
+                if let Some(plan) = &self.plan {
+                    let Some(row) = plan.rows().get(*index) else {
+                        return false;
+                    };
+                    let matches_filter = match self.filter {
+                        PlanFilter::All => true,
+                        PlanFilter::Changed => row.status() == "changed",
+                        PlanFilter::Blocked => row.status() == "blocked",
+                    };
+                    let matches_query = query.is_empty()
+                        || self
+                            .visible_rows
+                            .search_text
+                            .get(*index)
+                            .is_some_and(|projection| projection.contains(&query));
+                    let matches_diagnostic = self
+                        .diagnostic_filter
+                        .code()
+                        .is_none_or(|code| row.diagnostics().contains(&code));
+                    matches_filter && matches_query && matches_diagnostic
+                } else if self.synthetic_fixture {
+                    let blocked = Self::row_is_blocked(*index);
+                    let matches_filter = match self.filter {
+                        PlanFilter::All | PlanFilter::Changed => true,
+                        PlanFilter::Blocked => blocked,
+                    };
+                    let matches_query = query.is_empty()
+                        || format!("IMG_{index:05}.jpg")
+                            .to_ascii_lowercase()
+                            .contains(&query);
+                    matches_filter && matches_query
+                } else {
+                    false
+                }
+            })
+            .collect::<Arc<[_]>>();
+        self.visible_rows.key = Some(VisibleRowsKey {
+            plan_id,
+            source_query: self.source_query.clone(),
+            filter: self.filter,
+            diagnostic_filter: self.diagnostic_filter,
+            synthetic_fixture: self.synthetic_fixture,
+        });
+        self.visible_rows.indices = Arc::clone(&indices);
+        indices
     }
 
     fn admit_sources(&mut self, paths: Vec<PathBuf>) {
+        self.supersede_pending_plan_refresh();
         let request = self.rule_request();
         match self.application.admit_sources_with_rules(paths, request) {
             Ok(plan) => {
                 self.status = self.plan_status(&plan);
                 self.plan = Some(plan);
+                self.plan_is_current = true;
             }
             Err(error) => {
+                self.plan_is_current = false;
                 self.status = format!(
                     "{} ({})",
                     self.locale
@@ -2292,34 +2456,144 @@ impl RenamewrightApp {
     }
 
     fn refresh_plan(&mut self) {
+        self.supersede_pending_plan_refresh();
         let request = self.rule_request();
-        if let Err(error) = self.application.validate_rule_request(&request) {
-            let code = error.code().to_owned();
-            self.rule_error = Some(code.clone());
-            self.status = format!(
-                "{} ({code})",
-                self.locale
-                    .text("Rule input is invalid", "규칙 입력이 올바르지 않습니다")
-            );
-            return;
-        }
-        self.rule_error = None;
         if self.plan.is_none() {
+            match self.application.validate_rule_request(&request) {
+                Ok(()) => {
+                    self.rule_error = None;
+                    self.plan_is_current = true;
+                }
+                Err(error) => self.apply_planning_error(&error),
+            }
             return;
         }
         match self.application.preview_rules(request) {
             Ok(plan) => {
+                self.rule_error = None;
                 self.status = self.plan_status(&plan);
                 self.plan = Some(plan);
+                self.plan_is_current = true;
             }
-            Err(code) => {
-                self.status = format!(
-                    "{} ({code})",
-                    self.locale
-                        .text("Preview unavailable", "미리보기를 만들 수 없습니다")
-                );
-            }
+            Err(error) => self.apply_planning_error(&error),
         }
+    }
+
+    fn supersede_pending_plan_refresh(&mut self) {
+        self.planning_revision = self.planning_revision.saturating_add(1);
+        self.planning_due = None;
+        if matches!(
+            self.pending_confirmation.as_ref(),
+            Some(PendingConfirmation::Apply { .. })
+        ) {
+            self.pending_confirmation = None;
+        }
+    }
+
+    fn schedule_plan_refresh(&mut self, context: &egui::Context) {
+        self.planning_revision = self.planning_revision.saturating_add(1);
+        self.planning_due = Some(Instant::now() + PLANNING_DEBOUNCE);
+        self.plan_is_current = false;
+        self.rule_error = None;
+        if matches!(
+            self.pending_confirmation.as_ref(),
+            Some(PendingConfirmation::Apply { .. })
+        ) {
+            self.pending_confirmation = None;
+        }
+        self.status = self
+            .locale
+            .text("Updating preview", "미리보기를 갱신 중입니다")
+            .to_owned();
+        context.request_repaint_after(PLANNING_DEBOUNCE);
+    }
+
+    fn poll_planning(&mut self, context: &egui::Context) {
+        let message = self
+            .planning_task
+            .as_ref()
+            .map(|task| task.receiver.try_recv());
+        match message {
+            Some(Ok(message)) => {
+                if let Some(task) = self.planning_task.take() {
+                    task.finish();
+                }
+                if message.revision == self.planning_revision {
+                    match message.outcome {
+                        PlanningOutcome::Preview(Ok(plan)) => {
+                            self.rule_error = None;
+                            self.status = self.plan_status(&plan);
+                            self.plan = Some(plan);
+                            self.plan_is_current = true;
+                        }
+                        PlanningOutcome::Validation(Ok(())) => {
+                            self.rule_error = None;
+                            self.plan_is_current = true;
+                        }
+                        PlanningOutcome::Preview(Err(error))
+                        | PlanningOutcome::Validation(Err(error)) => {
+                            self.apply_planning_error(&error);
+                        }
+                    }
+                }
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                if let Some(task) = self.planning_task.take() {
+                    task.finish();
+                }
+                self.plan_is_current = false;
+                self.status = self
+                    .locale
+                    .text(
+                        "Preview calculation ended unexpectedly",
+                        "미리보기 계산이 예기치 않게 종료되었습니다",
+                    )
+                    .to_owned();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+
+        if self.planning_task.is_none()
+            && self
+                .planning_due
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.planning_due = None;
+            let revision = self.planning_revision;
+            let request = self.rule_request();
+            let has_plan = self.plan.is_some();
+            let application = Arc::clone(&self.application);
+            let (sender, receiver) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                let outcome = if has_plan {
+                    PlanningOutcome::Preview(application.preview_rules(request))
+                } else {
+                    PlanningOutcome::Validation(application.validate_rule_request(&request))
+                };
+                let _ = sender.send(PlanningMessage { revision, outcome });
+            });
+            self.planning_task = Some(PlanningTask {
+                receiver,
+                handle: Some(handle),
+            });
+        }
+
+        if self.planning_task.is_some() {
+            context.request_repaint_after(PLANNING_POLL_INTERVAL);
+        } else if let Some(deadline) = self.planning_due {
+            context.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    fn apply_planning_error(&mut self, error: &PlanningCommandErrorDto) {
+        let code = error.code().to_owned();
+        self.rule_error = Some(code.clone());
+        self.plan_is_current = false;
+        self.status = format!(
+            "{} ({code})",
+            self.locale
+                .text("Preview unavailable", "미리보기를 만들 수 없습니다")
+        );
     }
 
     fn plan_status(&self, plan: &PlanDto) -> String {
@@ -2517,50 +2791,149 @@ impl RenamewrightApp {
                 .to_owned();
             return;
         }
-        match self.application.list_ledger() {
-            Ok(ledger) => {
-                if self.selected_ledger_id.is_some_and(|selected| {
-                    !ledger.iter().any(|entry| entry.ledger_id() == selected)
-                }) {
-                    self.selected_ledger_id = None;
-                    self.recovery_inspection = None;
-                    self.undo_inspection = None;
-                }
-                self.ledger = ledger;
-            }
-            Err(error) => self.status = error.to_string(),
+        if self.ledger_task.is_some() {
+            return;
         }
+        self.ledger_ready = false;
+        self.start_ledger_task(
+            self.locale
+                .text(
+                    "Refreshing rename history",
+                    "이름 변경 기록을 새로 고치는 중입니다",
+                )
+                .to_owned(),
+            |application| LedgerMessage::Snapshot {
+                result: application.list_ledger().map_err(|error| error.to_string()),
+                announce: true,
+            },
+        );
     }
 
     fn inspect_selected_recovery(&mut self) {
         let Some(ledger_id) = self.selected_ledger_id else {
             return;
         };
-        match self
-            .application
-            .inspect_recovery(ledger_id, &NativeExecutionFileSystem::new())
-        {
-            Ok(inspection) => {
-                self.recovery_inspection = Some(inspection);
-                self.undo_inspection = None;
-            }
-            Err(error) => self.status = error.to_string(),
+        if self.ledger_task.is_some() {
+            return;
         }
+        self.start_ledger_task(
+            self.locale
+                .text("Inspecting recovery state", "복구 상태를 검사 중입니다")
+                .to_owned(),
+            move |application| {
+                LedgerMessage::Recovery(
+                    application
+                        .inspect_recovery(ledger_id, &NativeExecutionFileSystem::new())
+                        .map_err(|error| error.to_string()),
+                )
+            },
+        );
     }
 
     fn inspect_selected_undo(&mut self) {
         let Some(ledger_id) = self.selected_ledger_id else {
             return;
         };
-        match self
-            .application
-            .inspect_undo(ledger_id, &NativeExecutionFileSystem::new())
-        {
-            Ok(inspection) => {
-                self.undo_inspection = Some(inspection);
-                self.recovery_inspection = None;
+        if self.ledger_task.is_some() {
+            return;
+        }
+        self.start_ledger_task(
+            self.locale
+                .text("Inspecting undo state", "실행 취소 상태를 검사 중입니다")
+                .to_owned(),
+            move |application| {
+                LedgerMessage::Undo(
+                    application
+                        .inspect_undo(ledger_id, &NativeExecutionFileSystem::new())
+                        .map_err(|error| error.code().to_owned()),
+                )
+            },
+        );
+    }
+
+    fn start_ledger_task<F>(&mut self, status: String, work: F)
+    where
+        F: FnOnce(Arc<ApplicationService>) -> LedgerMessage + Send + 'static,
+    {
+        let application = Arc::clone(&self.application);
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = sender.send(work(application));
+        });
+        self.ledger_task = Some(LedgerTask {
+            receiver,
+            handle: Some(handle),
+        });
+        self.status = status;
+    }
+
+    fn poll_ledger(&mut self, context: &egui::Context) {
+        let message = self
+            .ledger_task
+            .as_ref()
+            .map(|task| task.receiver.try_recv());
+        match message {
+            Some(Ok(message)) => {
+                if let Some(task) = self.ledger_task.take() {
+                    task.finish();
+                }
+                match message {
+                    LedgerMessage::Snapshot {
+                        result: Ok(ledger),
+                        announce,
+                    } => {
+                        if self.selected_ledger_id.is_some_and(|selected| {
+                            !ledger.iter().any(|entry| entry.ledger_id() == selected)
+                        }) {
+                            self.selected_ledger_id = None;
+                            self.recovery_inspection = None;
+                            self.undo_inspection = None;
+                        }
+                        self.ledger = ledger;
+                        self.ledger_ready = true;
+                        if announce {
+                            self.status = self
+                                .locale
+                                .text("Rename history is ready", "이름 변경 기록을 확인했습니다")
+                                .to_owned();
+                        }
+                    }
+                    LedgerMessage::Snapshot {
+                        result: Err(error), ..
+                    } => {
+                        self.ledger_ready = false;
+                        self.status = error;
+                    }
+                    LedgerMessage::Recovery(Ok(inspection)) => {
+                        self.recovery_inspection = Some(inspection);
+                        self.undo_inspection = None;
+                    }
+                    LedgerMessage::Recovery(Err(error)) | LedgerMessage::Undo(Err(error)) => {
+                        self.status = error
+                    }
+                    LedgerMessage::Undo(Ok(inspection)) => {
+                        self.undo_inspection = Some(inspection);
+                        self.recovery_inspection = None;
+                    }
+                }
             }
-            Err(error) => self.status = error.code().to_owned(),
+            Some(Err(TryRecvError::Disconnected)) => {
+                if let Some(task) = self.ledger_task.take() {
+                    task.finish();
+                }
+                self.ledger_ready = false;
+                self.status = self
+                    .locale
+                    .text(
+                        "Rename history task ended unexpectedly",
+                        "이름 변경 기록 작업이 예기치 않게 종료되었습니다",
+                    )
+                    .to_owned();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+        if self.ledger_task.is_some() {
+            context.request_repaint_after(LEDGER_POLL_INTERVAL);
         }
     }
 
@@ -2730,39 +3103,60 @@ impl RenamewrightApp {
         ui.horizontal(|ui| {
             ui.heading(self.locale.text(semantics::LEDGER, "원장"));
             if ui
-                .button(
-                    self.locale
-                        .text(semantics::REFRESH_LEDGER, "원장 새로 고침"),
+                .add_enabled(
+                    self.ledger_task.is_none(),
+                    egui::Button::new(
+                        self.locale
+                            .text(semantics::REFRESH_LEDGER, "원장 새로 고침"),
+                    ),
                 )
                 .clicked()
             {
                 self.refresh_ledger();
             }
         });
+        if self.ledger_task.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    self.locale
+                        .text("Checking rename history", "이름 변경 기록을 확인 중입니다"),
+                );
+            });
+        }
         if self.ledger.is_empty() {
-            ui.label(self.locale.text("No transactions", "트랜잭션이 없습니다"));
+            if self.ledger_task.is_none() {
+                ui.label(self.locale.text("No transactions", "트랜잭션이 없습니다"));
+            }
             return;
         }
 
         let mut selected = self.selected_ledger_id;
-        ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-            for entry in &self.ledger {
-                let label = format!(
-                    "#{} · {} · {}",
-                    entry.ledger_id(),
-                    entry.status(),
-                    entry.source_count()
-                );
-                ui.selectable_value(&mut selected, Some(entry.ledger_id()), label);
-            }
-        });
+        ScrollArea::vertical().max_height(240.0).show_rows(
+            ui,
+            self.appearance.density.preview_row_height(),
+            self.ledger.len(),
+            |ui, row_range| {
+                for index in row_range {
+                    let entry = &self.ledger[index];
+                    let label = format!(
+                        "#{} · {} · {}",
+                        entry.ledger_id(),
+                        entry.status(),
+                        entry.source_count()
+                    );
+                    ui.selectable_value(&mut selected, Some(entry.ledger_id()), label);
+                }
+            },
+        );
         if selected != self.selected_ledger_id {
             self.selected_ledger_id = selected;
             self.recovery_inspection = None;
             self.undo_inspection = None;
         }
 
-        let mutation_idle = self.mutation_task.is_none();
+        let mutation_idle =
+            self.mutation_task.is_none() && self.ledger_task.is_none() && self.ledger_ready;
         let (recovery_available, undo_available) = self
             .selected_ledger_id
             .and_then(|ledger_id| {
@@ -2917,10 +3311,10 @@ impl RenamewrightApp {
         if !self.appearance_applied || self.palette != palette {
             self.palette = palette;
             install_theme_with_density(context, palette, self.appearance.density);
+            context.options_mut(|options| options.fallback_theme = egui::Theme::Light);
+            context.set_theme(self.appearance.theme.preference());
             self.appearance_applied = true;
         }
-        context.options_mut(|options| options.fallback_theme = egui::Theme::Light);
-        context.set_theme(self.appearance.theme.preference());
     }
 
     fn show_appearance_menu(&mut self, ui: &mut egui::Ui) -> bool {
@@ -3417,7 +3811,7 @@ impl RenamewrightApp {
                 if self.draft_rule_id.is_some() {
                     self.draft_rule_changed = true;
                 }
-                self.refresh_plan();
+                self.schedule_plan_refresh(ui.ctx());
             }
             if !editor_opened_this_frame {
                 done |= ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
@@ -3459,7 +3853,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some(),
+                    self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::INSPECT_JSON, "JSON 검토")),
                 )
                 .clicked()
@@ -3468,7 +3862,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some(),
+                    self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::INSPECT_CSV, "CSV 검토")),
                 )
                 .clicked()
@@ -3477,7 +3871,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some(),
+                    self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::EXPORT_JSON, "JSON 내보내기")),
                 )
                 .clicked()
@@ -3486,7 +3880,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some(),
+                    self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::EXPORT_CSV, "CSV 내보내기")),
                 )
                 .clicked()
@@ -3680,8 +4074,8 @@ impl RenamewrightApp {
                                         (
                                             None,
                                             "file",
-                                            source,
-                                            proposed,
+                                            Cow::Owned(source),
+                                            Cow::Owned(proposed),
                                             status,
                                             if blocked {
                                                 self.locale.text("Sample conflict", "샘플 충돌")
@@ -3697,8 +4091,8 @@ impl RenamewrightApp {
                                         (
                                             Some(row.source_id()),
                                             row.entry_kind(),
-                                            row.original_name().to_owned(),
-                                            row.proposed_name().to_owned(),
+                                            Cow::Borrowed(row.original_name()),
+                                            Cow::Borrowed(row.proposed_name()),
                                             if row.status() == "blocked" {
                                                 self.locale.text("Blocked", "차단됨")
                                             } else if row.status() == "unchanged" {
@@ -3730,8 +4124,16 @@ impl RenamewrightApp {
                                                 },
                                             );
                                         }
-                                        preview_column_label(ui, source_column_width, &source);
-                                        preview_column_label(ui, proposed_column_width, proposed);
+                                        preview_column_label(
+                                            ui,
+                                            source_column_width,
+                                            source.as_ref(),
+                                        );
+                                        preview_column_label(
+                                            ui,
+                                            proposed_column_width,
+                                            proposed.as_ref(),
+                                        );
                                         let color = if blocked {
                                             self.palette.blocked
                                         } else {
@@ -3757,7 +4159,8 @@ impl RenamewrightApp {
                                                 )
                                                 .clicked()
                                         {
-                                            requested_override = Some((source_id, source));
+                                            requested_override =
+                                                Some((source_id, source.into_owned()));
                                         }
                                     });
                                 });
@@ -3803,7 +4206,12 @@ impl RenamewrightApp {
         let unchanged_count = total_count.saturating_sub(changed_count + blocked_count);
         let can_apply = self.plan.as_ref().is_some_and(PlanDto::can_apply)
             && self.journal_root.is_some()
-            && self.mutation_task.is_none();
+            && self.mutation_task.is_none()
+            && self.plan_is_current
+            && self.planning_due.is_none()
+            && self.planning_task.is_none()
+            && self.ledger_ready
+            && self.ledger_task.is_none();
         let lock_reason = if self.synthetic_fixture && self.plan.is_none() {
             self.locale.text(
                 "Sample preview cannot be applied",
@@ -3814,6 +4222,14 @@ impl RenamewrightApp {
                 "Add entries to create a plan",
                 "항목을 추가해 계획을 만드세요",
             )
+        } else if !self.plan_is_current
+            || self.planning_due.is_some()
+            || self.planning_task.is_some()
+        {
+            self.locale.text(
+                "Wait for the latest preview before applying",
+                "최신 미리보기가 준비될 때까지 기다리세요",
+            )
         } else if blocked_count > 0 {
             self.locale.text(
                 "Resolve every blocked entry before applying",
@@ -3823,6 +4239,11 @@ impl RenamewrightApp {
             self.locale.text(
                 "Journal storage is unavailable",
                 "저널 저장소를 사용할 수 없습니다",
+            )
+        } else if !self.ledger_ready || self.ledger_task.is_some() {
+            self.locale.text(
+                "Wait for rename history checks to finish",
+                "이름 변경 기록 검사가 끝날 때까지 기다리세요",
             )
         } else if self.mutation_task.is_some() {
             self.locale.text(
@@ -3889,36 +4310,40 @@ impl RenamewrightApp {
     }
 
     fn inspect_plan(&mut self, json: bool) {
+        if self.document_task.is_some() {
+            return;
+        }
         let Some(plan_id) = self.plan.as_ref().map(PlanDto::plan_id) else {
             return;
         };
-        let document = if json {
-            self.application.inspect_plan_json(plan_id)
-        } else {
-            self.application.inspect_plan_csv(plan_id)
-        };
-        match document {
-            Ok(content) => {
-                self.inspection = Some(InspectionDocument {
-                    title: if json {
-                        self.locale.text("Plan JSON", "계획 JSON")
-                    } else {
-                        self.locale.text("Plan CSV", "계획 CSV")
-                    },
-                    content,
-                });
+        let application = Arc::clone(&self.application);
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let result = if json {
+                application.inspect_plan_json(plan_id)
+            } else {
+                application.inspect_plan_csv(plan_id)
             }
-            Err(error) => {
-                self.status = format!(
-                    "{} ({error})",
-                    self.locale
-                        .text("Inspection unavailable", "계획을 검토할 수 없습니다")
-                );
-            }
-        }
+            .map_err(|error| error.to_string());
+            let _ = sender.send(DocumentMessage::Inspection { json, result });
+        });
+        self.document_task = Some(DocumentTask {
+            receiver,
+            handle: Some(handle),
+        });
+        self.status = self
+            .locale
+            .text(
+                "Preparing plan inspection",
+                "계획 검토 문서를 준비 중입니다",
+            )
+            .to_owned();
     }
 
     fn export_plan(&mut self, json: bool) {
+        if self.document_task.is_some() {
+            return;
+        }
         let Some(plan_id) = self.plan.as_ref().map(PlanDto::plan_id) else {
             return;
         };
@@ -3935,19 +4360,87 @@ impl RenamewrightApp {
                 .to_owned();
             return;
         };
-        let result = if json {
-            self.application.export_plan_json(plan_id, &path)
-        } else {
-            self.application.export_plan_csv(plan_id, &path)
-        };
-        match result {
-            Ok(()) => {
-                self.status = match self.locale {
-                    Locale::English => format!("Plan {extension} exported"),
-                    Locale::Korean => format!("계획 {extension}을 내보냈습니다"),
-                };
+        let application = Arc::clone(&self.application);
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let result = if json {
+                application.export_plan_json(plan_id, &path)
+            } else {
+                application.export_plan_csv(plan_id, &path)
             }
-            Err(error) => self.status = error.to_string(),
+            .map_err(|error| error.to_string());
+            let _ = sender.send(DocumentMessage::Export { extension, result });
+        });
+        self.document_task = Some(DocumentTask {
+            receiver,
+            handle: Some(handle),
+        });
+        self.status = self
+            .locale
+            .text(
+                "Exporting the current plan",
+                "현재 계획을 내보내는 중입니다",
+            )
+            .to_owned();
+    }
+
+    fn poll_document(&mut self, context: &egui::Context) {
+        let message = self
+            .document_task
+            .as_ref()
+            .map(|task| task.receiver.try_recv());
+        match message {
+            Some(Ok(message)) => {
+                if let Some(task) = self.document_task.take() {
+                    task.finish();
+                }
+                match message {
+                    DocumentMessage::Inspection {
+                        json,
+                        result: Ok(content),
+                    } => {
+                        self.inspection = Some(InspectionDocument {
+                            title: if json {
+                                self.locale.text("Plan JSON", "계획 JSON")
+                            } else {
+                                self.locale.text("Plan CSV", "계획 CSV")
+                            },
+                            content,
+                        });
+                    }
+                    DocumentMessage::Inspection {
+                        result: Err(error), ..
+                    }
+                    | DocumentMessage::Export {
+                        result: Err(error), ..
+                    } => self.status = error,
+                    DocumentMessage::Export {
+                        extension,
+                        result: Ok(()),
+                    } => {
+                        self.status = match self.locale {
+                            Locale::English => format!("Plan {extension} exported"),
+                            Locale::Korean => format!("계획 {extension}을 내보냈습니다"),
+                        };
+                    }
+                }
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                if let Some(task) = self.document_task.take() {
+                    task.finish();
+                }
+                self.status = self
+                    .locale
+                    .text(
+                        "Plan document task ended unexpectedly",
+                        "계획 문서 작업이 예기치 않게 종료되었습니다",
+                    )
+                    .to_owned();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+        if self.document_task.is_some() {
+            context.request_repaint_after(PLANNING_POLL_INTERVAL);
         }
     }
 
@@ -4111,6 +4604,9 @@ impl RenamewrightApp {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.apply_appearance(ui.ctx());
+        self.poll_planning(ui.ctx());
+        self.poll_ledger(ui.ctx());
+        self.poll_document(ui.ctx());
         self.poll_mutation(ui.ctx());
         let add_folder_shortcut = egui::KeyboardShortcut::new(
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
@@ -4287,6 +4783,15 @@ impl Drop for RenamewrightApp {
         if let Some(task) = self.mutation_task.take() {
             task.finish();
         }
+        if let Some(task) = self.planning_task.take() {
+            task.finish();
+        }
+        if let Some(task) = self.ledger_task.take() {
+            task.finish();
+        }
+        if let Some(task) = self.document_task.take() {
+            task.finish();
+        }
     }
 }
 
@@ -4385,8 +4890,9 @@ mod tests {
     use std::fs;
     #[cfg(feature = "automation")]
     use std::path::Path;
-    use std::sync::mpsc;
+    use std::sync::{Arc, mpsc};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use eframe::egui;
     use egui_kittest::Harness;
@@ -4398,9 +4904,9 @@ mod tests {
     };
     use super::{
         AccentChoice, AppearanceTheme, InterfaceDensity, Locale, MutationTask, NativePalette,
-        PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
-        PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, install_theme,
-        install_theme_with_density, preview_column_label, semantics,
+        PLANNING_DEBOUNCE, PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH,
+        PendingConfirmation, PlanDto, PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto,
+        install_theme, install_theme_with_density, preview_column_label, semantics,
     };
 
     #[derive(Default)]
@@ -4422,6 +4928,26 @@ mod tests {
         }
 
         fn flush(&mut self) {}
+    }
+
+    fn settle_ledger(app: &mut RenamewrightApp) {
+        let context = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.ledger_task.is_some() {
+            app.poll_ledger(&context);
+            assert!(Instant::now() < deadline, "ledger task did not settle");
+            thread::yield_now();
+        }
+    }
+
+    fn settle_document(app: &mut RenamewrightApp) {
+        let context = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.document_task.is_some() {
+            app.poll_document(&context);
+            assert!(Instant::now() < deadline, "document task did not settle");
+            thread::yield_now();
+        }
     }
 
     fn relative_luminance(color: egui::Color32) -> f32 {
@@ -4771,6 +5297,51 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_preview_filters_reuse_the_cached_index_projection() {
+        let mut app = RenamewrightApp::new(false);
+
+        let first = app.visible_indices();
+        let second = app.visible_indices();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        app.source_query = "9999".to_owned();
+        let filtered = app.visible_indices();
+        assert!(!Arc::ptr_eq(&second, &filtered));
+        assert_eq!(&*filtered, &[9_999]);
+    }
+
+    #[test]
+    fn pending_preview_refresh_keeps_apply_visibly_locked() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product_with_data(
+            NativePalette::default(),
+            Some(directory.path().join("presets.json")),
+            Some(directory.path().join("journals")),
+        );
+        settle_ledger(&mut app);
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+        assert!(app.plan.as_ref().is_some_and(PlanDto::can_apply));
+
+        app.set_prefix("reviewed-");
+        app.schedule_plan_refresh(&egui::Context::default());
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        assert!(
+            harness
+                .get_by_label(semantics::APPLY)
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label("Wait for the latest preview before applying");
+        Ok(())
+    }
+
+    #[test]
     fn high_contrast_palette_is_visible_and_accessible() {
         let palette = NativePalette::high_contrast(
             [0, 0, 0],
@@ -4912,15 +5483,47 @@ mod tests {
     fn product_workbench_initializes_its_journal_root() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let journal_root = directory.path().join("journals");
-        let app = RenamewrightApp::new_product_with_data(
+        let mut app = RenamewrightApp::new_product_with_data(
             NativePalette::default(),
             Some(directory.path().join("presets.json")),
             Some(journal_root.clone()),
         );
+        assert!(app.ledger_task.is_some());
+        settle_ledger(&mut app);
 
         assert!(journal_root.is_dir());
         assert_eq!(app.journal_root.as_deref(), Some(journal_root.as_path()));
         assert!(app.ledger.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn startup_history_scan_keeps_apply_locked_until_it_is_authoritative()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product_with_data(
+            NativePalette::default(),
+            Some(directory.path().join("presets.json")),
+            Some(directory.path().join("journals")),
+        );
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+        assert!(app.ledger_task.is_some());
+        assert!(!app.ledger_ready);
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 120.0))
+            .build_ui_state(|ui, app| app.show_review_bar(ui), app);
+
+        assert!(
+            harness
+                .get_by_label(semantics::APPLY)
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label("Wait for rename history checks to finish");
         Ok(())
     }
 
@@ -4934,6 +5537,7 @@ mod tests {
             Some(directory.path().join("presets.json")),
             Some(directory.path().join("journals")),
         );
+        settle_ledger(&mut app);
         app.set_prefix("final-");
         app.admit_sources(vec![source]);
         let mut harness = Harness::builder()
@@ -5080,6 +5684,8 @@ mod tests {
         assert_eq!(plan.blocked_count(), 1);
         assert!(plan.rows()[0].diagnostics().contains(&"reservedName"));
         app.inspect_plan(true);
+        assert!(app.document_task.is_some());
+        settle_document(&mut app);
         let inspection = app
             .inspection
             .as_ref()
@@ -5144,6 +5750,14 @@ mod tests {
         );
         harness.event(egui::Event::Text("한글_".to_owned()));
         harness.run_ok();
+        thread::sleep(PLANNING_DEBOUNCE);
+        for _ in 0..100 {
+            harness.run_ok();
+            if harness.query_by_label("한글_report.txt").is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
         harness.get_by_label("한글_report.txt");
         harness.key_press(egui::Key::Enter);
         harness.run_ok();
