@@ -9,6 +9,7 @@ const APP_MANIFEST: &str = include_str!("../Cargo.toml");
 const APP_MAIN: &str = include_str!("../src/main.rs");
 const APP_SOURCE: &str = include_str!("../src/lib.rs");
 const CARGO_CONFIG: &str = include_str!("../../../.cargo/config.toml");
+const CARGO_POLICY: &str = include_str!("../../../deny.toml");
 const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yaml");
 const REPOSITORY_SETTINGS: &str = include_str!("../../../.github/settings.yaml");
 const SECURITY_WORKFLOW: &str = include_str!("../../../.github/workflows/security.yaml");
@@ -74,6 +75,8 @@ fn production_ui_keeps_default_fonts_and_adds_korean_as_fallback() {
     );
     assert!(!APP_SOURCE.contains("FontDefinitions::empty()"));
     assert!(!APP_SOURCE.contains("context.set_fonts(fonts)"));
+    assert!(CARGO_POLICY.contains("\"OFL-1.1\""));
+    assert!(CARGO_POLICY.contains("\"Ubuntu-font-1.0\""));
 }
 
 #[test]
