@@ -362,9 +362,10 @@ fn portable_release_excludes_automation_and_binds_evidence() {
 
 #[test]
 fn tagged_portable_release_is_published_with_scoped_write_permission() {
-    assert!(RELEASE_WORKFLOW.contains("permissions:\n  contents: read"));
+    let release_workflow = RELEASE_WORKFLOW.replace("\r\n", "\n");
+    assert!(release_workflow.contains("permissions:\n  contents: read"));
 
-    let publish_job = RELEASE_WORKFLOW
+    let publish_job = release_workflow
         .split_once("\n  publish:\n")
         .map_or("", |(_, publish_job)| publish_job);
     for required in [
@@ -388,7 +389,7 @@ fn tagged_portable_release_is_published_with_scoped_write_permission() {
             "release publisher omitted {required}"
         );
     }
-    assert!(!RELEASE_WORKFLOW.contains("permissions:\n  contents: write"));
+    assert!(!release_workflow.contains("permissions:\n  contents: write"));
 }
 
 #[test]
