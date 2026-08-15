@@ -5434,6 +5434,15 @@ impl RenamewrightApp {
         self.poll_korean_font(ui.ctx());
         self.apply_appearance(ui.ctx());
         self.poll_admission(ui.ctx());
+        if self.korean_font_state == KoreanFontState::Idle
+            && self.plan.as_ref().is_some_and(|plan| {
+                plan.rows()
+                    .iter()
+                    .any(|row| !row.original_name().is_ascii() || !row.proposed_name().is_ascii())
+            })
+        {
+            self.ensure_korean_font(ui.ctx());
+        }
         self.poll_planning(ui.ctx());
         self.poll_ledger(ui.ctx());
         self.poll_document(ui.ctx());
@@ -6989,6 +6998,23 @@ mod tests {
             korean_harness.state().korean_font_state,
             KoreanFontState::Idle
         );
+    }
+
+    #[test]
+    fn korean_filename_starts_font_loading_in_the_english_ui() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("보고서.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.admit_sources_immediately(vec![source]);
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        assert_eq!(harness.state().locale, Locale::English);
+        assert_ne!(harness.state().korean_font_state, KoreanFontState::Idle);
+        Ok(())
     }
 
     #[test]
