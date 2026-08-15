@@ -1369,6 +1369,30 @@ fn concise_rule_text(value: &str) -> String {
     }
 }
 
+fn rule_has_non_ascii_text(rule: &RuleRequestDto) -> bool {
+    match rule {
+        RuleRequestDto::Prefix { value, .. }
+        | RuleRequestDto::Suffix { value, .. }
+        | RuleRequestDto::Extension { value, .. } => !value.is_ascii(),
+        RuleRequestDto::LiteralReplace {
+            search,
+            replacement,
+            ..
+        }
+        | RuleRequestDto::RegexReplace {
+            pattern: search,
+            replacement,
+            ..
+        } => !search.is_ascii() || !replacement.is_ascii(),
+        RuleRequestDto::Sequence { separator, .. } => !separator.is_ascii(),
+        RuleRequestDto::WhitespaceCleanup { replacement, .. } => !replacement.is_ascii(),
+        RuleRequestDto::Case { .. }
+        | RuleRequestDto::UnicodeNormalization { .. }
+        | RuleRequestDto::Range { .. }
+        | RuleRequestDto::CharacterClass { .. } => false,
+    }
+}
+
 fn rule_summary(rule: &RuleRequestDto, locale: Locale) -> String {
     match rule {
         RuleRequestDto::Prefix { value, .. } => format!(
@@ -5435,11 +5459,18 @@ impl RenamewrightApp {
         self.apply_appearance(ui.ctx());
         self.poll_admission(ui.ctx());
         if self.korean_font_state == KoreanFontState::Idle
-            && self.plan.as_ref().is_some_and(|plan| {
-                plan.rows()
-                    .iter()
-                    .any(|row| !row.original_name().is_ascii() || !row.proposed_name().is_ascii())
-            })
+            && (self.rules.iter().any(rule_has_non_ascii_text)
+                || self.overrides.values().any(|value| !value.is_ascii())
+                || !self.source_query.is_ascii()
+                || !self.preset_name.is_ascii()
+                || self.presets.presets().iter().any(|preset| {
+                    !preset.name().is_ascii() || preset.rules().iter().any(rule_has_non_ascii_text)
+                })
+                || self.plan.as_ref().is_some_and(|plan| {
+                    plan.rows().iter().any(|row| {
+                        !row.original_name().is_ascii() || !row.proposed_name().is_ascii()
+                    })
+                }))
         {
             self.ensure_korean_font(ui.ctx());
         }
@@ -6979,7 +7010,7 @@ mod tests {
 
     #[test]
     fn korean_font_loading_is_deferred_until_korean_text_is_needed() {
-        let english_app = RenamewrightApp::new(false);
+        let english_app = RenamewrightApp::new_product(NativePalette::default(), None);
         let english_harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), english_app);
@@ -6989,7 +7020,7 @@ mod tests {
         );
         assert!(english_harness.state().korean_font_task.is_none());
 
-        let mut korean_app = RenamewrightApp::new(false);
+        let mut korean_app = RenamewrightApp::new_product(NativePalette::default(), None);
         korean_app.locale = Locale::Korean;
         let korean_harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
@@ -7015,6 +7046,23 @@ mod tests {
         assert_eq!(harness.state().locale, Locale::English);
         assert_ne!(harness.state().korean_font_state, KoreanFontState::Idle);
         Ok(())
+    }
+
+    #[test]
+    fn korean_rule_text_starts_font_loading_without_sources() {
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.rules = vec![RuleRequestDto::Prefix {
+            rule_id: 1,
+            enabled: true,
+            value: "정리_".to_owned(),
+        }];
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        assert_eq!(harness.state().locale, Locale::English);
+        assert_ne!(harness.state().korean_font_state, KoreanFontState::Idle);
     }
 
     #[test]
