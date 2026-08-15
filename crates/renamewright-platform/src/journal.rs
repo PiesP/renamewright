@@ -1190,17 +1190,11 @@ fn put_u32_len(
 }
 
 fn crc32_parts(parts: &[&[u8]]) -> u32 {
-    let mut crc = u32::MAX;
+    let mut crc = crc32fast::Hasher::new();
     for part in parts {
-        for byte in *part {
-            crc ^= u32::from(*byte);
-            for _ in 0..8 {
-                let mask = 0_u32.wrapping_sub(crc & 1);
-                crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-            }
-        }
+        crc.update(part);
     }
-    !crc
+    crc.finalize()
 }
 
 struct PayloadCursor<'a> {
