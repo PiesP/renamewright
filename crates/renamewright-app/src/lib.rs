@@ -1210,11 +1210,20 @@ enum Locale {
 impl Locale {
     const ALL: [Self; 2] = [Self::English, Self::Korean];
 
-    const fn label(self) -> &'static str {
-        match self {
-            Self::English => "English",
-            Self::Korean => "한국어",
+    const fn picker_label(self, korean_font_state: KoreanFontState) -> &'static str {
+        match (self, korean_font_state) {
+            (Self::English, _) => "English",
+            (Self::Korean, KoreanFontState::Ready) => "한국어",
+            (Self::Korean, KoreanFontState::Unavailable) => "Korean (font unavailable)",
+            (Self::Korean, KoreanFontState::Idle | KoreanFontState::Loading) => "Korean (loading)",
         }
+    }
+
+    const fn picker_enabled(self, korean_font_state: KoreanFontState) -> bool {
+        matches!(
+            (self, korean_font_state),
+            (Self::English, _) | (Self::Korean, KoreanFontState::Ready)
+        )
     }
 
     const fn text(self, english: &'static str, korean: &'static str) -> &'static str {
@@ -4136,15 +4145,25 @@ impl RenamewrightApp {
                 );
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                egui::ComboBox::from_id_salt("locale")
-                    .selected_text(self.locale.label())
+                let korean_font_state = self.korean_font_state;
+                let language_menu = egui::ComboBox::from_id_salt("locale")
+                    .selected_text(self.locale.picker_label(korean_font_state))
                     .show_ui(ui, |ui| {
                         for locale in Locale::ALL {
-                            ui.selectable_value(&mut self.locale, locale, locale.label());
+                            ui.add_enabled_ui(locale.picker_enabled(korean_font_state), |ui| {
+                                ui.selectable_value(
+                                    &mut self.locale,
+                                    locale,
+                                    locale.picker_label(korean_font_state),
+                                );
+                            });
                         }
-                    })
-                    .response
-                    .on_hover_text(semantics::LANGUAGE);
+                    });
+                let language_menu_open = language_menu.inner.is_some();
+                language_menu.response.on_hover_text(semantics::LANGUAGE);
+                if language_menu_open {
+                    self.ensure_korean_font(ui.ctx());
+                }
                 match self.korean_font_state {
                     KoreanFontState::Loading => {
                         ui.spinner();
@@ -5907,7 +5926,8 @@ mod tests {
         }
         let font = skrifa::FontRef::new(epaint_default_fonts::UBUNTU_LIGHT)?;
         let character_map = font.charmap();
-        let missing_glyphs: Vec<_> = "Renamewright 0123456789 · × “text” … <- ->"
+        let missing_glyphs: Vec<_> = "Renamewright 0123456789 · × “text” … <- -> \
+            Korean (loading) Korean (font unavailable)"
             .chars()
             .filter(|character| character_map.map(*character).is_none())
             .collect();
@@ -7113,6 +7133,35 @@ mod tests {
         harness.get_by_label("미리보기");
         harness.get_by_label("전체");
         harness.get_by_label("적용 잠김");
+    }
+
+    #[test]
+    fn opening_initial_language_menu_uses_a_safe_label_and_starts_korean_font_loading() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                RenamewrightApp::new_product(NativePalette::default(), None),
+            );
+        assert_eq!(harness.state().locale, Locale::English);
+        assert_eq!(harness.state().korean_font_state, KoreanFontState::Idle);
+
+        harness.get_by_value("English").click();
+        harness.run_ok();
+
+        harness.get_by_label("Korean (loading)");
+        assert_eq!(harness.state().locale, Locale::English);
+        assert_eq!(harness.state().korean_font_state, KoreanFontState::Loading);
+        assert_eq!(
+            Locale::Korean.picker_label(KoreanFontState::Ready),
+            "한국어"
+        );
+        assert!(Locale::Korean.picker_enabled(KoreanFontState::Ready));
+        assert_eq!(
+            Locale::Korean.picker_label(KoreanFontState::Unavailable),
+            "Korean (font unavailable)"
+        );
+        assert!(!Locale::Korean.picker_enabled(KoreanFontState::Unavailable));
     }
 
     #[test]
