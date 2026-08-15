@@ -395,8 +395,11 @@ enum ReplayMode {
     },
 }
 
-pub fn replay_journal(records: &[JournalRecord]) -> Result<JournalStatus, JournalReplayError> {
-    let Some(first) = records.first() else {
+pub fn replay_journal<'a>(
+    records: impl IntoIterator<Item = &'a JournalRecord>,
+) -> Result<JournalStatus, JournalReplayError> {
+    let mut records = records.into_iter();
+    let Some(first) = records.next() else {
         return Err(JournalReplayError::new(
             0,
             JournalReplayErrorKind::EmptyJournal,
@@ -426,7 +429,8 @@ pub fn replay_journal(records: &[JournalRecord]) -> Result<JournalStatus, Journa
         completed_steps: Vec::new(),
         prepared_step: None,
     };
-    for (record_index, record) in records.iter().enumerate().skip(1) {
+    for (record_offset, record) in records.enumerate() {
+        let record_index = record_offset.saturating_add(1);
         mode = apply_record(mode, *step_count, record, record_index)?;
     }
     Ok(status_for(mode, *step_count))

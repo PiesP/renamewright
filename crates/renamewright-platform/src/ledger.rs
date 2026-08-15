@@ -362,11 +362,6 @@ fn project_inspection(ledger_id: LedgerId, inspection: &JournalInspection) -> Le
         };
     }
 
-    let records = inspection
-        .frames()
-        .iter()
-        .map(|frame| frame.record().clone())
-        .collect::<Vec<_>>();
     if !has_consistent_lineage {
         return LedgerEntry {
             ledger_id,
@@ -381,7 +376,8 @@ fn project_inspection(ledger_id: LedgerId, inspection: &JournalInspection) -> Le
             undo_available: false,
         };
     }
-    let Ok(journal_status) = replay_journal(&records) else {
+    let Ok(journal_status) = replay_journal(inspection.frames().iter().map(|frame| frame.record()))
+    else {
         return LedgerEntry {
             ledger_id,
             plan_id,

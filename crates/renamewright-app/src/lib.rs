@@ -39,6 +39,7 @@ const APPEARANCE_STORAGE_KEY: &str = "renamewright.appearance.v1";
 const MUTATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PLANNING_DEBOUNCE: Duration = Duration::from_millis(100);
 const PLANNING_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const LEDGER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 fn preview_column_label(
     ui: &mut egui::Ui,
@@ -1528,6 +1529,27 @@ struct PlanningTask {
     handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug)]
+enum LedgerMessage {
+    Snapshot(Result<Vec<LedgerEntryDto>, String>),
+    Recovery(Result<RecoveryInspectionDto, String>),
+    Undo(Result<UndoInspectionDto, String>),
+}
+
+#[derive(Debug)]
+struct LedgerTask {
+    receiver: Receiver<LedgerMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl LedgerTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl PlanningTask {
     fn finish(mut self) {
         if let Some(handle) = self.handle.take() {
@@ -2042,6 +2064,8 @@ pub struct RenamewrightApp {
     preset_name: String,
     status: String,
     ledger: Vec<LedgerEntryDto>,
+    ledger_ready: bool,
+    ledger_task: Option<LedgerTask>,
     selected_ledger_id: Option<u64>,
     recovery_inspection: Option<RecoveryInspectionDto>,
     undo_inspection: Option<UndoInspectionDto>,
@@ -2154,15 +2178,22 @@ impl RenamewrightApp {
             },
         );
         let application = Arc::new(ApplicationService::default());
-        let journal_status = journal_root
-            .as_ref()
-            .and_then(|root| application.initialize(root).err())
-            .map(|error| error.to_string());
-        let ledger = if journal_status.is_none() {
-            application.ledger_snapshot().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let ledger_task = journal_root.as_ref().map(|root| {
+            let application = Arc::clone(&application);
+            let root = root.clone();
+            let (sender, receiver) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                let result = application
+                    .initialize(&root)
+                    .and_then(|()| application.ledger_snapshot())
+                    .map_err(|error| error.to_string());
+                let _ = sender.send(LedgerMessage::Snapshot(result));
+            });
+            LedgerTask {
+                receiver,
+                handle: Some(handle),
+            }
+        });
         let rules = if synthetic_fixture {
             vec![RuleRequestDto::Prefix {
                 rule_id: 1,
@@ -2198,14 +2229,18 @@ impl RenamewrightApp {
             journal_root,
             presets,
             preset_name: String::new(),
-            status: journal_status.or(preset_status).unwrap_or_else(|| {
-                if synthetic_fixture {
+            status: preset_status.unwrap_or_else(|| {
+                if ledger_task.is_some() {
+                    "Checking rename history".to_owned()
+                } else if synthetic_fixture {
                     format!("{SAMPLE_COUNT} sample entries ready")
                 } else {
                     semantics::NO_SOURCES.to_owned()
                 }
             }),
-            ledger,
+            ledger: Vec::new(),
+            ledger_ready: false,
+            ledger_task,
             selected_ledger_id: None,
             recovery_inspection: None,
             undo_inspection: None,
@@ -2722,50 +2757,143 @@ impl RenamewrightApp {
                 .to_owned();
             return;
         }
-        match self.application.list_ledger() {
-            Ok(ledger) => {
-                if self.selected_ledger_id.is_some_and(|selected| {
-                    !ledger.iter().any(|entry| entry.ledger_id() == selected)
-                }) {
-                    self.selected_ledger_id = None;
-                    self.recovery_inspection = None;
-                    self.undo_inspection = None;
-                }
-                self.ledger = ledger;
-            }
-            Err(error) => self.status = error.to_string(),
+        if self.ledger_task.is_some() {
+            return;
         }
+        self.ledger_ready = false;
+        self.start_ledger_task(
+            self.locale
+                .text(
+                    "Refreshing rename history",
+                    "이름 변경 기록을 새로 고치는 중입니다",
+                )
+                .to_owned(),
+            |application| {
+                LedgerMessage::Snapshot(
+                    application.list_ledger().map_err(|error| error.to_string()),
+                )
+            },
+        );
     }
 
     fn inspect_selected_recovery(&mut self) {
         let Some(ledger_id) = self.selected_ledger_id else {
             return;
         };
-        match self
-            .application
-            .inspect_recovery(ledger_id, &NativeExecutionFileSystem::new())
-        {
-            Ok(inspection) => {
-                self.recovery_inspection = Some(inspection);
-                self.undo_inspection = None;
-            }
-            Err(error) => self.status = error.to_string(),
+        if self.ledger_task.is_some() {
+            return;
         }
+        self.start_ledger_task(
+            self.locale
+                .text("Inspecting recovery state", "복구 상태를 검사 중입니다")
+                .to_owned(),
+            move |application| {
+                LedgerMessage::Recovery(
+                    application
+                        .inspect_recovery(ledger_id, &NativeExecutionFileSystem::new())
+                        .map_err(|error| error.to_string()),
+                )
+            },
+        );
     }
 
     fn inspect_selected_undo(&mut self) {
         let Some(ledger_id) = self.selected_ledger_id else {
             return;
         };
-        match self
-            .application
-            .inspect_undo(ledger_id, &NativeExecutionFileSystem::new())
-        {
-            Ok(inspection) => {
-                self.undo_inspection = Some(inspection);
-                self.recovery_inspection = None;
+        if self.ledger_task.is_some() {
+            return;
+        }
+        self.start_ledger_task(
+            self.locale
+                .text("Inspecting undo state", "실행 취소 상태를 검사 중입니다")
+                .to_owned(),
+            move |application| {
+                LedgerMessage::Undo(
+                    application
+                        .inspect_undo(ledger_id, &NativeExecutionFileSystem::new())
+                        .map_err(|error| error.code().to_owned()),
+                )
+            },
+        );
+    }
+
+    fn start_ledger_task<F>(&mut self, status: String, work: F)
+    where
+        F: FnOnce(Arc<ApplicationService>) -> LedgerMessage + Send + 'static,
+    {
+        let application = Arc::clone(&self.application);
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = sender.send(work(application));
+        });
+        self.ledger_task = Some(LedgerTask {
+            receiver,
+            handle: Some(handle),
+        });
+        self.status = status;
+    }
+
+    fn poll_ledger(&mut self, context: &egui::Context) {
+        let message = self
+            .ledger_task
+            .as_ref()
+            .map(|task| task.receiver.try_recv());
+        match message {
+            Some(Ok(message)) => {
+                if let Some(task) = self.ledger_task.take() {
+                    task.finish();
+                }
+                match message {
+                    LedgerMessage::Snapshot(Ok(ledger)) => {
+                        if self.selected_ledger_id.is_some_and(|selected| {
+                            !ledger.iter().any(|entry| entry.ledger_id() == selected)
+                        }) {
+                            self.selected_ledger_id = None;
+                            self.recovery_inspection = None;
+                            self.undo_inspection = None;
+                        }
+                        self.ledger = ledger;
+                        self.ledger_ready = true;
+                        self.status = self
+                            .locale
+                            .text("Rename history is ready", "이름 변경 기록을 확인했습니다")
+                            .to_owned();
+                    }
+                    LedgerMessage::Snapshot(Err(error)) => {
+                        self.ledger_ready = false;
+                        self.status = error;
+                    }
+                    LedgerMessage::Recovery(Ok(inspection)) => {
+                        self.recovery_inspection = Some(inspection);
+                        self.undo_inspection = None;
+                    }
+                    LedgerMessage::Recovery(Err(error)) | LedgerMessage::Undo(Err(error)) => {
+                        self.status = error
+                    }
+                    LedgerMessage::Undo(Ok(inspection)) => {
+                        self.undo_inspection = Some(inspection);
+                        self.recovery_inspection = None;
+                    }
+                }
             }
-            Err(error) => self.status = error.code().to_owned(),
+            Some(Err(TryRecvError::Disconnected)) => {
+                if let Some(task) = self.ledger_task.take() {
+                    task.finish();
+                }
+                self.ledger_ready = false;
+                self.status = self
+                    .locale
+                    .text(
+                        "Rename history task ended unexpectedly",
+                        "이름 변경 기록 작업이 예기치 않게 종료되었습니다",
+                    )
+                    .to_owned();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+        if self.ledger_task.is_some() {
+            context.request_repaint_after(LEDGER_POLL_INTERVAL);
         }
     }
 
@@ -2935,39 +3063,60 @@ impl RenamewrightApp {
         ui.horizontal(|ui| {
             ui.heading(self.locale.text(semantics::LEDGER, "원장"));
             if ui
-                .button(
-                    self.locale
-                        .text(semantics::REFRESH_LEDGER, "원장 새로 고침"),
+                .add_enabled(
+                    self.ledger_task.is_none(),
+                    egui::Button::new(
+                        self.locale
+                            .text(semantics::REFRESH_LEDGER, "원장 새로 고침"),
+                    ),
                 )
                 .clicked()
             {
                 self.refresh_ledger();
             }
         });
+        if self.ledger_task.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    self.locale
+                        .text("Checking rename history", "이름 변경 기록을 확인 중입니다"),
+                );
+            });
+        }
         if self.ledger.is_empty() {
-            ui.label(self.locale.text("No transactions", "트랜잭션이 없습니다"));
+            if self.ledger_task.is_none() {
+                ui.label(self.locale.text("No transactions", "트랜잭션이 없습니다"));
+            }
             return;
         }
 
         let mut selected = self.selected_ledger_id;
-        ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-            for entry in &self.ledger {
-                let label = format!(
-                    "#{} · {} · {}",
-                    entry.ledger_id(),
-                    entry.status(),
-                    entry.source_count()
-                );
-                ui.selectable_value(&mut selected, Some(entry.ledger_id()), label);
-            }
-        });
+        ScrollArea::vertical().max_height(240.0).show_rows(
+            ui,
+            self.appearance.density.preview_row_height(),
+            self.ledger.len(),
+            |ui, row_range| {
+                for index in row_range {
+                    let entry = &self.ledger[index];
+                    let label = format!(
+                        "#{} · {} · {}",
+                        entry.ledger_id(),
+                        entry.status(),
+                        entry.source_count()
+                    );
+                    ui.selectable_value(&mut selected, Some(entry.ledger_id()), label);
+                }
+            },
+        );
         if selected != self.selected_ledger_id {
             self.selected_ledger_id = selected;
             self.recovery_inspection = None;
             self.undo_inspection = None;
         }
 
-        let mutation_idle = self.mutation_task.is_none();
+        let mutation_idle =
+            self.mutation_task.is_none() && self.ledger_task.is_none() && self.ledger_ready;
         let (recovery_available, undo_available) = self
             .selected_ledger_id
             .and_then(|ledger_id| {
@@ -4020,7 +4169,9 @@ impl RenamewrightApp {
             && self.mutation_task.is_none()
             && self.plan_is_current
             && self.planning_due.is_none()
-            && self.planning_task.is_none();
+            && self.planning_task.is_none()
+            && self.ledger_ready
+            && self.ledger_task.is_none();
         let lock_reason = if self.synthetic_fixture && self.plan.is_none() {
             self.locale.text(
                 "Sample preview cannot be applied",
@@ -4048,6 +4199,11 @@ impl RenamewrightApp {
             self.locale.text(
                 "Journal storage is unavailable",
                 "저널 저장소를 사용할 수 없습니다",
+            )
+        } else if !self.ledger_ready || self.ledger_task.is_some() {
+            self.locale.text(
+                "Wait for rename history checks to finish",
+                "이름 변경 기록 검사가 끝날 때까지 기다리세요",
             )
         } else if self.mutation_task.is_some() {
             self.locale.text(
@@ -4337,6 +4493,7 @@ impl RenamewrightApp {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.apply_appearance(ui.ctx());
         self.poll_planning(ui.ctx());
+        self.poll_ledger(ui.ctx());
         self.poll_mutation(ui.ctx());
         let add_folder_shortcut = egui::KeyboardShortcut::new(
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
@@ -4516,6 +4673,9 @@ impl Drop for RenamewrightApp {
         if let Some(task) = self.planning_task.take() {
             task.finish();
         }
+        if let Some(task) = self.ledger_task.take() {
+            task.finish();
+        }
     }
 }
 
@@ -4616,7 +4776,7 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, mpsc};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use eframe::egui;
     use egui_kittest::Harness;
@@ -4652,6 +4812,16 @@ mod tests {
         }
 
         fn flush(&mut self) {}
+    }
+
+    fn settle_ledger(app: &mut RenamewrightApp) {
+        let context = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.ledger_task.is_some() {
+            app.poll_ledger(&context);
+            assert!(Instant::now() < deadline, "ledger task did not settle");
+            thread::yield_now();
+        }
     }
 
     fn relative_luminance(color: egui::Color32) -> f32 {
@@ -5024,6 +5194,7 @@ mod tests {
             Some(directory.path().join("presets.json")),
             Some(directory.path().join("journals")),
         );
+        settle_ledger(&mut app);
         app.set_prefix("final-");
         app.admit_sources(vec![source]);
         assert!(app.plan.as_ref().is_some_and(PlanDto::can_apply));
@@ -5186,15 +5357,47 @@ mod tests {
     fn product_workbench_initializes_its_journal_root() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let journal_root = directory.path().join("journals");
-        let app = RenamewrightApp::new_product_with_data(
+        let mut app = RenamewrightApp::new_product_with_data(
             NativePalette::default(),
             Some(directory.path().join("presets.json")),
             Some(journal_root.clone()),
         );
+        assert!(app.ledger_task.is_some());
+        settle_ledger(&mut app);
 
         assert!(journal_root.is_dir());
         assert_eq!(app.journal_root.as_deref(), Some(journal_root.as_path()));
         assert!(app.ledger.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn startup_history_scan_keeps_apply_locked_until_it_is_authoritative()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product_with_data(
+            NativePalette::default(),
+            Some(directory.path().join("presets.json")),
+            Some(directory.path().join("journals")),
+        );
+        app.set_prefix("final-");
+        app.admit_sources(vec![source]);
+        assert!(app.ledger_task.is_some());
+        assert!(!app.ledger_ready);
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 120.0))
+            .build_ui_state(|ui, app| app.show_review_bar(ui), app);
+
+        assert!(
+            harness
+                .get_by_label(semantics::APPLY)
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label("Wait for rename history checks to finish");
         Ok(())
     }
 
@@ -5208,6 +5411,7 @@ mod tests {
             Some(directory.path().join("presets.json")),
             Some(directory.path().join("journals")),
         );
+        settle_ledger(&mut app);
         app.set_prefix("final-");
         app.admit_sources(vec![source]);
         let mut harness = Harness::builder()
