@@ -6521,6 +6521,7 @@ mod tests {
 
         app.set_prefix("reviewed-");
         app.schedule_plan_refresh(&egui::Context::default());
+        app.planning_due = Some(Instant::now() + Duration::from_secs(5));
         let harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), app);
