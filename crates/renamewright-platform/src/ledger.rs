@@ -154,6 +154,7 @@ struct CatalogItem {
 pub struct RenameLedger {
     root: Option<PathBuf>,
     items: Vec<CatalogItem>,
+    latest_plan_id: Option<PlanId>,
 }
 
 impl RenameLedger {
@@ -172,6 +173,7 @@ impl RenameLedger {
                 return Ok(Self {
                     root: Some(root.to_path_buf()),
                     items: Vec::new(),
+                    latest_plan_id: None,
                 });
             }
             Err(error) => {
@@ -182,7 +184,8 @@ impl RenameLedger {
                 });
             }
         };
-        let (candidates, count_limited) = bounded_journal_candidates(entries, max_journals);
+        let (candidates, count_limited, latest_named_plan_id) =
+            bounded_journal_candidates(entries, max_journals);
 
         let mut items =
             Vec::with_capacity(candidates.len().saturating_add(usize::from(count_limited)));
@@ -240,9 +243,15 @@ impl RenameLedger {
                 item.projection.undo_available = false;
             }
         }
+        let latest_plan_id = items
+            .iter()
+            .filter_map(|item| item.projection.plan_id)
+            .chain(latest_named_plan_id)
+            .max();
         Ok(Self {
             root: Some(root.to_path_buf()),
             items,
+            latest_plan_id,
         })
     }
 
@@ -251,13 +260,41 @@ impl RenameLedger {
         self.items.iter().map(|item| item.projection)
     }
 
+    #[must_use]
+    pub const fn latest_plan_id(&self) -> Option<PlanId> {
+        self.latest_plan_id
+    }
+
     pub fn refresh(&mut self) -> Result<(), LedgerDiscoveryError> {
         let root = self.root.clone().ok_or(LedgerDiscoveryError {
             kind: LedgerDiscoveryErrorKind::RootUnavailable {
                 io_kind: io::ErrorKind::InvalidInput,
             },
         })?;
-        *self = Self::discover(&root)?;
+        let retained_ids = self
+            .items
+            .iter()
+            .map(|item| (item.native_path.clone(), item.projection.ledger_id))
+            .collect::<BTreeMap<_, _>>();
+        let mut next_ledger_id = self
+            .items
+            .iter()
+            .map(|item| item.projection.ledger_id.value())
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut refreshed = Self::discover(&root)?;
+        for item in &mut refreshed.items {
+            item.projection.ledger_id = retained_ids
+                .get(&item.native_path)
+                .copied()
+                .unwrap_or_else(|| {
+                    let ledger_id = LedgerId::from_value(next_ledger_id);
+                    next_ledger_id = next_ledger_id.saturating_add(1);
+                    ledger_id
+                });
+        }
+        *self = refreshed;
         Ok(())
     }
 
@@ -446,24 +483,47 @@ enum ReadJournalError {
     Io,
 }
 
-fn bounded_journal_candidates(entries: fs::ReadDir, max_journals: usize) -> (Vec<PathBuf>, bool) {
+fn bounded_journal_candidates(
+    entries: fs::ReadDir,
+    max_journals: usize,
+) -> (Vec<PathBuf>, bool, Option<PlanId>) {
     let mut candidates = BTreeMap::new();
     let mut count_limited = false;
+    let mut latest_named_plan_id = None;
     for entry in entries.filter_map(Result::ok) {
         if entry.path().extension() != Some(OsStr::new("rwj"))
             || !entry.file_type().is_ok_and(|file_type| file_type.is_file())
         {
             continue;
         }
-        candidates.insert(entry.file_name(), entry.path());
+        let file_name = entry.file_name();
+        let named_plan_id = plan_id_from_native_journal_name(&file_name);
+        latest_named_plan_id = latest_named_plan_id.into_iter().chain(named_plan_id).max();
+        candidates.insert((named_plan_id.map(PlanId::value), file_name), entry.path());
         if candidates.len() > max_journals {
             count_limited = true;
-            if let Some(name) = candidates.keys().next_back().cloned() {
+            if let Some(name) = candidates.keys().next().cloned() {
                 candidates.remove(&name);
             }
         }
     }
-    (candidates.into_values().collect(), count_limited)
+    (
+        candidates.into_values().collect(),
+        count_limited,
+        latest_named_plan_id,
+    )
+}
+
+fn plan_id_from_native_journal_name(name: &OsStr) -> Option<PlanId> {
+    let name = name.to_str()?;
+    let encoded = name
+        .strip_prefix("plan-")
+        .or_else(|| name.strip_prefix("undo-"))?
+        .strip_suffix(".rwj")?;
+    if encoded.len() != 16 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(encoded, 16).ok().map(PlanId::new)
 }
 
 fn read_bounded_journal(path: &Path, remaining_bytes: u64) -> Result<Vec<u8>, ReadJournalError> {

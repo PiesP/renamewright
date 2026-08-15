@@ -11,8 +11,12 @@ use renamewright_platform::{
 };
 
 fn header() -> JournalRecord {
+    header_for_plan(7)
+}
+
+fn header_for_plan(plan_id: u64) -> JournalRecord {
     JournalRecord::TransactionStarted {
-        plan_id: PlanId::new(7),
+        plan_id: PlanId::new(plan_id),
         source_generation: 11,
         step_count: 2,
         entries: vec![JournalEntry::with_native_parent(
@@ -203,6 +207,103 @@ fn excess_journal_count_degrades_to_a_bounded_ledger() -> Result<(), Box<dyn std
         ledger.entries().last().ok_or("ledger was empty")?.status(),
         LedgerStatus::DiscoveryLimitExceeded
     );
+    Ok(())
+}
+
+#[test]
+fn excess_journal_count_keeps_newest_transactions_and_reserves_every_native_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    for plan_id in 1..=u64::try_from(MAX_DISCOVERED_JOURNALS)?.saturating_add(1) {
+        fs::write(
+            directory.path().join(format!("plan-{plan_id:016x}.rwj")),
+            encode_journal(&[header_for_plan(plan_id)])?,
+        )?;
+    }
+
+    let ledger = RenameLedger::discover(directory.path())?;
+    let plan_ids = ledger
+        .entries()
+        .filter_map(|entry| entry.plan_id().map(PlanId::value))
+        .collect::<Vec<_>>();
+
+    assert!(!plan_ids.contains(&1));
+    assert!(plan_ids.contains(&(u64::try_from(MAX_DISCOVERED_JOURNALS)? + 1)));
+    assert_eq!(
+        ledger.latest_plan_id().map(PlanId::value),
+        Some(u64::try_from(MAX_DISCOVERED_JOURNALS)? + 1)
+    );
+    Ok(())
+}
+
+#[test]
+fn bounded_discovery_orders_plan_and_undo_journals_by_transaction_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    for plan_id in 1..=u64::try_from(MAX_DISCOVERED_JOURNALS)? {
+        fs::write(
+            directory.path().join(format!("undo-{plan_id:016x}.rwj")),
+            encode_journal(&[header_for_plan(plan_id)])?,
+        )?;
+    }
+    let newest_plan_id = u64::try_from(MAX_DISCOVERED_JOURNALS)?.saturating_add(1);
+    fs::write(
+        directory
+            .path()
+            .join(format!("plan-{newest_plan_id:016x}.rwj")),
+        encode_journal(&[header_for_plan(newest_plan_id)])?,
+    )?;
+
+    let ledger = RenameLedger::discover(directory.path())?;
+
+    assert!(
+        ledger
+            .entries()
+            .any(|entry| entry.plan_id() == Some(PlanId::new(newest_plan_id)))
+    );
+    Ok(())
+}
+
+#[test]
+fn damaged_native_journal_name_still_reserves_its_plan_id() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("plan-0000000000001000.rwj"),
+        b"damaged",
+    )?;
+
+    let ledger = RenameLedger::discover(directory.path())?;
+
+    assert_eq!(ledger.latest_plan_id().map(PlanId::value), Some(0x1000));
+    Ok(())
+}
+
+#[test]
+fn refresh_preserves_existing_ledger_ids_when_sort_order_changes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let existing = directory.path().join("b-existing.rwj");
+    fs::write(&existing, encode_journal(&[header_for_plan(7)])?)?;
+    let mut ledger = RenameLedger::discover(directory.path())?;
+    let existing_id = ledger
+        .entries()
+        .next()
+        .ok_or("ledger was empty")?
+        .ledger_id();
+
+    fs::write(
+        directory.path().join("a-new.rwj"),
+        encode_journal(&[header_for_plan(8)])?,
+    )?;
+    ledger.refresh()?;
+
+    let retained_id = ledger
+        .entries()
+        .find(|entry| entry.plan_id() == Some(PlanId::new(7)))
+        .ok_or("existing transaction disappeared")?
+        .ledger_id();
+    assert_eq!(retained_id, existing_id);
     Ok(())
 }
 

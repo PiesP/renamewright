@@ -1227,12 +1227,7 @@ impl ApplicationService {
                 "the rename ledger could not be loaded",
             )
         })?;
-        let latest_plan_id = ledger
-            .entries()
-            .filter_map(LedgerEntry::plan_id)
-            .map(PlanId::value)
-            .max()
-            .unwrap_or(0);
+        let latest_plan_id = ledger.latest_plan_id().map(PlanId::value).unwrap_or(0);
         let discovered_next_plan_id = latest_plan_id.checked_add(1).ok_or_else(|| {
             ApplicationServiceError::new(
                 ApplicationServiceErrorKind::PlanSequenceExhausted,
@@ -1722,6 +1717,8 @@ impl From<UndoCommandErrorKind> for UndoCommandErrorDto {
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryInspectionDto {
     ledger_id: u64,
+    plan_id: u64,
+    source_generation: u64,
     direction: &'static str,
     step_index: Option<usize>,
     readiness: &'static str,
@@ -1735,6 +1732,16 @@ impl RecoveryInspectionDto {
     #[must_use]
     pub const fn ledger_id(&self) -> u64 {
         self.ledger_id
+    }
+
+    #[must_use]
+    pub const fn plan_id(&self) -> u64 {
+        self.plan_id
+    }
+
+    #[must_use]
+    pub const fn source_generation(&self) -> u64 {
+        self.source_generation
     }
 
     #[must_use]
@@ -1785,6 +1792,8 @@ pub enum RecoveryCommandAction {
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryExpectationDto {
     ledger_id: u64,
+    plan_id: u64,
+    source_generation: u64,
     direction: String,
     step_index: Option<usize>,
     readiness: String,
@@ -1808,6 +1817,8 @@ impl RecoveryRequestDto {
             action,
             inspection: RecoveryExpectationDto {
                 ledger_id: inspection.ledger_id,
+                plan_id: inspection.plan_id,
+                source_generation: inspection.source_generation,
                 direction: inspection.direction.to_owned(),
                 step_index: inspection.step_index,
                 readiness: inspection.readiness.to_owned(),
@@ -2422,6 +2433,8 @@ impl From<RecoveryTransactionInspection> for RecoveryInspectionDto {
         };
         Self {
             ledger_id: inspection.ledger_id().value(),
+            plan_id: inspection.plan_id().value(),
+            source_generation: inspection.source_generation(),
             direction: execution_direction_name(inspection.direction()),
             step_index: inspection.step_index(),
             readiness,
@@ -2438,6 +2451,8 @@ impl From<RecoveryTransactionInspection> for RecoveryExpectationDto {
         let dto = RecoveryInspectionDto::from(inspection);
         Self {
             ledger_id: dto.ledger_id,
+            plan_id: dto.plan_id,
+            source_generation: dto.source_generation,
             direction: dto.direction.to_owned(),
             step_index: dto.step_index,
             readiness: dto.readiness.to_owned(),
@@ -2674,12 +2689,7 @@ fn allocate_transaction_plan_id(
     state: &ApplicationService,
     ledger: &RenameLedger,
 ) -> Result<PlanId, UndoCommandErrorKind> {
-    let latest_ledger_plan_id = ledger
-        .entries()
-        .filter_map(LedgerEntry::plan_id)
-        .map(PlanId::value)
-        .max()
-        .unwrap_or(0);
+    let latest_ledger_plan_id = ledger.latest_plan_id().map(PlanId::value).unwrap_or(0);
     let after_ledger = latest_ledger_plan_id
         .checked_add(1)
         .ok_or(UndoCommandErrorKind::PlanSequenceExhausted)?;
@@ -4010,6 +4020,23 @@ mod tests {
     }
 
     #[test]
+    fn initialization_reserves_a_plan_id_from_a_damaged_native_journal_name()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::write(
+            directory.path().join("plan-000000000000002a.rwj"),
+            b"damaged",
+        )?;
+        let state = ApplicationService::default();
+
+        state.initialize(directory.path())?;
+        let plan = state.preview_rules(RulePipelineRequestDto::new(Vec::new(), Vec::new()))?;
+
+        assert_eq!(plan.plan_id(), 0x2b);
+        Ok(())
+    }
+
+    #[test]
     fn initialization_does_not_reuse_a_plan_id_issued_before_empty_ledger_discovery()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
@@ -4176,6 +4203,8 @@ mod tests {
         let inspection = inspect_recovery_transaction(&ledger, ledger_id, &filesystem)?;
         let serialized = serde_json::to_string(&RecoveryInspectionDto::from(inspection))?;
 
+        assert!(serialized.contains("\"planId\":68"));
+        assert!(serialized.contains("\"sourceGeneration\":1"));
         assert!(serialized.contains("\"readiness\":\"ready\""));
         assert!(serialized.contains("\"resumeAvailable\":true"));
         assert!(!serialized.contains("private-source"));
