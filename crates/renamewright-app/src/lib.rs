@@ -221,6 +221,8 @@ pub mod automation {
     pub struct AutomationFixture {
         schema_version: u16,
         #[serde(default)]
+        synthetic_sample: Option<bool>,
+        #[serde(default)]
         prefix: Option<String>,
         #[serde(default)]
         source_query: Option<String>,
@@ -236,7 +238,8 @@ pub mod automation {
         pub fn parse(bytes: &[u8]) -> Result<Self, AutomationRootError> {
             let fixture: Self = serde_json::from_slice(bytes)
                 .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::InvalidFixture))?;
-            if fixture.schema_version != 1
+            if !matches!(fixture.schema_version, 1 | 2)
+                || (fixture.schema_version == 1 && fixture.synthetic_sample.is_some())
                 || fixture
                     .prefix
                     .as_ref()
@@ -246,6 +249,7 @@ pub mod automation {
                     .as_ref()
                     .is_some_and(|value| value.len() > MAX_AUTOMATION_TEXT_BYTES)
                 || fixture.sources.len() > MAX_AUTOMATION_SOURCES
+                || (fixture.synthetic_sample == Some(true) && !fixture.sources.is_empty())
                 || fixture.sources.iter().any(|source| {
                     source.is_empty() || source.len() > MAX_AUTOMATION_RELATIVE_PATH_BYTES
                 })
@@ -270,6 +274,12 @@ pub mod automation {
         #[must_use]
         pub const fn filter(&self) -> Option<AutomationFilter> {
             self.filter
+        }
+
+        #[must_use]
+        pub fn synthetic_sample(&self) -> bool {
+            self.synthetic_sample
+                .unwrap_or(self.schema_version == 1 && self.sources.is_empty())
         }
 
         #[must_use]
@@ -2306,12 +2316,14 @@ impl RenamewrightApp {
     ) -> Self {
         let preset_path = automation_root.state_root().join("presets.json");
         let journal_root = automation_root.journal_root().to_path_buf();
+        let synthetic_fixture =
+            fixture.is_some_and(automation::AutomationFixture::synthetic_sample);
         let mut app = Self::new_configured(
             true,
             palette,
             Some(preset_path),
             Some(journal_root),
-            true,
+            synthetic_fixture,
             AppearancePreferences::default(),
         );
         if let Some(fixture) = fixture {
@@ -5432,6 +5444,27 @@ mod tests {
         harness.get_by_label(semantics::AUTOMATION_BANNER);
     }
 
+    #[cfg(feature = "automation")]
+    #[test]
+    fn automation_workbench_without_a_fixture_matches_the_product_empty_state()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = AutomationRoot::open(directory.path())?;
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(
+                |ui, app| app.show(ui),
+                RenamewrightApp::new_automated(NativePalette::default(), root, None),
+            );
+
+        harness.get_by_label(semantics::AUTOMATION_BANNER);
+        harness.get_by_label("0 shown");
+        harness.get_by_label("Add entries to create a plan");
+        assert!(harness.query_by_label(semantics::PREFIX_LABEL).is_none());
+        assert!(harness.query_by_label("IMG_00000.jpg").is_none());
+        Ok(())
+    }
+
     #[test]
     fn ten_thousand_entry_preview_keeps_the_accessibility_tree_bounded() {
         let harness = Harness::builder()
@@ -5864,7 +5897,8 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let fixture_directory = directory.path().join("fixtures").join("nested");
         fs::create_dir_all(&fixture_directory)?;
-        let fixture_json = br#"{"schemaVersion":1,"prefix":"fixture_","filter":"blocked"}"#;
+        let fixture_json =
+            br#"{"schemaVersion":2,"syntheticSample":true,"prefix":"fixture_","filter":"blocked"}"#;
         fs::write(fixture_directory.join("fixture.json"), fixture_json)?;
         let oversized = fixture_directory.join("oversized.json");
         fs::File::create(&oversized)?.set_len(MAX_AUTOMATION_FIXTURE_BYTES + 1)?;
@@ -5875,6 +5909,7 @@ mod tests {
             fixture_json
         );
         let fixture = root.load_fixture(Path::new("nested/fixture.json"))?;
+        assert!(fixture.synthetic_sample());
         assert_eq!(fixture.prefix(), Some("fixture_"));
         assert_eq!(
             fixture.filter(),
@@ -5890,6 +5925,16 @@ mod tests {
             return Err("an oversized automation fixture was accepted".into());
         };
         assert_eq!(error.kind(), AutomationRootErrorKind::FixtureTooLarge);
+        let legacy_fixture = super::automation::AutomationFixture::parse(
+            br#"{"schemaVersion":1,"prefix":"legacy_"}"#,
+        )?;
+        assert!(legacy_fixture.synthetic_sample());
+        let Err(error) = super::automation::AutomationFixture::parse(
+            br#"{"schemaVersion":2,"syntheticSample":true,"sources":["fixture.json"]}"#,
+        ) else {
+            return Err("a synthetic sample accepted real fixture sources".into());
+        };
+        assert_eq!(error.kind(), AutomationRootErrorKind::InvalidFixture);
         Ok(())
     }
 
@@ -5900,7 +5945,7 @@ mod tests {
         fs::create_dir(directory.path().join("fixtures"))?;
         fs::write(
             directory.path().join("fixtures/session.json"),
-            br#"{"schemaVersion":1,"prefix":"fixture_","filter":"blocked"}"#,
+            br#"{"schemaVersion":2,"syntheticSample":true,"prefix":"fixture_","filter":"blocked"}"#,
         )?;
         let root = AutomationRoot::open(directory.path())?;
         let fixture = root.load_fixture(Path::new("session.json"))?;
