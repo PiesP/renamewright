@@ -117,6 +117,7 @@ $manifest = [ordered]@{
     sourceShaMatches = $true
     tagVersionMatches = $true
     productionExcludesAutomationMarkers = $true
+    msvcRuntimeStaticallyLinked = $true
     dependencyScope = 'Cargo.lock'
   }
   limitations = @(

@@ -158,17 +158,26 @@ pub fn build_plan_with_rule_pipeline_overrides_and_environment(
     let Some(overrides) = validate_overrides(sources, overrides) else {
         return invalid_rule_plan(plan_id, generation, sources);
     };
+    let mut source_order = None;
+    let mut name_order = None;
     let sequence_values = (0..pipeline.rules().len())
         .map(|rule_index| {
-            pipeline
-                .sequence_allocation(rule_index)
-                .map(|allocation| allocate_sequence(sources, allocation))
+            pipeline.sequence_allocation(rule_index).map(|allocation| {
+                let ordered_indices = match allocation.order {
+                    SequenceOrder::Source => source_order
+                        .get_or_insert_with(|| ordered_source_indices(sources, allocation.order)),
+                    SequenceOrder::NameAscending => name_order
+                        .get_or_insert_with(|| ordered_source_indices(sources, allocation.order)),
+                };
+                allocate_sequence(sources, ordered_indices, allocation)
+            })
         })
         .collect::<Vec<_>>();
     let mut trace_budget = TraceBudget::new();
     let mut rows = Vec::with_capacity(sources.len());
-    for source in sources {
+    for (source_index, source) in sources.iter().enumerate() {
         rows.push(build_row(
+            source_index,
             source,
             pipeline,
             &sequence_values,
@@ -187,9 +196,10 @@ pub fn build_plan_with_rule_pipeline_overrides_and_environment(
 }
 
 fn build_row(
+    source_index: usize,
     source: &SourceSnapshot,
     pipeline: &RulePipeline,
-    sequence_values: &[Option<BTreeMap<SourceId, Option<u64>>>],
+    sequence_values: &[Option<Vec<Option<u64>>>],
     name_override: Option<&str>,
     policy: TargetPolicy,
     trace_budget: &mut TraceBudget,
@@ -217,7 +227,7 @@ fn build_row(
         let sequence_value = sequence_values
             .get(rule_index)
             .and_then(Option::as_ref)
-            .and_then(|values| values.get(&source.id()).copied())
+            .and_then(|values| values.get(source_index).copied())
             .flatten();
         let after = match pipeline.apply_rule(rule_index, &proposed, sequence_value) {
             Ok(after) => after,
@@ -299,44 +309,51 @@ fn validate_overrides<'a>(
     Some(validated)
 }
 
-fn allocate_sequence(
-    sources: &[SourceSnapshot],
-    allocation: SequenceAllocation,
-) -> BTreeMap<SourceId, Option<u64>> {
-    let mut ordered = sources.iter().collect::<Vec<_>>();
-    ordered.sort_by(|left, right| match allocation.order {
+fn ordered_source_indices(sources: &[SourceSnapshot], order: SequenceOrder) -> Vec<usize> {
+    let mut ordered = sources.iter().enumerate().collect::<Vec<_>>();
+    ordered.sort_by(|(_, left), (_, right)| match order {
         SequenceOrder::Source => left.id().cmp(&right.id()),
         SequenceOrder::NameAscending => left
             .native_name()
             .cmp(right.native_name())
             .then_with(|| left.id().cmp(&right.id())),
     });
+    ordered.into_iter().map(|(index, _)| index).collect()
+}
 
+fn allocate_sequence(
+    sources: &[SourceSnapshot],
+    ordered_indices: &[usize],
+    allocation: SequenceAllocation,
+) -> Vec<Option<u64>> {
     let mut global_ordinal = 0_u64;
     let mut parent_ordinals = BTreeMap::<ParentId, u64>::new();
-    ordered
-        .into_iter()
-        .map(|source| {
-            let ordinal = match allocation.scope {
-                SequenceScope::AllSources => {
-                    let ordinal = global_ordinal;
-                    global_ordinal = global_ordinal.saturating_add(1);
-                    ordinal
-                }
-                SequenceScope::PerParent => {
-                    let ordinal = parent_ordinals.entry(source.parent_id()).or_default();
-                    let current = *ordinal;
-                    *ordinal = ordinal.saturating_add(1);
-                    current
-                }
-            };
-            let value = allocation
+    let mut values = vec![None; sources.len()];
+    for source_index in ordered_indices {
+        let Some(source) = sources.get(*source_index) else {
+            continue;
+        };
+        let ordinal = match allocation.scope {
+            SequenceScope::AllSources => {
+                let ordinal = global_ordinal;
+                global_ordinal = global_ordinal.saturating_add(1);
+                ordinal
+            }
+            SequenceScope::PerParent => {
+                let ordinal = parent_ordinals.entry(source.parent_id()).or_default();
+                let current = *ordinal;
+                *ordinal = ordinal.saturating_add(1);
+                current
+            }
+        };
+        if let Some(value) = values.get_mut(*source_index) {
+            *value = allocation
                 .step
                 .checked_mul(ordinal)
                 .and_then(|offset| allocation.start.checked_add(offset));
-            (source.id(), value)
-        })
-        .collect()
+        }
+    }
+    values
 }
 
 fn invalid_rule_plan(plan_id: PlanId, generation: u64, sources: &[SourceSnapshot]) -> RenamePlan {

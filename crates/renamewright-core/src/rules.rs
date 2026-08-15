@@ -873,8 +873,7 @@ fn apply_range(
     offset: u32,
     length: Option<u32>,
 ) -> String {
-    let characters = text.chars().collect::<Vec<_>>();
-    let count = characters.len();
+    let count = text.chars().count();
     let offset = usize::try_from(offset).unwrap_or(usize::MAX);
     let length = length.map(|value| usize::try_from(value).unwrap_or(usize::MAX));
     let (start, end) = match origin {
@@ -889,22 +888,32 @@ fn apply_range(
             (start, end)
         }
     };
+    let start = character_byte_offset(text, start);
+    let end = character_byte_offset(text, end);
     match operation {
-        RangeOperation::Keep => characters[start..end].iter().collect(),
-        RangeOperation::Remove => characters[..start]
-            .iter()
-            .chain(&characters[end..])
-            .collect(),
+        RangeOperation::Keep => text[start..end].to_owned(),
+        RangeOperation::Remove => {
+            let mut result = String::with_capacity(text.len().saturating_sub(end - start));
+            result.push_str(&text[..start]);
+            result.push_str(&text[end..]);
+            result
+        }
     }
+}
+
+fn character_byte_offset(text: &str, character_index: usize) -> usize {
+    text.char_indices()
+        .nth(character_index)
+        .map_or(text.len(), |(offset, _)| offset)
 }
 
 fn character_class_pattern(class: CharacterClass) -> &'static str {
     match class {
-        CharacterClass::DecimalNumber => r"\A\p{Decimal_Number}\z",
-        CharacterClass::Letter => r"\A\p{Letter}\z",
-        CharacterClass::Whitespace => r"\A\p{White_Space}\z",
-        CharacterClass::Punctuation => r"\A\p{Punctuation}\z",
-        CharacterClass::Symbol => r"\A\p{Symbol}\z",
+        CharacterClass::DecimalNumber => r"\p{Decimal_Number}",
+        CharacterClass::Letter => r"\p{Letter}",
+        CharacterClass::Whitespace => r"\p{White_Space}",
+        CharacterClass::Punctuation => r"\p{Punctuation}",
+        CharacterClass::Symbol => r"\p{Symbol}",
     }
 }
 
@@ -913,16 +922,21 @@ fn apply_character_class(
     operation: CharacterClassOperation,
     matcher: &Regex,
 ) -> String {
-    text.chars()
-        .filter(|character| {
-            let mut encoded = [0_u8; 4];
-            let matches = matcher.is_match(character.encode_utf8(&mut encoded));
-            match operation {
-                CharacterClassOperation::Keep => matches,
-                CharacterClassOperation::Remove => !matches,
+    let mut result = String::with_capacity(text.len());
+    let mut previous_end = 0;
+    for matched in matcher.find_iter(text) {
+        match operation {
+            CharacterClassOperation::Keep => result.push_str(matched.as_str()),
+            CharacterClassOperation::Remove => {
+                result.push_str(&text[previous_end..matched.start()])
             }
-        })
-        .collect()
+        }
+        previous_end = matched.end();
+    }
+    if operation == CharacterClassOperation::Remove {
+        result.push_str(&text[previous_end..]);
+    }
+    result
 }
 
 fn validate_text(index: usize, invalid: bool) -> Result<(), RuleValidationError> {

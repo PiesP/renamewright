@@ -12,7 +12,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Align, Color32, FontFamily, FontId, Layout, RichText, ScrollArea, Stroke,
+    self, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
+    ScrollArea, Stroke,
 };
 use renamewright_application::{
     ApplicationService, ApplyCommandErrorDto, ApplyCommandResultDto, CaseModeDto,
@@ -24,7 +25,7 @@ use renamewright_application::{
     UndoCommandErrorDto, UndoCommandResultDto, UndoInspectionDto, UndoRequestDto,
     UnicodeNormalizationFormDto,
 };
-use renamewright_platform::NativeExecutionFileSystem;
+use renamewright_platform::{MAX_ADMITTED_SOURCES, NativeExecutionFileSystem};
 use serde::{Deserialize, Serialize};
 
 const SAMPLE_COUNT: usize = 10_000;
@@ -41,6 +42,13 @@ const MUTATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PLANNING_DEBOUNCE: Duration = Duration::from_millis(100);
 const PLANNING_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const LEDGER_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const FONT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const KOREAN_FONT_CANDIDATES: [&str; 4] = [
+    "C:\\Windows\\Fonts\\malgun.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumGothicCoding.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+];
 
 fn preview_column_label(
     ui: &mut egui::Ui,
@@ -1567,6 +1575,19 @@ struct PlanningTask {
 }
 
 #[derive(Debug)]
+struct AdmissionMessage {
+    revision: u64,
+    previous_source_count: usize,
+    result: Result<PlanDto, PlanningCommandErrorDto>,
+}
+
+#[derive(Debug)]
+struct AdmissionTask {
+    receiver: Receiver<AdmissionMessage>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
 enum LedgerMessage {
     Snapshot {
         result: Result<Vec<LedgerEntryDto>, String>,
@@ -1600,6 +1621,29 @@ struct DocumentTask {
     handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum KoreanFontState {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Debug)]
+struct KoreanFontTask {
+    receiver: Receiver<Option<(String, Vec<u8>)>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl KoreanFontTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl DocumentTask {
     fn finish(mut self) {
         if let Some(handle) = self.handle.take() {
@@ -1617,6 +1661,14 @@ impl LedgerTask {
 }
 
 impl PlanningTask {
+    fn finish(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl AdmissionTask {
     fn finish(mut self) {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -2146,6 +2198,8 @@ pub struct RenamewrightApp {
     planning_revision: u64,
     planning_due: Option<Instant>,
     planning_task: Option<PlanningTask>,
+    admission_task: Option<AdmissionTask>,
+    pending_admission_paths: Vec<PathBuf>,
     plan_is_current: bool,
     visible_rows: VisibleRowsCache,
     native_palette: NativePalette,
@@ -2153,6 +2207,8 @@ pub struct RenamewrightApp {
     appearance: AppearancePreferences,
     appearance_applied: bool,
     appearance_advanced_open: bool,
+    korean_font_state: KoreanFontState,
+    korean_font_task: Option<KoreanFontTask>,
     #[cfg(feature = "automation")]
     automation_mode: bool,
     #[cfg(feature = "automation")]
@@ -2328,6 +2384,8 @@ impl RenamewrightApp {
             planning_revision: 0,
             planning_due: None,
             planning_task: None,
+            admission_task: None,
+            pending_admission_paths: Vec::new(),
             plan_is_current: true,
             visible_rows: VisibleRowsCache::default(),
             native_palette: palette,
@@ -2335,6 +2393,8 @@ impl RenamewrightApp {
             appearance,
             appearance_applied: false,
             appearance_advanced_open: false,
+            korean_font_state: KoreanFontState::Idle,
+            korean_font_task: None,
             #[cfg(feature = "automation")]
             automation_mode: _automation_mode,
             #[cfg(feature = "automation")]
@@ -2378,7 +2438,7 @@ impl RenamewrightApp {
             if fixture.sources().is_empty() {
                 app.status = "Automation fixture loaded".to_owned();
             } else {
-                app.admit_sources(fixture.sources().to_vec());
+                app.admit_sources_immediately(fixture.sources().to_vec());
                 app.status = format!(
                     "Automation fixture loaded · {} sources",
                     fixture.sources().len()
@@ -2484,11 +2544,124 @@ impl RenamewrightApp {
         indices
     }
 
-    fn admit_sources(&mut self, paths: Vec<PathBuf>) {
+    #[cfg(any(test, feature = "automation"))]
+    fn admit_sources_immediately(&mut self, paths: Vec<PathBuf>) {
         self.supersede_pending_plan_refresh();
         let previous_source_count = self.plan.as_ref().map_or(0, |plan| plan.rows().len());
         let request = self.rule_request();
-        match self.application.admit_sources_with_rules(paths, request) {
+        let result = self.application.admit_sources_with_rules(paths, request);
+        self.apply_admission_result(previous_source_count, result);
+    }
+
+    fn start_source_admission(&mut self, paths: Vec<PathBuf>, context: &egui::Context) {
+        if paths.is_empty() {
+            return;
+        }
+        if self.admission_task.is_some() || self.planning_task.is_some() {
+            self.supersede_pending_plan_refresh();
+            let retained = MAX_ADMITTED_SOURCES
+                .saturating_add(1)
+                .saturating_sub(self.pending_admission_paths.len());
+            self.pending_admission_paths
+                .extend(paths.into_iter().take(retained));
+            self.plan_is_current = false;
+            self.status = self
+                .locale
+                .text(
+                    "Adding entries · selection queued",
+                    "항목 추가를 대기 중입니다",
+                )
+                .to_owned();
+            context.request_repaint_after(PLANNING_POLL_INTERVAL);
+            return;
+        }
+        self.launch_source_admission(paths, context);
+    }
+
+    fn launch_source_admission(&mut self, paths: Vec<PathBuf>, context: &egui::Context) {
+        self.supersede_pending_plan_refresh();
+        let revision = self.planning_revision;
+        let previous_source_count = self.plan.as_ref().map_or(0, |plan| plan.rows().len());
+        let request = self.rule_request();
+        let application = Arc::clone(&self.application);
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let result = application.admit_sources_with_rules(paths, request);
+            let _ = sender.send(AdmissionMessage {
+                revision,
+                previous_source_count,
+                result,
+            });
+        });
+        self.admission_task = Some(AdmissionTask {
+            receiver,
+            handle: Some(handle),
+        });
+        self.plan_is_current = false;
+        self.rule_error = None;
+        self.status = self
+            .locale
+            .text("Adding entries", "항목을 추가 중입니다")
+            .to_owned();
+        context.request_repaint_after(PLANNING_POLL_INTERVAL);
+    }
+
+    fn poll_admission(&mut self, context: &egui::Context) {
+        let message = self
+            .admission_task
+            .as_ref()
+            .map(|task| task.receiver.try_recv());
+        match message {
+            Some(Ok(message)) => {
+                if let Some(task) = self.admission_task.take() {
+                    task.finish();
+                }
+                let has_pending = !self.pending_admission_paths.is_empty();
+                if message.revision == self.planning_revision && !has_pending {
+                    self.apply_admission_result(message.previous_source_count, message.result);
+                } else {
+                    match message.result {
+                        Ok(plan) => {
+                            self.plan = Some(plan);
+                            self.plan_is_current = false;
+                            if !has_pending {
+                                self.planning_due = Some(Instant::now());
+                            }
+                        }
+                        Err(error) => self.apply_admission_error(&error),
+                    }
+                }
+                if has_pending {
+                    let paths = std::mem::take(&mut self.pending_admission_paths);
+                    self.launch_source_admission(paths, context);
+                }
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                if let Some(task) = self.admission_task.take() {
+                    task.finish();
+                }
+                self.plan_is_current = false;
+                self.status = self
+                    .locale
+                    .text(
+                        "Source admission ended unexpectedly",
+                        "원본 추가가 예기치 않게 종료되었습니다",
+                    )
+                    .to_owned();
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+        if self.admission_task.is_some() {
+            context.request_repaint_after(PLANNING_POLL_INTERVAL);
+        }
+    }
+
+    fn apply_admission_result(
+        &mut self,
+        previous_source_count: usize,
+        result: Result<PlanDto, PlanningCommandErrorDto>,
+    ) {
+        match result {
             Ok(plan) => {
                 let admitted_count = plan.rows().len().saturating_sub(previous_source_count);
                 self.status = match self.locale {
@@ -2503,16 +2676,18 @@ impl RenamewrightApp {
                 self.plan = Some(plan);
                 self.plan_is_current = true;
             }
-            Err(error) => {
-                self.plan_is_current = false;
-                self.status = format!(
-                    "{} ({})",
-                    self.locale
-                        .text("Sources were not admitted", "원본을 추가하지 못했습니다"),
-                    error.code()
-                );
-            }
+            Err(error) => self.apply_admission_error(&error),
         }
+    }
+
+    fn apply_admission_error(&mut self, error: &PlanningCommandErrorDto) {
+        self.plan_is_current = false;
+        self.status = format!(
+            "{} ({})",
+            self.locale
+                .text("Sources were not admitted", "원본을 추가하지 못했습니다"),
+            error.code()
+        );
     }
 
     fn refresh_plan(&mut self) {
@@ -2613,7 +2788,16 @@ impl RenamewrightApp {
             Some(Err(TryRecvError::Empty)) | None => {}
         }
 
-        if self.planning_task.is_none()
+        if self.admission_task.is_none()
+            && self.planning_task.is_none()
+            && !self.pending_admission_paths.is_empty()
+        {
+            let paths = std::mem::take(&mut self.pending_admission_paths);
+            self.launch_source_admission(paths, context);
+        }
+
+        if self.admission_task.is_none()
+            && self.planning_task.is_none()
             && self
                 .planning_due
                 .is_some_and(|deadline| Instant::now() >= deadline)
@@ -3509,12 +3693,12 @@ impl RenamewrightApp {
         }
     }
 
-    fn choose_files(&mut self) {
+    fn choose_files(&mut self, context: &egui::Context) {
         match rfd::FileDialog::new()
             .set_title("Add files to Renamewright")
             .pick_files()
         {
-            Some(paths) => self.admit_sources(paths),
+            Some(paths) => self.start_source_admission(paths, context),
             None => {
                 self.status = self
                     .locale
@@ -3524,12 +3708,12 @@ impl RenamewrightApp {
         }
     }
 
-    fn choose_folder_entry(&mut self) {
+    fn choose_folder_entry(&mut self, context: &egui::Context) {
         match rfd::FileDialog::new()
             .set_title("Add one directory entry to Renamewright")
             .pick_folder()
         {
-            Some(path) => self.admit_sources(vec![path]),
+            Some(path) => self.start_source_admission(vec![path], context),
             None => {
                 self.status = self
                     .locale
@@ -3557,6 +3741,73 @@ impl RenamewrightApp {
             context.options_mut(|options| options.fallback_theme = egui::Theme::Light);
             context.set_theme(self.appearance.theme.preference());
             self.appearance_applied = true;
+        }
+    }
+
+    fn ensure_korean_font(&mut self, context: &egui::Context) {
+        if self.korean_font_state != KoreanFontState::Idle {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        match thread::Builder::new()
+            .name("renamewright-font-loader".to_owned())
+            .spawn(move || {
+                let font = KOREAN_FONT_CANDIDATES.iter().find_map(|candidate| {
+                    std::fs::read(candidate).ok().map(|bytes| {
+                        let name = std::path::Path::new(candidate).file_name().map_or_else(
+                            || (*candidate).to_owned(),
+                            |name| name.to_string_lossy().into_owned(),
+                        );
+                        (name, bytes)
+                    })
+                });
+                let _ = sender.send(font);
+            }) {
+            Ok(handle) => {
+                self.korean_font_state = KoreanFontState::Loading;
+                self.korean_font_task = Some(KoreanFontTask {
+                    receiver,
+                    handle: Some(handle),
+                });
+                context.request_repaint_after(FONT_POLL_INTERVAL);
+            }
+            Err(error) => {
+                self.korean_font_state = KoreanFontState::Unavailable;
+                eprintln!("Korean fallback font loading was not started: {error}");
+            }
+        }
+    }
+
+    fn poll_korean_font(&mut self, context: &egui::Context) {
+        let Some(task) = self.korean_font_task.as_ref() else {
+            return;
+        };
+        match task.receiver.try_recv() {
+            Ok(Some((name, bytes))) => {
+                let mut fonts = FontDefinitions::empty();
+                fonts.font_data.insert(
+                    "system-korean".to_owned(),
+                    FontData::from_owned(bytes).into(),
+                );
+                for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                    fonts
+                        .families
+                        .insert(family, vec!["system-korean".to_owned()]);
+                }
+                context.set_fonts(fonts);
+                self.korean_font_state = KoreanFontState::Ready;
+                eprintln!("loaded Korean fallback font: {name}");
+                if let Some(task) = self.korean_font_task.take() {
+                    task.finish();
+                }
+                context.request_repaint();
+            }
+            Ok(None) | Err(TryRecvError::Disconnected) => {
+                self.korean_font_state = KoreanFontState::Unavailable;
+                self.korean_font_task = None;
+                eprintln!("no Korean fallback font was found; IME text remains inspectable");
+            }
+            Err(TryRecvError::Empty) => context.request_repaint_after(FONT_POLL_INTERVAL),
         }
     }
 
@@ -3807,6 +4058,25 @@ impl RenamewrightApp {
                     })
                     .response
                     .on_hover_text(semantics::LANGUAGE);
+                match self.korean_font_state {
+                    KoreanFontState::Loading => {
+                        ui.spinner();
+                        ui.label(
+                            self.locale
+                                .text("Loading Korean text", "한글 글꼴 불러오는 중"),
+                        );
+                    }
+                    KoreanFontState::Unavailable => {
+                        ui.label(
+                            RichText::new(
+                                self.locale
+                                    .text("Korean font unavailable", "한글 글꼴을 찾을 수 없음"),
+                            )
+                            .color(self.palette.blocked),
+                        );
+                    }
+                    KoreanFontState::Idle | KoreanFontState::Ready => {}
+                }
                 appearance_changed |= self.show_appearance_menu(ui);
                 let history = ui.selectable_label(
                     self.ledger_open,
@@ -3825,13 +4095,13 @@ impl RenamewrightApp {
                     .button(self.locale.text(semantics::ADD_FOLDER, "폴더 자체 추가"))
                     .clicked()
                 {
-                    self.choose_folder_entry();
+                    self.choose_folder_entry(ui.ctx());
                 }
                 if ui
                     .button(self.locale.text(semantics::ADD_FILES, "파일 추가"))
                     .clicked()
                 {
-                    self.choose_files();
+                    self.choose_files(ui.ctx());
                 }
             });
         });
@@ -3839,6 +4109,9 @@ impl RenamewrightApp {
             self.appearance_applied = false;
             self.apply_appearance(ui.ctx());
             ui.ctx().request_repaint();
+        }
+        if self.locale == Locale::Korean {
+            self.ensure_korean_font(ui.ctx());
         }
     }
 
@@ -4741,6 +5014,8 @@ impl RenamewrightApp {
             && self.plan_is_current
             && self.planning_due.is_none()
             && self.planning_task.is_none()
+            && self.admission_task.is_none()
+            && self.pending_admission_paths.is_empty()
             && self.ledger_ready
             && self.ledger_task.is_none();
         let lock_reason = if self.synthetic_fixture && self.plan.is_none() {
@@ -4752,6 +5027,11 @@ impl RenamewrightApp {
             self.locale.text(
                 "Add entries to create a plan",
                 "항목을 추가해 계획을 만드세요",
+            )
+        } else if self.admission_task.is_some() || !self.pending_admission_paths.is_empty() {
+            self.locale.text(
+                "Wait for selected entries to finish loading",
+                "선택한 항목을 모두 불러올 때까지 기다리세요",
             )
         } else if !self.plan_is_current
             || self.planning_due.is_some()
@@ -5141,7 +5421,28 @@ impl RenamewrightApp {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        let entered_non_ascii_text = ui.ctx().input(|input| {
+            input.events.iter().any(|event| match event {
+                egui::Event::Text(text) | egui::Event::Paste(text) => !text.is_ascii(),
+                egui::Event::Ime(_) => true,
+                _ => false,
+            })
+        });
+        if entered_non_ascii_text {
+            self.ensure_korean_font(ui.ctx());
+        }
+        self.poll_korean_font(ui.ctx());
         self.apply_appearance(ui.ctx());
+        self.poll_admission(ui.ctx());
+        if self.korean_font_state == KoreanFontState::Idle
+            && self.plan.as_ref().is_some_and(|plan| {
+                plan.rows()
+                    .iter()
+                    .any(|row| !row.original_name().is_ascii() || !row.proposed_name().is_ascii())
+            })
+        {
+            self.ensure_korean_font(ui.ctx());
+        }
         self.poll_planning(ui.ctx());
         self.poll_ledger(ui.ctx());
         self.poll_document(ui.ctx());
@@ -5159,12 +5460,12 @@ impl RenamewrightApp {
             .ctx()
             .input_mut(|input| input.consume_shortcut(&add_folder_shortcut))
         {
-            self.choose_folder_entry();
+            self.choose_folder_entry(ui.ctx());
         } else if ui
             .ctx()
             .input_mut(|input| input.consume_shortcut(&add_files_shortcut))
         {
-            self.choose_files();
+            self.choose_files(ui.ctx());
         }
         if ui
             .ctx()
@@ -5194,7 +5495,7 @@ impl RenamewrightApp {
                 .collect::<Vec<_>>()
         });
         if !dropped_paths.is_empty() {
-            self.admit_sources(dropped_paths);
+            self.start_source_admission(dropped_paths, ui.ctx());
         }
 
         #[cfg(feature = "automation")]
@@ -5351,12 +5652,14 @@ impl Drop for RenamewrightApp {
         if let Some(task) = self.planning_task.take() {
             task.finish();
         }
+        let _ = self.admission_task.take();
         if let Some(task) = self.ledger_task.take() {
             task.finish();
         }
         if let Some(task) = self.document_task.take() {
             task.finish();
         }
+        let _ = self.korean_font_task.take();
     }
 }
 
@@ -5468,11 +5771,11 @@ mod tests {
         AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
     };
     use super::{
-        AccentChoice, AppearanceTheme, InterfaceDensity, LedgerMessage, LedgerTask, Locale,
-        MutationTask, NativePalette, PLANNING_DEBOUNCE, PREVIEW_PROPOSED_COLUMN_WIDTH,
-        PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto, PlanFilter, RenamewrightApp,
-        RuleKind, RuleRequestDto, adjacent_selection_index, install_theme,
-        install_theme_with_density, preview_column_label, semantics,
+        AccentChoice, AppearanceTheme, InterfaceDensity, KoreanFontState, LedgerMessage,
+        LedgerTask, Locale, MutationTask, NativePalette, PLANNING_DEBOUNCE,
+        PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
+        PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, adjacent_selection_index,
+        install_theme, install_theme_with_density, preview_column_label, semantics,
     };
 
     #[derive(Default)]
@@ -5514,6 +5817,42 @@ mod tests {
             assert!(Instant::now() < deadline, "document task did not settle");
             thread::yield_now();
         }
+    }
+
+    fn settle_admission(app: &mut RenamewrightApp) {
+        let context = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.admission_task.is_some() {
+            app.poll_admission(&context);
+            assert!(Instant::now() < deadline, "admission task did not settle");
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn source_admission_runs_off_frame_and_queues_a_second_selection() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let first = directory.path().join("first.txt");
+        let second = directory.path().join("second.txt");
+        fs::write(&first, b"first")?;
+        fs::write(&second, b"second")?;
+        let context = egui::Context::default();
+        let mut app = RenamewrightApp::new(false);
+
+        app.start_source_admission(vec![first], &context);
+        assert!(app.admission_task.is_some());
+        assert!(!app.plan_is_current);
+        app.start_source_admission(vec![second], &context);
+        assert_eq!(app.pending_admission_paths.len(), 1);
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| app.show(ui));
+        output.textures_delta.clear();
+        settle_admission(&mut app);
+
+        assert!(app.plan_is_current);
+        assert_eq!(app.plan.as_ref().map(|plan| plan.rows().len()), Some(2));
+        assert!(app.pending_admission_paths.is_empty());
+        Ok(())
     }
 
     fn relative_luminance(color: egui::Color32) -> f32 {
@@ -5726,7 +6065,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
@@ -5756,7 +6095,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
@@ -5798,7 +6137,7 @@ mod tests {
             replacement: "CON".to_owned(),
         }];
         app.next_rule_id = 8;
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         assert_eq!(
             app.plan
                 .as_ref()
@@ -5890,7 +6229,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.set_prefix("final-");
-        app.admit_sources(vec![source.clone()]);
+        app.admit_sources_immediately(vec![source.clone()]);
         app.pending_confirmation = Some(PendingConfirmation::Apply {
             plan_id: app.plan.as_ref().map_or(0, PlanDto::plan_id),
             changed_count: 1,
@@ -6011,7 +6350,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let plan_id = app.plan.as_ref().map(PlanDto::plan_id);
         let changed_count = app.plan.as_ref().map(PlanDto::changed_count);
         let mut harness = Harness::builder()
@@ -6178,7 +6517,7 @@ mod tests {
         );
         settle_ledger(&mut app);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         assert!(app.plan.as_ref().is_some_and(PlanDto::can_apply));
 
         app.set_prefix("reviewed-");
@@ -6386,7 +6725,7 @@ mod tests {
             Some(directory.path().join("journals")),
         );
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         assert!(app.ledger_task.is_some());
         assert!(!app.ledger_ready);
 
@@ -6413,7 +6752,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new(false);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let stale_plan_id = app
             .plan
             .as_ref()
@@ -6454,7 +6793,7 @@ mod tests {
         );
         settle_ledger(&mut app);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_200.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
@@ -6476,7 +6815,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new(false);
         app.set_prefix("final-");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
 
         let Some(plan) = &app.plan else {
             return Err("the native workbench did not retain the service plan".into());
@@ -6547,7 +6886,7 @@ mod tests {
         fs::write(selected.join("child.txt"), b"child")?;
         let mut app = RenamewrightApp::new(false);
         app.set_prefix("final-");
-        app.admit_sources(vec![selected]);
+        app.admit_sources_immediately(vec![selected]);
 
         let plan = app.plan.as_ref().ok_or("the directory plan was missing")?;
         assert_eq!(plan.rows().len(), 1);
@@ -6586,7 +6925,7 @@ mod tests {
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new(false);
         app.set_prefix("");
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let source_id = app
             .plan
             .as_ref()
@@ -6639,12 +6978,52 @@ mod tests {
     }
 
     #[test]
+    fn korean_font_loading_is_deferred_until_korean_text_is_needed() {
+        let english_app = RenamewrightApp::new(false);
+        let english_harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), english_app);
+        assert_eq!(
+            english_harness.state().korean_font_state,
+            KoreanFontState::Idle
+        );
+        assert!(english_harness.state().korean_font_task.is_none());
+
+        let mut korean_app = RenamewrightApp::new(false);
+        korean_app.locale = Locale::Korean;
+        let korean_harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), korean_app);
+        assert_ne!(
+            korean_harness.state().korean_font_state,
+            KoreanFontState::Idle
+        );
+    }
+
+    #[test]
+    fn korean_filename_starts_font_loading_in_the_english_ui() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("보고서.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.admit_sources_immediately(vec![source]);
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1_100.0, 720.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        assert_eq!(harness.state().locale, Locale::English);
+        assert_ne!(harness.state().korean_font_state, KoreanFontState::Idle);
+        Ok(())
+    }
+
+    #[test]
     fn direct_rule_button_focuses_input_and_enter_commits_the_edit() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let source = directory.path().join("report.txt");
         fs::write(&source, b"report")?;
         let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
-        app.admit_sources(vec![source]);
+        app.admit_sources_immediately(vec![source]);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), app);

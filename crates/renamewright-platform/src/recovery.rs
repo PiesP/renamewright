@@ -5,7 +5,7 @@ use std::path::Path;
 
 use renamewright_core::{
     ExecutionDirection, ExecutionPhase, ExecutionStep, JournalEntry, JournalRecord, JournalStatus,
-    RollbackCause, ScheduleError, SourceId, build_two_phase_schedule, replay_journal,
+    PlanId, RollbackCause, ScheduleError, SourceId, build_two_phase_schedule, replay_journal,
 };
 
 use crate::executor::{
@@ -35,6 +35,8 @@ pub enum RecoveryReadiness {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecoveryTransactionInspection {
     ledger_id: LedgerId,
+    plan_id: PlanId,
+    source_generation: u64,
     direction: ExecutionDirection,
     step_index: Option<usize>,
     readiness: RecoveryReadiness,
@@ -47,6 +49,16 @@ impl RecoveryTransactionInspection {
     #[must_use]
     pub const fn ledger_id(self) -> LedgerId {
         self.ledger_id
+    }
+
+    #[must_use]
+    pub const fn plan_id(self) -> PlanId {
+        self.plan_id
+    }
+
+    #[must_use]
+    pub const fn source_generation(self) -> u64 {
+        self.source_generation
     }
 
     #[must_use]
@@ -288,6 +300,15 @@ pub fn inspect_recovery_transaction<F: ExecutionFileSystem + ?Sized>(
     ledger_id: LedgerId,
     filesystem: &F,
 ) -> Result<RecoveryTransactionInspection, RecoveryInspectionError> {
+    let ledger_entry = ledger.entry(ledger_id).ok_or_else(|| {
+        RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::JournalUnavailable)
+    })?;
+    let plan_id = ledger_entry.plan_id().ok_or_else(|| {
+        RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::InvalidProtocol)
+    })?;
+    let source_generation = ledger_entry.source_generation().ok_or_else(|| {
+        RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::InvalidProtocol)
+    })?;
     let (_, journal_inspection) = ledger.item(ledger_id).ok_or_else(|| {
         RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::JournalUnavailable)
     })?;
@@ -319,6 +340,8 @@ pub fn inspect_recovery_transaction<F: ExecutionFileSystem + ?Sized>(
         );
         return Ok(RecoveryTransactionInspection {
             ledger_id,
+            plan_id,
+            source_generation,
             direction,
             step_index: Some(step_index),
             readiness: if reconcile_available {
@@ -365,6 +388,8 @@ pub fn inspect_recovery_transaction<F: ExecutionFileSystem + ?Sized>(
     };
     Ok(RecoveryTransactionInspection {
         ledger_id,
+        plan_id,
+        source_generation,
         direction,
         step_index,
         readiness,
