@@ -39,7 +39,7 @@ renamewright-windows-native = { path = "../renamewright-windows-native" }
 [dev-dependencies]
 egui_kittest = "0.36.1"
 kittest = "0.4.0"
-skrifa = "0.44.0"
+skrifa = "0.46.0"
 tempfile = "3.27.0"
 
 [build-dependencies]
