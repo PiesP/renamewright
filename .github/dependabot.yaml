@@ -51,7 +51,7 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: "npm"
-    directory: "/.github/codex-security"
+    directory: "/scripts/security/codex-security"
     schedule:
       interval: "daily"
       time: "09:00"
