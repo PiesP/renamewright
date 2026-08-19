@@ -124,6 +124,7 @@ jobs:
             --volume "$RUNNER_TEMP/osv-results:/results" \
             --workdir /src \
             "$OSV_SCANNER_IMAGE" \
+            --config=/src/.github/codex-security/osv-scanner.toml \
             --format=sarif \
             --output-file=/results/osv-results.sarif \
             -r \
