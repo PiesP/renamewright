@@ -68,8 +68,8 @@ jobs:
             "$RUNNER_TEMP/codex-security" \
             "$RUNNER_TEMP/codex-security-policy"
           install -m 0600 \
-            .github/codex-security/package.json \
-            .github/codex-security/package-lock.json \
+            scripts/security/codex-security/package.json \
+            scripts/security/codex-security/package-lock.json \
             "$RUNNER_TEMP/codex-security/"
           install -m 0600 \
             .github/codex-security/threat-model.md \

@@ -21,8 +21,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # google/osv-scanner-action image v2.5.0 (linux/amd64), resolved 2026-08-08.
-  OSV_SCANNER_IMAGE: ghcr.io/google/osv-scanner-action@sha256:4cc9d6b5a6bb3a81c38c8d1610f6855512ddd1ba5af77083a856f171dbd0d463
+  # google/osv-scanner-action image v2.5.1 (linux/amd64), resolved 2026-08-20.
+  OSV_SCANNER_IMAGE: ghcr.io/google/osv-scanner-action@sha256:dcd947131d8d11b8d0964de6590661fb921a4ecbd7b90a7cb21083acfc3fd8cc
 
 jobs:
   changes:
@@ -188,9 +188,9 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # semgrep/semgrep:1.172.0, resolved 2026-08-05.
+    # semgrep/semgrep:1.173.0 (linux/amd64), resolved 2026-08-20.
     container:
-      image: semgrep/semgrep:1.172.0@sha256:65dcd4408adda7c183a6b4550cb1e9b19f7f627a6fbb7e0559bd466bedc44d7b
+      image: semgrep/semgrep:1.173.0@sha256:44dd022c29d4f881a939f7281b4ba8855cb940a2dd272883908d8947325a4ba7
     steps:
       - name: No relevant text changes
         if: needs.changes.result == 'success' && needs.changes.outputs.semgrep != 'true'

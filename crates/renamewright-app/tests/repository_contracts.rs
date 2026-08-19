@@ -26,8 +26,10 @@ const INTERACTIVE_ACCEPTANCE: &str =
     include_str!("../../../scripts/test-windows-native-app-interactive.ps1");
 const RELEASE_PACKAGER: &str =
     include_str!("../../../scripts/prepare-windows-portable-release.ps1");
-const CODEX_SECURITY_PACKAGE: &str = include_str!("../../../.github/codex-security/package.json");
-const CODEX_SECURITY_LOCK: &str = include_str!("../../../.github/codex-security/package-lock.json");
+const CODEX_SECURITY_PACKAGE: &str =
+    include_str!("../../../scripts/security/codex-security/package.json");
+const CODEX_SECURITY_LOCK: &str =
+    include_str!("../../../scripts/security/codex-security/package-lock.json");
 const CODEX_SECURITY_OSV: &str = include_str!("../../../.github/codex-security/osv-scanner.toml");
 const CODEX_SECURITY_THREAT_MODEL: &str =
     include_str!("../../../.github/codex-security/threat-model.md");
@@ -243,9 +245,9 @@ fn branch_protection_requires_native_ui_and_performance_gates() {
 
 #[test]
 fn codex_security_cli_is_locked_private_and_repository_specific() {
-    assert!(CODEX_SECURITY_PACKAGE.contains("\"@openai/codex-security\": \"0.1.10\""));
+    assert!(CODEX_SECURITY_PACKAGE.contains("\"@openai/codex-security\": \"0.1.14\""));
     assert!(CODEX_SECURITY_LOCK.contains("\"node_modules/@openai/codex-security\""));
-    assert!(CODEX_SECURITY_LOCK.contains("\"version\": \"0.1.10\""));
+    assert!(CODEX_SECURITY_LOCK.contains("\"version\": \"0.1.14\""));
     assert!(CODEX_SECURITY_LOCK.contains("\"integrity\": \"sha512-"));
     assert!(CODEX_SECURITY_OSV.contains("id = \"GHSA-jmr9-qjv8-65gv\""));
     assert!(CODEX_SECURITY_OSV.contains("ignoreUntil = 2026-09-13"));
@@ -253,6 +255,7 @@ fn codex_security_cli_is_locked_private_and_repository_specific() {
     for required in [
         "npm ci",
         "--ignore-scripts",
+        "scripts/security/codex-security/package.json",
         "cli-$cli_version-$install_digest",
         "Codex Security paths must be outside the repository",
         "mktemp -d",
@@ -310,6 +313,7 @@ fn codex_security_ci_keeps_credentials_away_from_untrusted_source()
     for required in [
         "npm ci",
         "--ignore-scripts",
+        "scripts/security/codex-security/package.json",
         "$RUNNER_TEMP/codex-security-policy",
         "OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}",
         "--auth api-key",
@@ -327,7 +331,8 @@ fn codex_security_ci_keeps_credentials_away_from_untrusted_source()
     }
     assert!(!CODEX_SECURITY_WORKFLOW.contains("npm install"));
     assert!(!CODEX_SECURITY_WORKFLOW.contains("findings.json\n"));
-    assert!(DEPENDABOT_CONFIG.contains("directory: \"/.github/codex-security\""));
+    assert!(DEPENDABOT_CONFIG.contains("directory: \"/scripts/security/codex-security\""));
+    assert!(!DEPENDABOT_CONFIG.contains("directory: \"/.github/codex-security\""));
     assert!(DEPENDABOT_CONFIG.contains("prefix: \"chore(deps-security)\""));
     Ok(())
 }
