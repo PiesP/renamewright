@@ -314,11 +314,19 @@ impl RenameLedger {
             .map(|item| item.native_path.as_path())
     }
 
-    pub(crate) fn entry(&self, ledger_id: LedgerId) -> Option<LedgerEntry> {
-        self.items
-            .iter()
-            .find(|item| item.projection.ledger_id == ledger_id)
-            .map(|item| item.projection)
+    pub(crate) fn projection_matches_header(
+        &self,
+        ledger_id: LedgerId,
+        plan_id: PlanId,
+        source_generation: u64,
+        source_count: usize,
+    ) -> bool {
+        self.items.iter().any(|item| {
+            item.projection.ledger_id == ledger_id
+                && item.projection.plan_id == Some(plan_id)
+                && item.projection.source_generation == Some(source_generation)
+                && item.projection.source_count == source_count
+        })
     }
 
     pub(crate) fn journal_path_for_plan(&self, plan_id: PlanId) -> Option<PathBuf> {

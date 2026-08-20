@@ -218,6 +218,43 @@ fn undo_preparation_rejects_a_journal_replaced_after_inspection()
 }
 
 #[test]
+fn undo_authorization_rejects_cached_projection_and_locked_journal_mixing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (authorized_directory, ledger) = completed_fixture()?;
+    let (replacement_directory, _) =
+        completed_fixture_named("attacker.txt", "replacement.rwj", PlanId::new(181))?;
+    fs::write(
+        authorized_directory.path().join("a-original.rwj"),
+        fs::read(replacement_directory.path().join("replacement.rwj"))?,
+    )?;
+
+    let error = inspect_undo_transaction(
+        &ledger,
+        first_ledger_id(&ledger)?,
+        &LinuxExecutionFileSystem::new(),
+    )
+    .err()
+    .ok_or("cached projection A was combined with locked undo journal B")?;
+
+    assert_eq!(error.kind(), UndoErrorKind::JournalDamaged);
+    assert!(
+        authorized_directory
+            .path()
+            .join("final-source.txt")
+            .exists()
+    );
+    assert!(
+        replacement_directory
+            .path()
+            .join("final-attacker.txt")
+            .exists()
+    );
+    assert!(!authorized_directory.path().join("source.txt").exists());
+    assert!(!replacement_directory.path().join("attacker.txt").exists());
+    Ok(())
+}
+
+#[test]
 fn blocks_undo_when_the_source_identity_changes_or_destination_is_occupied()
 -> Result<(), Box<dyn std::error::Error>> {
     let (changed_directory, changed_ledger) = completed_fixture()?;

@@ -13,8 +13,8 @@ use crate::executor::{
     continue_rollback, journal_recovery, start_rollback,
 };
 use crate::{
-    ExecutionFileSystem, ExecutionFsErrorKind, ExecutionOutcome, JournalStorageErrorKind,
-    JournalWriter, LedgerId, RenameLedger,
+    AuthorizedJournal, ExecutionFileSystem, ExecutionFsErrorKind, ExecutionOutcome,
+    JournalStorageErrorKind, LedgerId, RenameLedger,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +48,7 @@ pub struct RecoveryTransactionInspection {
 #[derive(Debug)]
 pub struct RecoveryTransactionSnapshot {
     inspection: RecoveryTransactionInspection,
-    records: Vec<JournalRecord>,
+    authorization: AuthorizedJournal,
 }
 
 impl RecoveryTransactionSnapshot {
@@ -215,7 +215,6 @@ pub enum RecoveryActionErrorKind {
     DispositionNotDeterministic,
     RequiresReconciliation,
     ActionUnavailable,
-    JournalChanged,
     IdentityStateChanged,
     InvalidProtocol,
 }
@@ -324,34 +323,36 @@ pub fn inspect_recovery_transaction_snapshot<F: ExecutionFileSystem + ?Sized>(
     ledger_id: LedgerId,
     filesystem: &F,
 ) -> Result<RecoveryTransactionSnapshot, RecoveryInspectionError> {
-    let ledger_entry = ledger.entry(ledger_id).ok_or_else(|| {
+    let journal_path = ledger.journal_path(ledger_id).ok_or_else(|| {
         RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::JournalUnavailable)
     })?;
-    let plan_id = ledger_entry.plan_id().ok_or_else(|| {
-        RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::InvalidProtocol)
+    let authorization = AuthorizedJournal::open(journal_path).map_err(|_| {
+        RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::JournalDamaged)
     })?;
-    let source_generation = ledger_entry.source_generation().ok_or_else(|| {
-        RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::InvalidProtocol)
-    })?;
-    let (_, journal_inspection) = ledger.item(ledger_id).ok_or_else(|| {
-        RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::JournalUnavailable)
-    })?;
-    if journal_inspection.issue().is_some() {
+    let records = authorization.records();
+    let Some(JournalRecord::TransactionStarted {
+        plan_id,
+        source_generation,
+        entries,
+        ..
+    }) = records.first()
+    else {
+        return Err(RecoveryInspectionError::new(
+            None,
+            RecoveryInspectionErrorKind::InvalidProtocol,
+        ));
+    };
+    if !ledger.projection_matches_header(ledger_id, *plan_id, *source_generation, entries.len()) {
         return Err(RecoveryInspectionError::new(
             None,
             RecoveryInspectionErrorKind::JournalDamaged,
         ));
     }
-    let records = journal_inspection
-        .frames()
-        .iter()
-        .map(|frame| frame.record().clone())
-        .collect::<Vec<_>>();
     let inspection =
-        inspect_recovery_records(ledger_id, plan_id, source_generation, &records, filesystem)?;
+        inspect_recovery_records(ledger_id, *plan_id, *source_generation, records, filesystem)?;
     Ok(RecoveryTransactionSnapshot {
         inspection,
-        records,
+        authorization,
     })
 }
 
@@ -466,31 +467,20 @@ pub fn reconcile_prepared_step<F: ExecutionFileSystem + ?Sized>(
                 RecoveryActionErrorKind::Inspection { kind: error.kind() },
             )
         })?;
-    reconcile_prepared_step_from_snapshot(ledger, &snapshot, filesystem)
+    reconcile_prepared_step_from_snapshot(ledger, snapshot, filesystem)
 }
 
 pub fn reconcile_prepared_step_from_snapshot<F: ExecutionFileSystem + ?Sized>(
-    ledger: &RenameLedger,
-    snapshot: &RecoveryTransactionSnapshot,
+    _ledger: &RenameLedger,
+    snapshot: RecoveryTransactionSnapshot,
     filesystem: &F,
 ) -> Result<JournalStatus, RecoveryActionError> {
-    let journal_path = ledger
-        .journal_path(snapshot.inspection.ledger_id())
-        .ok_or_else(|| {
-            RecoveryActionError::new(None, RecoveryActionErrorKind::JournalUnavailable)
-        })?;
-    let (mut writer, mut records) = JournalWriter::resume(journal_path).map_err(|error| {
+    let (mut writer, mut records) = snapshot.authorization.into_writer().map_err(|error| {
         RecoveryActionError::new(
             None,
             RecoveryActionErrorKind::Journal { kind: error.kind() },
         )
     })?;
-    if records != snapshot.records {
-        return Err(RecoveryActionError::new(
-            None,
-            RecoveryActionErrorKind::JournalChanged,
-        ));
-    }
     let inspection =
         inspect_prepared_records(snapshot.inspection.ledger_id(), &records, filesystem).map_err(
             |error| {
@@ -572,12 +562,12 @@ where
                 RecoveryActionErrorKind::Inspection { kind: error.kind() },
             )
         })?;
-    recover_transaction_from_snapshot(ledger, &snapshot, filesystem, action, should_cancel)
+    recover_transaction_from_snapshot(ledger, snapshot, filesystem, action, should_cancel)
 }
 
 pub fn recover_transaction_from_snapshot<F, C>(
-    ledger: &RenameLedger,
-    snapshot: &RecoveryTransactionSnapshot,
+    _ledger: &RenameLedger,
+    snapshot: RecoveryTransactionSnapshot,
     filesystem: &F,
     action: RecoveryAction,
     should_cancel: C,
@@ -586,23 +576,12 @@ where
     F: ExecutionFileSystem + ?Sized,
     C: Fn() -> bool,
 {
-    let journal_path = ledger
-        .journal_path(snapshot.inspection.ledger_id())
-        .ok_or_else(|| {
-            RecoveryActionError::new(None, RecoveryActionErrorKind::JournalUnavailable)
-        })?;
-    let (mut writer, records) = JournalWriter::resume(journal_path).map_err(|error| {
+    let (mut writer, records) = snapshot.authorization.into_writer().map_err(|error| {
         RecoveryActionError::new(
             None,
             RecoveryActionErrorKind::Journal { kind: error.kind() },
         )
     })?;
-    if records != snapshot.records {
-        return Err(RecoveryActionError::new(
-            None,
-            RecoveryActionErrorKind::JournalChanged,
-        ));
-    }
     let status = replay_journal(&records)
         .map_err(|_| RecoveryActionError::new(None, RecoveryActionErrorKind::InvalidProtocol))?;
     if matches!(status, JournalStatus::ReconciliationRequired { .. }) {

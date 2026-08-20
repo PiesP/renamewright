@@ -62,11 +62,8 @@ impl JournalAuthorizationState {
     }
 
     fn take(&mut self, authorization_id: u64) -> Option<JournalAuthorization> {
-        let (active_id, _) = self.active.as_ref()?;
-        if *active_id != authorization_id {
-            return None;
-        }
-        self.active.take().map(|(_, authorization)| authorization)
+        let (active_id, authorization) = self.active.take()?;
+        (active_id == authorization_id).then_some(authorization)
     }
 
     fn invalidate(&mut self) {
@@ -2646,7 +2643,7 @@ where
     let action_result = match request.action {
         RecoveryCommandAction::Resume => recover_transaction_from_snapshot(
             &ledger,
-            &snapshot,
+            snapshot,
             filesystem,
             RecoveryAction::Resume,
             || recovery_session.cancel_requested(),
@@ -2654,14 +2651,14 @@ where
         .map(recovery_outcome_name),
         RecoveryCommandAction::Rollback => recover_transaction_from_snapshot(
             &ledger,
-            &snapshot,
+            snapshot,
             filesystem,
             RecoveryAction::Rollback,
             || false,
         )
         .map(recovery_outcome_name),
         RecoveryCommandAction::Reconcile => {
-            reconcile_prepared_step_from_snapshot(&ledger, &snapshot, filesystem)
+            reconcile_prepared_step_from_snapshot(&ledger, snapshot, filesystem)
                 .map(|_| "reconciled")
         }
     };

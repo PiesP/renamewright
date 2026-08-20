@@ -2,7 +2,7 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::Path;
 
 use renamewright_core::{
@@ -199,15 +199,15 @@ pub struct JournalWriter {
 }
 
 #[derive(Debug)]
-pub struct JournalSnapshotLock {
-    _file: File,
+pub struct AuthorizedJournal {
+    file: File,
+    records: Vec<JournalRecord>,
+    schema_version: u16,
+    bytes: Vec<u8>,
 }
 
-impl JournalSnapshotLock {
-    pub fn open(
-        path: &Path,
-        expected_records: &[JournalRecord],
-    ) -> Result<Self, JournalStorageError> {
+impl AuthorizedJournal {
+    pub fn open(path: &Path) -> Result<Self, JournalStorageError> {
         let mut file = open_existing_journal_no_follow(path).map_err(|error| {
             JournalStorageError::new(
                 0,
@@ -256,17 +256,104 @@ impl JournalSnapshotLock {
                 JournalStorageErrorKind::ResumeCodec { kind: error.kind() },
             )
         })?;
+        let schema_version = frames
+            .first()
+            .map(JournalFrame::schema_version)
+            .ok_or_else(|| {
+                JournalStorageError::new(
+                    0,
+                    JournalStorageErrorKind::ResumeProtocol {
+                        kind: JournalReplayErrorKind::EmptyJournal,
+                    },
+                )
+            })?;
         let records = frames
             .into_iter()
             .map(JournalFrame::into_record)
             .collect::<Vec<_>>();
-        if records != expected_records {
+        if schema_version != JOURNAL_SCHEMA_VERSION
+            || !records
+                .first()
+                .is_some_and(initial_record_has_parent_authority)
+        {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeVersion {
+                    version: schema_version,
+                },
+            ));
+        }
+        Ok(Self {
+            file,
+            records,
+            schema_version,
+            bytes,
+        })
+    }
+
+    #[must_use]
+    pub fn records(&self) -> &[JournalRecord] {
+        &self.records
+    }
+
+    pub fn verify_content(&mut self) -> Result<(), JournalStorageError> {
+        self.file.rewind().map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeReadFailed {
+                    io_kind: error.kind(),
+                },
+            )
+        })?;
+        let mut current = Vec::new();
+        Read::by_ref(&mut self.file)
+            .take(MAX_JOURNAL_FILE_BYTES.saturating_add(1))
+            .read_to_end(&mut current)
+            .map_err(|error| {
+                JournalStorageError::new(
+                    0,
+                    JournalStorageErrorKind::ResumeReadFailed {
+                        io_kind: error.kind(),
+                    },
+                )
+            })?;
+        if current != self.bytes {
             return Err(JournalStorageError::new(
                 0,
                 JournalStorageErrorKind::SnapshotChanged,
             ));
         }
-        Ok(Self { _file: file })
+        Ok(())
+    }
+
+    pub fn into_writer(
+        mut self,
+    ) -> Result<(JournalWriter, Vec<JournalRecord>), JournalStorageError> {
+        self.verify_content()?;
+        let status = replay_journal(&self.records).map_err(|error| {
+            JournalStorageError::new(
+                u64::try_from(error.record_index()).unwrap_or(u64::MAX),
+                JournalStorageErrorKind::ResumeProtocol { kind: error.kind() },
+            )
+        })?;
+        if matches!(
+            status,
+            JournalStatus::Completed | JournalStatus::RolledBack { .. }
+        ) {
+            return Err(JournalStorageError::new(
+                u64::try_from(self.records.len()).unwrap_or(u64::MAX),
+                JournalStorageErrorKind::ResumeTerminal,
+            ));
+        }
+        let next_sequence = u64::try_from(self.records.len()).map_err(|_| {
+            JournalStorageError::new(u64::MAX, JournalStorageErrorKind::SequenceExhausted)
+        })?;
+        Ok((
+            JournalWriter {
+                appender: DurableAppender::resume(self.file, next_sequence, self.schema_version),
+            },
+            self.records,
+        ))
     }
 }
 
