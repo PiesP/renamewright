@@ -9,6 +9,7 @@ mod undo;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
@@ -57,6 +58,7 @@ pub use undo::{
 };
 
 pub const MAX_ADMITTED_SOURCES: usize = 10_000;
+pub const MAX_ENUMERATED_SIBLINGS_PER_PARENT: usize = MAX_ADMITTED_SOURCES;
 
 /// Applying a newly planned rename is enabled through the application service.
 #[must_use]
@@ -360,18 +362,15 @@ fn validation_environment<'a>(
             unavailable_parents.insert(*parent_id);
             continue;
         };
-        let mut parent_names = Vec::new();
-        for entry in entries {
-            let Ok(entry) = entry else {
-                unavailable_parents.insert(*parent_id);
-                parent_names.clear();
-                break;
-            };
-            let entry_path = entry.path();
-            if !source_paths.contains(entry_path.as_path()) {
-                parent_names.push(OccupiedName::new(*parent_id, entry.file_name()));
-            }
-        }
+        let entries = entries.map(|entry| {
+            entry
+                .map(|entry| (entry.path(), entry.file_name()))
+                .map_err(|_| ())
+        });
+        let Ok(parent_names) = collect_occupied_names(*parent_id, entries, &source_paths) else {
+            unavailable_parents.insert(*parent_id);
+            continue;
+        };
         occupied_names.extend(parent_names);
     }
     occupied_names.sort_by(|left, right| {
@@ -382,6 +381,24 @@ fn validation_environment<'a>(
 
     ValidationEnvironment::new(stale_sources, unavailable_parents, occupied_names)
         .with_ancestor_conflicts(ancestor_conflicts)
+}
+
+fn collect_occupied_names(
+    parent_id: ParentId,
+    entries: impl IntoIterator<Item = Result<(PathBuf, OsString), ()>>,
+    source_paths: &BTreeSet<&Path>,
+) -> Result<Vec<OccupiedName>, ()> {
+    let mut occupied_names = Vec::new();
+    for (index, entry) in entries.into_iter().enumerate() {
+        if index >= MAX_ENUMERATED_SIBLINGS_PER_PARENT {
+            return Err(());
+        }
+        let (path, native_name) = entry?;
+        if !source_paths.contains(path.as_path()) {
+            occupied_names.push(OccupiedName::new(parent_id, native_name));
+        }
+    }
+    Ok(occupied_names)
 }
 
 fn ancestor_conflicts<'a>(
@@ -613,9 +630,20 @@ mod tests {
     };
 
     use super::{
-        AdmissionError, MAX_ADMITTED_SOURCES, SourceRegistry, ancestor_conflicts_by_identity,
-        normalize_entry_path, plan_execution_is_enabled, recovery_execution_is_enabled,
+        AdmissionError, MAX_ADMITTED_SOURCES, MAX_ENUMERATED_SIBLINGS_PER_PARENT, SourceRegistry,
+        ancestor_conflicts_by_identity, collect_occupied_names, normalize_entry_path,
+        plan_execution_is_enabled, recovery_execution_is_enabled,
     };
+
+    #[test]
+    fn occupied_name_collection_fails_before_retaining_beyond_the_parent_cap() {
+        let entries = (0..=MAX_ENUMERATED_SIBLINGS_PER_PARENT).map(|index| {
+            let name = format!("entry-{index}");
+            Ok((PathBuf::from(&name), name.into()))
+        });
+
+        assert!(collect_occupied_names(ParentId::new(1), entries, &BTreeSet::new()).is_err());
+    }
 
     #[test]
     fn identity_ancestry_catches_lexically_unrelated_windows_aliases() {
