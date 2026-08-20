@@ -19,10 +19,11 @@ use eframe::egui::{
 use renamewright_application::{
     ApplicationService, ApplicationServiceErrorKind, ApplyCommandErrorDto, ApplyCommandResultDto,
     CaseModeDto, CharacterClassDto, CharacterClassOperationDto, ExtensionOperationDto,
-    FilenamePartDto, LedgerEntryDto, PlanDto, PlanningCommandErrorDto, PresetDocumentDto,
-    RangeOperationDto, RangeOriginDto, RecoveryCommandAction, RecoveryCommandErrorDto,
-    RecoveryCommandResultDto, RecoveryInspectionDto, RecoveryRequestDto, RulePipelineRequestDto,
-    RuleRequestDto, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, SourceOverrideDto,
+    FilenamePartDto, LedgerEntryDto, MAX_OVERRIDE_TEXT_BYTES, MAX_PRESET_NAME_BYTES,
+    MAX_RULE_TEXT_BYTES, PlanDto, PlanningCommandErrorDto, PresetDocumentDto, RangeOperationDto,
+    RangeOriginDto, RecoveryCommandAction, RecoveryCommandErrorDto, RecoveryCommandResultDto,
+    RecoveryInspectionDto, RecoveryRequestDto, RulePipelineRequestDto, RuleRequestDto,
+    SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, SourceOverrideDto,
     UndoCommandErrorDto, UndoCommandResultDto, UndoInspectionDto, UndoRequestDto,
     UnicodeNormalizationFormDto,
 };
@@ -56,6 +57,7 @@ const EMOJI_FONT_CANDIDATES: [&str; 3] = [
     "/usr/share/fonts/opentype/noto/NotoColorEmoji.ttf",
 ];
 const BASE_FONT_NAME: &str = "renamewright-base";
+const MAX_SOURCE_QUERY_BYTES: usize = 256;
 
 /// Installs the single embedded font needed to render the first application frame.
 ///
@@ -1934,6 +1936,66 @@ fn filename_part_control(
     before != *target
 }
 
+fn truncate_utf8_to_bytes(value: &mut String, max_bytes: usize) -> bool {
+    if value.len() <= max_bytes {
+        return false;
+    }
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    value.truncate(boundary);
+    true
+}
+
+fn collect_bounded_source_paths(
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<Vec<PathBuf>, ()> {
+    let paths = paths
+        .into_iter()
+        .take(MAX_ADMITTED_SOURCES.saturating_add(1))
+        .collect::<Vec<_>>();
+    (paths.len() <= MAX_ADMITTED_SOURCES)
+        .then_some(paths)
+        .ok_or(())
+}
+
+fn bound_rule_text(rule: &mut RuleRequestDto) -> bool {
+    match rule {
+        RuleRequestDto::Prefix { value, .. }
+        | RuleRequestDto::Suffix { value, .. }
+        | RuleRequestDto::Extension { value, .. } => {
+            truncate_utf8_to_bytes(value, MAX_RULE_TEXT_BYTES)
+        }
+        RuleRequestDto::LiteralReplace {
+            search,
+            replacement,
+            ..
+        } => {
+            truncate_utf8_to_bytes(search, MAX_RULE_TEXT_BYTES)
+                | truncate_utf8_to_bytes(replacement, MAX_RULE_TEXT_BYTES)
+        }
+        RuleRequestDto::RegexReplace {
+            pattern,
+            replacement,
+            ..
+        } => {
+            truncate_utf8_to_bytes(pattern, MAX_RULE_TEXT_BYTES)
+                | truncate_utf8_to_bytes(replacement, MAX_RULE_TEXT_BYTES)
+        }
+        RuleRequestDto::Sequence { separator, .. } => {
+            truncate_utf8_to_bytes(separator, MAX_RULE_TEXT_BYTES)
+        }
+        RuleRequestDto::WhitespaceCleanup { replacement, .. } => {
+            truncate_utf8_to_bytes(replacement, MAX_RULE_TEXT_BYTES)
+        }
+        RuleRequestDto::Case { .. }
+        | RuleRequestDto::UnicodeNormalization { .. }
+        | RuleRequestDto::Range { .. }
+        | RuleRequestDto::CharacterClass { .. } => false,
+    }
+}
+
 fn rule_editor(
     ui: &mut egui::Ui,
     rule: &mut RuleRequestDto,
@@ -1957,6 +2019,7 @@ fn rule_editor(
                     .add(
                         egui::TextEdit::singleline(value)
                             .id_salt("rule.prefix.value")
+                            .char_limit(MAX_RULE_TEXT_BYTES)
                             .desired_width(180.0)
                             .hint_text(locale.text("Text", "텍스트")),
                     )
@@ -1970,6 +2033,7 @@ fn rule_editor(
                     .add(
                         egui::TextEdit::singleline(value)
                             .id_salt("rule.suffix.value")
+                            .char_limit(MAX_RULE_TEXT_BYTES)
                             .desired_width(180.0)
                             .hint_text(locale.text("Text", "텍스트")),
                     )
@@ -1984,13 +2048,21 @@ fn rule_editor(
             } => {
                 let find_label = ui.label(locale.text("Find", "찾기"));
                 let find = ui
-                    .add(egui::TextEdit::singleline(search).desired_width(160.0))
+                    .add(
+                        egui::TextEdit::singleline(search)
+                            .char_limit(MAX_RULE_TEXT_BYTES)
+                            .desired_width(160.0),
+                    )
                     .labelled_by(find_label.id);
                 focus_once(&find, &mut request_focus);
                 changed |= find.changed();
                 let replacement_label = ui.label(locale.text("Replace with", "바꿀 내용"));
                 changed |= ui
-                    .add(egui::TextEdit::singleline(replacement).desired_width(160.0))
+                    .add(
+                        egui::TextEdit::singleline(replacement)
+                            .char_limit(MAX_RULE_TEXT_BYTES)
+                            .desired_width(160.0),
+                    )
                     .labelled_by(replacement_label.id)
                     .changed();
             }
@@ -2001,13 +2073,21 @@ fn rule_editor(
             } => {
                 let pattern_label = ui.label(locale.text("Pattern", "패턴"));
                 let pattern_response = ui
-                    .add(egui::TextEdit::singleline(pattern).desired_width(160.0))
+                    .add(
+                        egui::TextEdit::singleline(pattern)
+                            .char_limit(MAX_RULE_TEXT_BYTES)
+                            .desired_width(160.0),
+                    )
                     .labelled_by(pattern_label.id);
                 focus_once(&pattern_response, &mut request_focus);
                 changed |= pattern_response.changed();
                 let replacement_label = ui.label(locale.text("Replacement", "바꿀 내용"));
                 changed |= ui
-                    .add(egui::TextEdit::singleline(replacement).desired_width(160.0))
+                    .add(
+                        egui::TextEdit::singleline(replacement)
+                            .char_limit(MAX_RULE_TEXT_BYTES)
+                            .desired_width(160.0),
+                    )
                     .labelled_by(replacement_label.id)
                     .changed();
             }
@@ -2081,7 +2161,9 @@ fn rule_editor(
                         .add(egui::DragValue::new(padding).range(1..=32))
                         .changed();
                     ui.label(locale.text("Between number and name", "번호와 이름 사이"));
-                    changed |= ui.text_edit_singleline(separator).changed();
+                    changed |= ui
+                        .add(egui::TextEdit::singleline(separator).char_limit(MAX_RULE_TEXT_BYTES))
+                        .changed();
                 });
                 let before = *placement;
                 ui.label(locale.text("Number position", "번호 위치"));
@@ -2132,6 +2214,7 @@ fn rule_editor(
                     let response = ui
                         .add(
                             egui::TextEdit::singleline(value)
+                                .char_limit(MAX_RULE_TEXT_BYTES)
                                 .desired_width(140.0)
                                 .hint_text("txt"),
                         )
@@ -2170,7 +2253,9 @@ fn rule_editor(
             } => {
                 changed |= filename_part_control(ui, target, locale, &mut request_focus);
                 ui.label(locale.text("Replace whitespace with", "공백을 바꿀 문자"));
-                changed |= ui.text_edit_singleline(replacement).changed();
+                changed |= ui
+                    .add(egui::TextEdit::singleline(replacement).char_limit(MAX_RULE_TEXT_BYTES))
+                    .changed();
             }
             RuleRequestDto::UnicodeNormalization { target, form, .. } => {
                 changed |= filename_part_control(ui, target, locale, &mut request_focus);
@@ -2336,7 +2421,7 @@ fn rule_editor(
             }
         }
     });
-    changed
+    changed | bound_rule_text(rule)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4753,10 +4838,12 @@ impl RenamewrightApp {
                 filesystem_authority,
                 egui::TextEdit::singleline(&mut self.preset_name)
                     .id_salt("preset-name")
+                    .char_limit(MAX_PRESET_NAME_BYTES)
                     .desired_width(160.0)
                     .hint_text(self.locale.text("Name", "이름")),
             )
             .labelled_by(preset_label.id);
+            truncate_utf8_to_bytes(&mut self.preset_name, MAX_PRESET_NAME_BYTES);
             if ui
                 .add_enabled(
                     filesystem_authority,
@@ -4934,9 +5021,11 @@ impl RenamewrightApp {
                 .add(
                     egui::TextEdit::singleline(&mut self.source_query)
                         .id_salt("preview.source-query")
+                        .char_limit(MAX_SOURCE_QUERY_BYTES)
                         .hint_text(self.locale.text("Name contains", "이름에 포함")),
                 )
                 .labelled_by(source_query_label.id);
+            truncate_utf8_to_bytes(&mut self.source_query, MAX_SOURCE_QUERY_BYTES);
             if self.source_query_focus_requested {
                 source_query.request_focus();
                 self.source_query_focus_requested = false;
@@ -5613,8 +5702,12 @@ impl RenamewrightApp {
                     Locale::Korean => format!("현재 이름: {}", editor.original_name),
                 });
                 let name_label = ui.label(self.locale.text("New name", "직접 지정할 이름"));
-                ui.add(egui::TextEdit::singleline(&mut editor.value))
-                    .labelled_by(name_label.id);
+                ui.add(
+                    egui::TextEdit::singleline(&mut editor.value)
+                        .char_limit(MAX_OVERRIDE_TEXT_BYTES),
+                )
+                .labelled_by(name_label.id);
+                truncate_utf8_to_bytes(&mut editor.value, MAX_OVERRIDE_TEXT_BYTES);
                 ui.horizontal(|ui| {
                     if ui
                         .button(
@@ -5875,18 +5968,23 @@ impl RenamewrightApp {
         };
         let dropped_paths = if filesystem_authority {
             ui.ctx().input(|input| {
-                input
-                    .raw
-                    .dropped_files
-                    .iter()
-                    .map(|file| file.path().to_path_buf())
-                    .collect::<Vec<_>>()
+                collect_bounded_source_paths(
+                    input
+                        .raw
+                        .dropped_files
+                        .iter()
+                        .map(|file| file.path().to_path_buf()),
+                )
             })
         } else {
-            Vec::new()
+            Ok(Vec::new())
         };
-        if !dropped_paths.is_empty() {
-            self.start_source_admission(dropped_paths, ui.ctx());
+        match dropped_paths {
+            Ok(paths) if !paths.is_empty() => self.start_source_admission(paths, ui.ctx()),
+            Err(()) => {
+                self.apply_admission_error(&PlanningCommandErrorDto::new("tooManySources"));
+            }
+            Ok(_) => {}
         }
 
         #[cfg(feature = "automation")]
@@ -6147,9 +6245,11 @@ fn install_theme_with_density(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::error::Error;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -6162,13 +6262,50 @@ mod tests {
     use super::automation::{AutomationProfile, AutomationRoot, AutomationRootErrorKind};
     use super::{
         AccentChoice, AppearanceTheme, InterfaceDensity, KoreanFontState, LedgerMessage,
-        LedgerTask, Locale, MutationTask, NativePalette, PLANNING_DEBOUNCE,
-        PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
-        PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, adjacent_selection_index,
-        apply_error_message, install_theme, install_theme_with_density, ledger_status_label,
-        planning_error_message, preset_error_message, preview_column_label, recovery_error_message,
-        semantics, undo_error_message,
+        LedgerTask, Locale, MAX_ADMITTED_SOURCES, MAX_RULE_TEXT_BYTES, MutationTask, NativePalette,
+        PLANNING_DEBOUNCE, PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH,
+        PendingConfirmation, PlanDto, PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto,
+        adjacent_selection_index, apply_error_message, bound_rule_text,
+        collect_bounded_source_paths, install_theme, install_theme_with_density,
+        ledger_status_label, planning_error_message, preset_error_message, preview_column_label,
+        recovery_error_message, semantics, truncate_utf8_to_bytes, undo_error_message,
     };
+
+    #[test]
+    fn utf8_text_limits_preserve_character_boundaries() {
+        let mut value = "가".repeat(2_000);
+
+        assert!(truncate_utf8_to_bytes(&mut value, 4_096));
+        assert!(value.len() <= 4_096);
+        assert!(value.is_char_boundary(value.len()));
+    }
+
+    #[test]
+    fn rule_text_is_bounded_before_request_cloning() {
+        let mut rule = RuleRequestDto::Prefix {
+            rule_id: 1,
+            enabled: true,
+            value: "x".repeat(MAX_RULE_TEXT_BYTES + 1),
+        };
+
+        assert!(bound_rule_text(&mut rule));
+        assert!(matches!(
+            rule,
+            RuleRequestDto::Prefix { ref value, .. } if value.len() == MAX_RULE_TEXT_BYTES
+        ));
+    }
+
+    #[test]
+    fn dropped_path_collection_stops_at_the_source_limit_sentinel() {
+        let consumed = Cell::new(0_usize);
+        let paths = (0..).map(|index| {
+            consumed.set(consumed.get() + 1);
+            PathBuf::from(format!("entry-{index}"))
+        });
+
+        assert!(collect_bounded_source_paths(paths).is_err());
+        assert_eq!(consumed.get(), MAX_ADMITTED_SOURCES + 1);
+    }
 
     #[derive(Default)]
     struct MemoryStorage {

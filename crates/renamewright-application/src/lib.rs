@@ -9,12 +9,13 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use renamewright_core::{
     CaseMode, CharacterClass, CharacterClassOperation, Diagnostic, DiagnosticCode,
-    ExecutionDirection, FilenamePart, MAX_OVERRIDE_TEXT_BYTES, MAX_OVERRIDES, MAX_RULE_TEXT_BYTES,
-    MAX_RULES, MAX_SEQUENCE_PADDING, NameOverride, NameStatus, PROTOCOL_VERSION, PlanId, PlanRow,
-    RangeOperation, RangeOrigin, RenamePlan, RenameRule, RulePipeline, RuleValidationErrorKind,
-    SequenceOrder, SequencePlacement, SequenceScope, SourceId, TargetPolicy, TraceStep,
-    UnicodeNormalizationForm, build_plan_with_rule_pipeline_overrides_and_environment,
+    ExecutionDirection, FilenamePart, MAX_OVERRIDES, MAX_RULES, MAX_SEQUENCE_PADDING, NameOverride,
+    NameStatus, PROTOCOL_VERSION, PlanId, PlanRow, RangeOperation, RangeOrigin, RenamePlan,
+    RenameRule, RulePipeline, RuleValidationErrorKind, SequenceOrder, SequencePlacement,
+    SequenceScope, SourceId, TargetPolicy, TraceStep, UnicodeNormalizationForm,
+    build_plan_with_rule_pipeline_overrides_and_environment,
 };
+pub use renamewright_core::{MAX_OVERRIDE_TEXT_BYTES, MAX_RULE_TEXT_BYTES};
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
     FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, MAX_ADMITTED_SOURCES,
@@ -195,7 +196,7 @@ const RULE_PIPELINE_SCHEMA_VERSION: u16 = 4;
 const PLAN_CSV_SCHEMA_VERSION: u16 = 2;
 const PRESET_DOCUMENT_SCHEMA_VERSION: u16 = 2;
 const MAX_PRESETS: usize = 32;
-const MAX_PRESET_NAME_BYTES: usize = 256;
+pub const MAX_PRESET_NAME_BYTES: usize = 256;
 const MAX_PRESET_DOCUMENT_BYTES: u64 = 512 * 1_024;
 const MAX_PLAN_INSPECTION_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_SEQUENCE_INPUT: u64 = 9_007_199_254_740_991;
