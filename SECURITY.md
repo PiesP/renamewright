@@ -78,18 +78,19 @@ checksums, and uploaded artifacts form the software supply-chain boundary.
   interface under the current user's authority; it must not expose hidden native
   paths or bypass confirmation and revalidation.
 - Recovery and Undo require a single mutation lock, a current path-free
-  inspection, native confirmation, and a fresh post-confirmation inspection.
-  Identity changes, occupied destinations, ambiguous prepared steps, damaged
-  journals, or stale expectations block mutation or require explicit
-  reconciliation.
+  inspection bound to a backend-owned single-use authorization, native
+  confirmation, and verification of the exact locked journal snapshot before
+  mutation. Identity changes, occupied destinations, ambiguous prepared steps,
+  damaged journals, stale expectations, or substituted journal files block
+  mutation or require explicit reconciliation.
 - Every rename mutation uses the reviewed append-and-sync journal protocol,
   handle-preserving source identity, atomic no-replace semantics, step-boundary
   cancellation, and explicit rollback/recovery outcomes. An unrelated existing
   destination is never replaced.
-- The Windows native open operation does not follow the final reparse-point
-  component. This is not a claim that every intermediate directory redirect is
-  rejected; findings that use an intermediate redirect to violate identity,
-  parent confinement, or no-replace guarantees remain reportable.
+- Every new journal entry records the admitted parent identity. Windows opens a
+  retained non-reparse parent handle, verifies that identity before opening the
+  source relative to it, and uses the same handle as rename authority. Legacy
+  journals without parent identity remain inspectable but cannot Recovery/Undo.
 - Directory support does not combine selecting a directory entry with recursive
   discovery. Directory symlinks, junctions, and reparse points are not followed,
   moves remain same-parent, and initial plans containing both an ancestor and its
@@ -168,8 +169,6 @@ violation. Validate source, reachability, and impact for each candidate.
   recorded as unavailable rather than inferred from NTFS results.
 - `FILE_ID_INFO` is a revalidation identity for an operation or journal recovery
   interval, not a permanent globally unique file UUID.
-- The explicit final-component reparse guarantee does not establish full
-  handle-relative traversal of every intermediate directory component.
 - Tests and scanner success are supporting evidence, not proof of FFI soundness,
   race freedom, correct recovery under every interruption, or artifact
   reproducibility.

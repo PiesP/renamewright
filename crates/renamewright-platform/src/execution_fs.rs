@@ -71,11 +71,36 @@ impl Error for ExecutionFsError {}
 /// explicitly require journal reconciliation. Native paths remain behind this
 /// Rust-owned boundary and must not appear in returned errors.
 pub trait ExecutionFileSystem: Send + Sync {
+    fn parent_identity(&self, parent: &Path) -> Result<ExecutionIdentity, ExecutionFsError> {
+        let grandparent = parent
+            .parent()
+            .ok_or_else(|| ExecutionFsError::new(ExecutionFsErrorKind::SourceUnavailable, None))?;
+        let name = parent
+            .file_name()
+            .ok_or_else(|| ExecutionFsError::new(ExecutionFsErrorKind::SourceUnavailable, None))?;
+        self.identity(grandparent, name)
+    }
+
     fn identity(
         &self,
         parent: &Path,
         native_name: &OsStr,
     ) -> Result<ExecutionIdentity, ExecutionFsError>;
+
+    fn identity_in_parent(
+        &self,
+        parent: &Path,
+        native_name: &OsStr,
+        expected_parent_identity: ExecutionIdentity,
+    ) -> Result<ExecutionIdentity, ExecutionFsError> {
+        if self.parent_identity(parent)? != expected_parent_identity {
+            return Err(ExecutionFsError::new(
+                ExecutionFsErrorKind::StaleIdentity,
+                None,
+            ));
+        }
+        self.identity(parent, native_name)
+    }
 
     fn rename_no_replace(
         &self,
@@ -84,6 +109,23 @@ pub trait ExecutionFileSystem: Send + Sync {
         target_name: &OsStr,
         expected_identity: ExecutionIdentity,
     ) -> Result<ExecutionIdentity, ExecutionFsError>;
+
+    fn rename_no_replace_in_parent(
+        &self,
+        parent: &Path,
+        source_name: &OsStr,
+        target_name: &OsStr,
+        expected_parent_identity: ExecutionIdentity,
+        expected_identity: ExecutionIdentity,
+    ) -> Result<ExecutionIdentity, ExecutionFsError> {
+        if self.parent_identity(parent)? != expected_parent_identity {
+            return Err(ExecutionFsError::new(
+                ExecutionFsErrorKind::StaleIdentity,
+                None,
+            ));
+        }
+        self.rename_no_replace(parent, source_name, target_name, expected_identity)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -303,11 +345,62 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
             .map_err(map_windows_io_error)
     }
 
+    fn parent_identity(&self, parent: &Path) -> Result<ExecutionIdentity, ExecutionFsError> {
+        let parent = renamewright_windows_native::ParentHandle::open(parent)
+            .map_err(map_windows_io_error)?;
+        renamewright_windows_native::file_identity(parent.as_handle())
+            .map(to_execution_identity)
+            .map_err(map_windows_io_error)
+    }
+
+    fn identity_in_parent(
+        &self,
+        parent: &Path,
+        native_name: &OsStr,
+        expected_parent_identity: ExecutionIdentity,
+    ) -> Result<ExecutionIdentity, ExecutionFsError> {
+        validate_component(native_name)?;
+        let parent = renamewright_windows_native::ParentHandle::open(parent)
+            .map_err(map_windows_io_error)?;
+        let observed_parent = renamewright_windows_native::file_identity(parent.as_handle())
+            .map(to_execution_identity)
+            .map_err(map_windows_io_error)?;
+        if observed_parent != expected_parent_identity {
+            return Err(ExecutionFsError::new(
+                ExecutionFsErrorKind::StaleIdentity,
+                None,
+            ));
+        }
+        let source = renamewright_windows_native::EntryHandle::open_relative(&parent, native_name)
+            .map_err(map_windows_io_error)?;
+        renamewright_windows_native::file_identity(source.as_handle())
+            .map(to_execution_identity)
+            .map_err(map_windows_io_error)
+    }
+
     fn rename_no_replace(
         &self,
         parent: &Path,
         source_name: &OsStr,
         target_name: &OsStr,
+        expected_identity: ExecutionIdentity,
+    ) -> Result<ExecutionIdentity, ExecutionFsError> {
+        let parent_identity = self.parent_identity(parent)?;
+        self.rename_no_replace_in_parent(
+            parent,
+            source_name,
+            target_name,
+            parent_identity,
+            expected_identity,
+        )
+    }
+
+    fn rename_no_replace_in_parent(
+        &self,
+        parent: &Path,
+        source_name: &OsStr,
+        target_name: &OsStr,
+        expected_parent_identity: ExecutionIdentity,
         expected_identity: ExecutionIdentity,
     ) -> Result<ExecutionIdentity, ExecutionFsError> {
         if source_name == target_name {
@@ -322,6 +415,12 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
             .map_err(map_windows_io_error)?;
         let parent_identity = renamewright_windows_native::file_identity(parent.as_handle())
             .map_err(map_windows_io_error)?;
+        if to_execution_identity(parent_identity) != expected_parent_identity {
+            return Err(ExecutionFsError::new(
+                ExecutionFsErrorKind::StaleIdentity,
+                None,
+            ));
+        }
         let source = renamewright_windows_native::EntryHandle::open_relative(&parent, source_name)
             .map_err(map_windows_io_error)?;
         let current_identity = renamewright_windows_native::file_identity(source.as_handle())

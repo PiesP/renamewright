@@ -44,9 +44,10 @@ Protect these assets:
   repeat, including when untrusted journals contain extreme values.
 - At most one mutation task is active and tracked. A second Apply, Recovery, or
   Undo cannot replace, detach, overlap, or outlive the tracked operation.
-- Every rename stays within the original parent, uses a no-replace primitive,
-  revalidates identity immediately before mutation, and records durable intent
-  and outcome before authority advances.
+- Every rename stays within the admitted parent identity, uses a retained parent
+  handle and a no-replace primitive, revalidates parent and source identity
+  immediately before mutation, and records durable intent and outcome before
+  authority advances. Legacy journals without parent identity cannot mutate.
 - Failures and cancellation preserve a replayable journal and enter explicit
   rollback, Recovery, reconciliation, or blocked states without silent success.
   Recovery and Undo require fresh path-free inspection plus native confirmation.

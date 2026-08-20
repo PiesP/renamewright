@@ -82,6 +82,7 @@ pub enum UndoErrorKind {
     Superseded,
     InvalidProtocol,
     MissingNativeParent,
+    MissingParentExecutionIdentity,
     TemporaryNameExhausted,
     Schedule { kind: ScheduleError },
     Filesystem { kind: ExecutionFsErrorKind },
@@ -198,6 +199,15 @@ fn inspect_undo_records<F: ExecutionFileSystem + ?Sized>(
     let (original_plan_id, entries) = header(records)?;
     if entries
         .iter()
+        .any(|entry| entry.parent_execution_identity().is_none())
+    {
+        return Err(UndoError::new(
+            None,
+            UndoErrorKind::MissingParentExecutionIdentity,
+        ));
+    }
+    if entries
+        .iter()
         .any(|entry| entry.undo_of_plan_id().is_some())
     {
         return Err(UndoError::new(None, UndoErrorKind::ActionUnavailable));
@@ -293,7 +303,13 @@ pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
                     };
                     UndoError::new(Some(original.source_id()), kind)
                 })?;
-        let entry = JournalEntry::with_native_parent(
+        let parent_identity = original.parent_execution_identity().ok_or_else(|| {
+            UndoError::new(
+                Some(original.source_id()),
+                UndoErrorKind::MissingParentExecutionIdentity,
+            )
+        })?;
+        let entry = JournalEntry::with_native_parent_identity(
             original.source_id(),
             original.parent_id(),
             JournalNameGraph::new(
@@ -303,6 +319,7 @@ pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
             ),
             original.admission_fingerprint().clone(),
             original.execution_identity(),
+            parent_identity,
             parent.to_path_buf(),
         )
         .into_undo_of(inspection.original_plan_id());
@@ -405,7 +422,13 @@ fn undo_destination_is_available<F: ExecutionFileSystem + ?Sized>(
         renamewright_core::ExecutionIdentity,
     >,
 ) -> Result<bool, UndoError> {
-    match filesystem.identity(parent, name) {
+    let parent_identity = entry.parent_execution_identity().ok_or_else(|| {
+        UndoError::new(
+            Some(entry.source_id()),
+            UndoErrorKind::MissingParentExecutionIdentity,
+        )
+    })?;
+    match filesystem.identity_in_parent(parent, name, parent_identity) {
         Ok(identity) => Ok(owned_final_destinations
             .get(&(parent.to_path_buf(), windows_name_comparison_key(name)))
             .is_some_and(|expected| *expected == identity)),
@@ -424,7 +447,13 @@ fn identity_state<F: ExecutionFileSystem + ?Sized>(
     name: &std::ffi::OsStr,
     entry: &JournalEntry,
 ) -> Result<IdentityState, UndoError> {
-    match filesystem.identity(parent, name) {
+    let parent_identity = entry.parent_execution_identity().ok_or_else(|| {
+        UndoError::new(
+            Some(entry.source_id()),
+            UndoErrorKind::MissingParentExecutionIdentity,
+        )
+    })?;
+    match filesystem.identity_in_parent(parent, name, parent_identity) {
         Ok(identity) if identity == entry.execution_identity() => Ok(IdentityState::Expected),
         Ok(_) => Ok(IdentityState::Other),
         Err(error) if error.kind() == ExecutionFsErrorKind::SourceUnavailable => {

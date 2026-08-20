@@ -95,3 +95,40 @@ fn native_adapter_maps_collision_and_stale_identity_without_mutation()
     assert!(!directory.path().join("free-name.txt").exists());
     Ok(())
 }
+
+#[test]
+fn parent_identity_blocks_preopen_directory_swap_even_with_expected_hard_link()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let selected = root.path().join("selected");
+    let retained = root.path().join("retained");
+    let replacement = root.path().join("replacement");
+    fs::create_dir(&selected)?;
+    fs::create_dir(&replacement)?;
+    let source = selected.join("source.txt");
+    fs::write(&source, b"source")?;
+    fs::hard_link(&source, replacement.join("source.txt"))?;
+    let filesystem = NativeExecutionFileSystem::new();
+    let parent_identity = filesystem.parent_identity(&selected)?;
+    let source_identity = filesystem.identity(&selected, OsStr::new("source.txt"))?;
+
+    fs::rename(&selected, &retained)?;
+    fs::rename(&replacement, &selected)?;
+    let error = filesystem
+        .rename_no_replace_in_parent(
+            &selected,
+            OsStr::new("source.txt"),
+            OsStr::new("renamed.txt"),
+            parent_identity,
+            source_identity,
+        )
+        .err()
+        .ok_or("a substituted parent with the expected hard link was accepted")?;
+
+    assert_eq!(error.kind(), ExecutionFsErrorKind::StaleIdentity);
+    assert!(retained.join("source.txt").exists());
+    assert!(selected.join("source.txt").exists());
+    assert!(!retained.join("renamed.txt").exists());
+    assert!(!selected.join("renamed.txt").exists());
+    Ok(())
+}

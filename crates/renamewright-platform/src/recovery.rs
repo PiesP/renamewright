@@ -201,6 +201,7 @@ pub enum RecoveryInspectionErrorKind {
     InvalidProtocol,
     StateNotReconcilable,
     MissingNativeParent,
+    MissingParentExecutionIdentity,
     MissingEntry,
     Schedule { kind: ScheduleError },
     Filesystem { kind: ExecutionFsErrorKind },
@@ -680,6 +681,17 @@ impl<'a> RecoveryPlan<'a> {
                 },
             ));
         }
+        if entries
+            .iter()
+            .any(|entry| entry.parent_execution_identity().is_none())
+        {
+            return Err(RecoveryActionError::new(
+                None,
+                RecoveryActionErrorKind::Inspection {
+                    kind: RecoveryInspectionErrorKind::MissingParentExecutionIdentity,
+                },
+            ));
+        }
         let source_ids = entries
             .iter()
             .map(JournalEntry::source_id)
@@ -873,7 +885,13 @@ fn observe_location<F: ExecutionFileSystem + ?Sized>(
         RecoveryLocation::Temporary => entry.names().temporary_name(),
         RecoveryLocation::Final => entry.names().final_name(),
     };
-    let state = match filesystem.identity(parent, name) {
+    let parent_identity = entry.parent_execution_identity().ok_or_else(|| {
+        RecoveryInspectionError::new(
+            Some(entry.source_id()),
+            RecoveryInspectionErrorKind::MissingParentExecutionIdentity,
+        )
+    })?;
+    let state = match filesystem.identity_in_parent(parent, name, parent_identity) {
         Ok(identity) if identity == entry.execution_identity() => {
             RecoveryLocationState::TransactionOwned
         }

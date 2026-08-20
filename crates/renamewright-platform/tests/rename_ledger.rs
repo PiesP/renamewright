@@ -19,7 +19,7 @@ fn header_for_plan(plan_id: u64) -> JournalRecord {
         plan_id: PlanId::new(plan_id),
         source_generation: 11,
         step_count: 2,
-        entries: vec![JournalEntry::with_native_parent(
+        entries: vec![JournalEntry::with_native_parent_identity(
             SourceId::new(13),
             ParentId::new(17),
             JournalNameGraph::new(
@@ -29,6 +29,7 @@ fn header_for_plan(plan_id: u64) -> JournalRecord {
             ),
             SourceFingerprint::new(EntryKind::File, None, 19, None),
             ExecutionIdentity::new(23, [29; 16]),
+            ExecutionIdentity::new(31, [37; 16]),
             PathBuf::from("native-parent"),
         )],
     }

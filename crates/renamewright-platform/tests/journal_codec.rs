@@ -23,7 +23,7 @@ fn transaction_started(original_name: OsString) -> JournalRecord {
         plan_id: PlanId::new(7),
         source_generation: 11,
         step_count: 2,
-        entries: vec![JournalEntry::with_native_parent(
+        entries: vec![JournalEntry::with_native_parent_identity(
             SourceId::new(13),
             ParentId::new(17),
             JournalNameGraph::new(
@@ -38,6 +38,7 @@ fn transaction_started(original_name: OsString) -> JournalRecord {
                 Some(31),
             ),
             identity(37),
+            identity(41),
             PathBuf::from("native-parent"),
         )],
     }
@@ -122,7 +123,7 @@ fn current_schema_round_trips_directory_entry_kind() -> Result<(), Box<dyn std::
         plan_id: PlanId::new(43),
         source_generation: 47,
         step_count: 2,
-        entries: vec![JournalEntry::with_native_parent(
+        entries: vec![JournalEntry::with_native_parent_identity(
             SourceId::new(53),
             ParentId::new(59),
             JournalNameGraph::new(
@@ -132,6 +133,7 @@ fn current_schema_round_trips_directory_entry_kind() -> Result<(), Box<dyn std::
             ),
             SourceFingerprint::new(EntryKind::Directory, None, 0, None),
             identity(61),
+            identity(67),
             PathBuf::from("native-parent"),
         )],
     };

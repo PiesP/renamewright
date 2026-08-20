@@ -4355,23 +4355,26 @@ mod tests {
             plan_id: PlanId::new(67),
             source_generation: 3,
             step_count: 2,
-            entries: vec![renamewright_core::JournalEntry::with_native_parent(
-                SourceId::new(1),
-                ParentId::new(2),
-                renamewright_core::JournalNameGraph::new(
-                    OsString::from("secret-original.txt"),
-                    OsString::from("secret-temporary.tmp"),
-                    OsString::from("secret-final.txt"),
+            entries: vec![
+                renamewright_core::JournalEntry::with_native_parent_identity(
+                    SourceId::new(1),
+                    ParentId::new(2),
+                    renamewright_core::JournalNameGraph::new(
+                        OsString::from("secret-original.txt"),
+                        OsString::from("secret-temporary.tmp"),
+                        OsString::from("secret-final.txt"),
+                    ),
+                    renamewright_core::SourceFingerprint::new(
+                        renamewright_core::EntryKind::File,
+                        None,
+                        4,
+                        None,
+                    ),
+                    renamewright_core::ExecutionIdentity::new(5, [6; 16]),
+                    renamewright_core::ExecutionIdentity::new(7, [8; 16]),
+                    std::path::PathBuf::from(native_marker),
                 ),
-                renamewright_core::SourceFingerprint::new(
-                    renamewright_core::EntryKind::File,
-                    None,
-                    4,
-                    None,
-                ),
-                renamewright_core::ExecutionIdentity::new(5, [6; 16]),
-                std::path::PathBuf::from(native_marker),
-            )],
+            ],
         };
         fs::write(
             directory.path().join("private-journal-name.rwj"),

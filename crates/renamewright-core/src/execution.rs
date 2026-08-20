@@ -174,6 +174,7 @@ pub struct JournalEntry {
     names: JournalNameGraph,
     admission_fingerprint: SourceFingerprint,
     execution_identity: ExecutionIdentity,
+    parent_execution_identity: Option<ExecutionIdentity>,
     native_parent: Option<PathBuf>,
     undo_of_plan_id: Option<PlanId>,
 }
@@ -193,6 +194,7 @@ impl JournalEntry {
             names,
             admission_fingerprint,
             execution_identity,
+            parent_execution_identity: None,
             native_parent: None,
             undo_of_plan_id: None,
         }
@@ -213,6 +215,29 @@ impl JournalEntry {
             names,
             admission_fingerprint,
             execution_identity,
+            parent_execution_identity: None,
+            native_parent: Some(native_parent),
+            undo_of_plan_id: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_native_parent_identity(
+        source_id: SourceId,
+        parent_id: ParentId,
+        names: JournalNameGraph,
+        admission_fingerprint: SourceFingerprint,
+        execution_identity: ExecutionIdentity,
+        parent_execution_identity: ExecutionIdentity,
+        native_parent: PathBuf,
+    ) -> Self {
+        Self {
+            source_id,
+            parent_id,
+            names,
+            admission_fingerprint,
+            execution_identity,
+            parent_execution_identity: Some(parent_execution_identity),
             native_parent: Some(native_parent),
             undo_of_plan_id: None,
         }
@@ -247,6 +272,11 @@ impl JournalEntry {
     #[must_use]
     pub const fn execution_identity(&self) -> ExecutionIdentity {
         self.execution_identity
+    }
+
+    #[must_use]
+    pub const fn parent_execution_identity(&self) -> Option<ExecutionIdentity> {
+        self.parent_execution_identity
     }
 
     #[must_use]

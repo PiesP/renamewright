@@ -8,7 +8,8 @@ use renamewright_core::{
     TargetPolicy, build_plan, build_plan_with_environment,
 };
 use renamewright_platform::{
-    FreezeExecutionErrorKind, LinuxExecutionFileSystem, SourceRegistry, freeze_execution_plan,
+    ExecutionFileSystem, FreezeExecutionErrorKind, LinuxExecutionFileSystem, SourceRegistry,
+    freeze_execution_plan,
 };
 
 fn current_plan(
@@ -80,6 +81,10 @@ fn freezes_only_changed_rows_with_native_names_and_execution_identity()
             .starts_with(".renamewright-")
     );
     assert_ne!(entries[0].execution_identity().file_id(), [0; 16]);
+    assert_eq!(
+        entries[0].parent_execution_identity(),
+        Some(LinuxExecutionFileSystem::new().parent_identity(directory.path())?)
+    );
     Ok(())
 }
 

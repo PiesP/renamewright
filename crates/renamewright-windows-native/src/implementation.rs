@@ -130,7 +130,7 @@ impl ParentHandle {
             ));
         }
         let file = OpenOptions::new()
-            .access_mode(DELETE | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
             .share_mode(SHARE_ALL)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)?;

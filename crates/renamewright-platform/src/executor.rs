@@ -26,6 +26,7 @@ pub enum FreezeExecutionErrorKind {
     SourceMismatch,
     MissingFingerprint,
     MissingExecutionIdentity,
+    MissingParentExecutionIdentity,
     StaleSource,
     TemporaryNameExhausted,
     Schedule { kind: ScheduleError },
@@ -330,10 +331,14 @@ where
             return invalid_plan(ExecutionDirection::Forward, Some(step.index()));
         };
         let (source_name, target_name) = forward_names(entry.0, step.phase());
-        match filesystem.rename_no_replace(
+        let Some(parent_identity) = entry.0.parent_execution_identity() else {
+            return invalid_plan(ExecutionDirection::Forward, Some(step.index()));
+        };
+        match filesystem.rename_no_replace_in_parent(
             entry.1,
             source_name,
             target_name,
+            parent_identity,
             entry.0.execution_identity(),
         ) {
             Ok(observed_identity) => {
@@ -416,10 +421,14 @@ where
             return invalid_plan(ExecutionDirection::Rollback, Some(step.index()));
         };
         let (source_name, target_name) = rollback_names(entry.0, step.phase());
-        match filesystem.rename_no_replace(
+        let Some(parent_identity) = entry.0.parent_execution_identity() else {
+            return invalid_plan(ExecutionDirection::Rollback, Some(step.index()));
+        };
+        match filesystem.rename_no_replace_in_parent(
             entry.1,
             source_name,
             target_name,
+            parent_identity,
             entry.0.execution_identity(),
         ) {
             Ok(observed_identity) => {
@@ -597,15 +606,23 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
                 FreezeExecutionErrorKind::MissingExecutionIdentity,
             )
         })?;
-        let execution_identity =
-            filesystem
-                .identity(parent, row.original_name())
-                .map_err(|error| {
+        let admitted_parent_identity =
+            registry
+                .parent_execution_identity_for(parent)
+                .ok_or_else(|| {
                     FreezeExecutionError::new(
                         Some(source_id),
-                        FreezeExecutionErrorKind::Filesystem { kind: error.kind() },
+                        FreezeExecutionErrorKind::MissingParentExecutionIdentity,
                     )
                 })?;
+        let execution_identity = filesystem
+            .identity_in_parent(parent, row.original_name(), admitted_parent_identity)
+            .map_err(|error| {
+                FreezeExecutionError::new(
+                    Some(source_id),
+                    FreezeExecutionErrorKind::Filesystem { kind: error.kind() },
+                )
+            })?;
         if execution_identity != admitted_identity {
             return Err(FreezeExecutionError::new(
                 Some(source_id),
@@ -615,7 +632,7 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
         let temporary = available_temporary_name(filesystem, parent, plan.id(), source_id)?;
 
         entries.push(FrozenExecutionEntry {
-            journal_entry: JournalEntry::with_native_parent(
+            journal_entry: JournalEntry::with_native_parent_identity(
                 source_id,
                 row.parent_id(),
                 JournalNameGraph::new(
@@ -625,6 +642,7 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
                 ),
                 fingerprint,
                 execution_identity,
+                admitted_parent_identity,
                 parent.to_path_buf(),
             ),
             parent: parent.to_path_buf(),

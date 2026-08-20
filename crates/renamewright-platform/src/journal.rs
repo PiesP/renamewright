@@ -11,9 +11,9 @@ use renamewright_core::{
     SourceFingerprint, SourceId, replay_journal,
 };
 
-pub const JOURNAL_SCHEMA_VERSION: u16 = 4;
+pub const JOURNAL_SCHEMA_VERSION: u16 = 5;
 pub const MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION: u16 = 1;
-const MIN_RESUMABLE_JOURNAL_SCHEMA_VERSION: u16 = 2;
+const MIN_RESUMABLE_JOURNAL_SCHEMA_VERSION: u16 = 5;
 pub const MAX_JOURNAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_JOURNAL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -275,7 +275,7 @@ impl JournalWriter {
         path: &Path,
         initial_record: &JournalRecord,
     ) -> Result<Self, JournalStorageError> {
-        if !matches!(initial_record, JournalRecord::TransactionStarted { .. }) {
+        if !initial_record_has_parent_authority(initial_record) {
             return Err(JournalStorageError::new(
                 0,
                 JournalStorageErrorKind::InvalidInitialRecord,
@@ -388,6 +388,17 @@ impl JournalWriter {
             .into_iter()
             .map(JournalFrame::into_record)
             .collect::<Vec<_>>();
+        if !records
+            .first()
+            .is_some_and(initial_record_has_parent_authority)
+        {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeVersion {
+                    version: schema_version,
+                },
+            ));
+        }
         let status = replay_journal(&records).map_err(|error| {
             JournalStorageError::new(
                 u64::try_from(error.record_index()).unwrap_or(u64::MAX),
@@ -485,7 +496,7 @@ impl<S: JournalSink> DurableAppender<S> {
     }
 
     fn append_initial(&mut self, record: &JournalRecord) -> Result<(), JournalStorageError> {
-        if !matches!(record, JournalRecord::TransactionStarted { .. }) {
+        if !initial_record_has_parent_authority(record) {
             return Err(JournalStorageError::new(
                 self.next_sequence,
                 JournalStorageErrorKind::InvalidInitialRecord,
@@ -592,6 +603,16 @@ impl<S: JournalSink> DurableAppender<S> {
         );
         Ok(())
     }
+}
+
+fn initial_record_has_parent_authority(record: &JournalRecord) -> bool {
+    matches!(
+        record,
+        JournalRecord::TransactionStarted { entries, .. }
+            if entries
+                .iter()
+                .all(|entry| entry.parent_execution_identity().is_some())
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -789,7 +810,7 @@ pub(crate) fn encode_frame(
     encode_frame_for_version(sequence, record, frame_index, JOURNAL_SCHEMA_VERSION)
 }
 
-fn encode_frame_for_version(
+pub(crate) fn encode_frame_for_version(
     sequence: u64,
     record: &JournalRecord,
     frame_index: usize,
@@ -1024,6 +1045,15 @@ fn encode_entry(
             JournalCodecErrorKind::InvalidPayload,
         ));
     }
+    if schema_version >= 5 {
+        match entry.parent_execution_identity() {
+            Some(identity) => {
+                payload.push(1);
+                encode_execution_identity(payload, identity);
+            }
+            None => payload.push(0),
+        }
+    }
     Ok(())
 }
 
@@ -1058,8 +1088,26 @@ fn decode_entry(
     } else {
         None
     };
-    let entry = match native_parent {
-        Some(parent) => JournalEntry::with_native_parent(
+    let parent_execution_identity = if schema_version >= 5 {
+        match cursor.read_u8()? {
+            0 => None,
+            1 => Some(decode_execution_identity(cursor)?),
+            _ => return Err(cursor.error(JournalCodecErrorKind::InvalidPayload)),
+        }
+    } else {
+        None
+    };
+    let entry = match (native_parent, parent_execution_identity) {
+        (Some(parent), Some(parent_identity)) => JournalEntry::with_native_parent_identity(
+            source_id,
+            parent_id,
+            names,
+            fingerprint,
+            execution_identity,
+            parent_identity,
+            parent,
+        ),
+        (Some(parent), None) => JournalEntry::with_native_parent(
             source_id,
             parent_id,
             names,
@@ -1067,7 +1115,9 @@ fn decode_entry(
             execution_identity,
             parent,
         ),
-        None => JournalEntry::new(source_id, parent_id, names, fingerprint, execution_identity),
+        (None, _) => {
+            JournalEntry::new(source_id, parent_id, names, fingerprint, execution_identity)
+        }
     };
     Ok(match undo_of_plan_id {
         Some(plan_id) => entry.into_undo_of(plan_id),
@@ -1532,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn resuming_schema_two_keeps_appended_frames_on_schema_two()
+    fn resuming_schema_two_fails_closed_without_parent_identity()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("schema-two.rwj");
@@ -1541,18 +1591,20 @@ mod tests {
             encode_frame_for_version(0, &transaction_started_with_native_parent(None), 0, 2)?,
         )?;
 
-        let (mut writer, _) = JournalWriter::resume(&path)?;
-        writer.append(&JournalRecord::ForwardStepPrepared { step_index: 0 })?;
-        drop(writer);
+        let error = JournalWriter::resume(&path)
+            .err()
+            .ok_or("a legacy journal without parent identity resumed")?;
 
-        let frames = decode_journal(&fs::read(path)?)?;
-        assert_eq!(frames.len(), 2);
-        assert!(frames.iter().all(|frame| frame.schema_version() == 2));
+        assert_eq!(
+            error.kind(),
+            JournalStorageErrorKind::ResumeVersion { version: 2 }
+        );
+        assert_eq!(decode_journal(&fs::read(path)?)?.len(), 1);
         Ok(())
     }
 
     fn transaction_started_with_native_parent(undo_of: Option<PlanId>) -> JournalRecord {
-        let entry = JournalEntry::with_native_parent(
+        let entry = JournalEntry::with_native_parent_identity(
             SourceId::new(3),
             ParentId::new(4),
             JournalNameGraph::new(
@@ -1562,6 +1614,7 @@ mod tests {
             ),
             SourceFingerprint::new(EntryKind::File, None, 5, None),
             ExecutionIdentity::new(6, [7; 16]),
+            ExecutionIdentity::new(8, [9; 16]),
             std::path::PathBuf::from("native-parent"),
         );
         let entry = undo_of.map_or(entry.clone(), |plan_id| entry.into_undo_of(plan_id));
@@ -1623,7 +1676,7 @@ mod tests {
             plan_id: PlanId::new(1),
             source_generation: 1,
             step_count: 2,
-            entries: vec![JournalEntry::new(
+            entries: vec![JournalEntry::with_native_parent_identity(
                 SourceId::new(1),
                 ParentId::new(1),
                 JournalNameGraph::new(
@@ -1633,6 +1686,8 @@ mod tests {
                 ),
                 SourceFingerprint::new(EntryKind::File, None, 1, None),
                 ExecutionIdentity::new(1, [1; 16]),
+                ExecutionIdentity::new(2, [2; 16]),
+                std::path::PathBuf::from("native-parent"),
             )],
         })?;
         appender.append(&JournalRecord::ForwardStepPrepared { step_index: 0 })?;
