@@ -1,6 +1,7 @@
 #![cfg(any(target_os = "linux", windows))]
 
 use std::fs;
+use std::io;
 
 use renamewright_core::{
     JournalRecord, JournalStatus, PlanId, RenameRule, RollbackCause, TargetPolicy,
@@ -19,6 +20,18 @@ use renamewright_platform::NativeExecutionFileSystem as TestExecutionFileSystem;
 
 fn filesystem() -> TestExecutionFileSystem {
     TestExecutionFileSystem::new()
+}
+
+fn is_mandatory_lock_error(error: &io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(error.raw_os_error(), Some(32 | 33))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = error;
+        false
+    }
 }
 
 struct RecoveryFixture {
@@ -105,7 +118,8 @@ fn bound_recovery_rejects_a_path_free_matching_journal_substitution()
     let authorized_directory = tempfile::tempdir()?;
     let authorized = fixture(&authorized_directory, 191)?;
     let journal = authorized_directory.path().join("resume.rwj");
-    fs::write(&journal, encode_journal(&[authorized.header])?)?;
+    let authorized_bytes = encode_journal(&[authorized.header])?;
+    fs::write(&journal, &authorized_bytes)?;
     let ledger = RenameLedger::discover(authorized_directory.path())?;
     let filesystem = filesystem();
     let snapshot =
@@ -124,23 +138,35 @@ fn bound_recovery_rejects_a_path_free_matching_journal_substitution()
     )?;
     assert_eq!(snapshot.inspection(), replacement_snapshot.inspection());
 
-    fs::write(&journal, &replacement_bytes)?;
-    let error = recover_transaction_from_snapshot(
-        &ledger,
-        snapshot,
-        &filesystem,
-        RecoveryAction::Resume,
-        || false,
-    )
-    .err()
-    .ok_or("a substituted journal reached recovery execution")?;
-
-    assert_eq!(
-        error.kind(),
-        RecoveryActionErrorKind::Journal {
-            kind: renamewright_platform::JournalStorageErrorKind::SnapshotChanged,
+    match fs::write(&journal, &replacement_bytes) {
+        Ok(()) => {
+            let error = recover_transaction_from_snapshot(
+                &ledger,
+                snapshot,
+                &filesystem,
+                RecoveryAction::Resume,
+                || false,
+            )
+            .err()
+            .ok_or("a substituted journal reached recovery execution")?;
+            assert_eq!(
+                error.kind(),
+                RecoveryActionErrorKind::Journal {
+                    kind: renamewright_platform::JournalStorageErrorKind::SnapshotChanged,
+                }
+            );
+            assert_eq!(fs::read(&journal)?, replacement_bytes);
         }
-    );
+        Err(error) if is_mandatory_lock_error(&error) => {
+            assert_eq!(fs::read(&journal)?, authorized_bytes);
+            drop(snapshot);
+            let reopened =
+                inspect_recovery_transaction_snapshot(&ledger, ledger_id(&ledger)?, &filesystem)?;
+            drop(reopened);
+            assert_eq!(fs::read(&journal)?, authorized_bytes);
+        }
+        Err(error) => return Err(error.into()),
+    }
     assert!(authorized_directory.path().join("source.txt").exists());
     assert!(
         !authorized_directory
@@ -155,7 +181,6 @@ fn bound_recovery_rejects_a_path_free_matching_journal_substitution()
             .join("final-source.txt")
             .exists()
     );
-    assert_eq!(fs::read(journal)?, replacement_bytes);
     Ok(())
 }
 
