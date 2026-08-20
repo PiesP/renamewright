@@ -62,8 +62,8 @@ pub fn high_contrast_palette() -> io::Result<Option<HighContrastPalette>> {
     // whose declared size matches its allocation. The pointer remains valid
     // for the synchronous call and is not retained by Win32. This operation
     // only reads the current accessibility setting; it cannot change it.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-    let succeeded = unsafe {
+    #[rustfmt::skip]
+    let succeeded = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         SystemParametersInfoW(
             SPI_GETHIGHCONTRAST,
             settings.cbSize,
@@ -80,8 +80,8 @@ pub fn high_contrast_palette() -> io::Result<Option<HighContrastPalette>> {
 
     // SAFETY: `GetSysColor` reads immutable process-global Windows theme
     // state for fixed, documented indices and does not dereference pointers.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-    let palette = unsafe {
+    #[rustfmt::skip]
+    let palette = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         HighContrastPalette {
             window: colorref_to_rgb(GetSysColor(COLOR_WINDOW)),
             window_text: colorref_to_rgb(GetSysColor(COLOR_WINDOWTEXT)),
@@ -205,8 +205,8 @@ fn open_relative(
     // The status and output-handle pointers are writable and correctly aligned.
     // No optional allocation or EA buffers are supplied. On success ownership
     // of the returned handle is transferred exactly once to `File` below.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-    let status = unsafe {
+    #[rustfmt::skip]
+    let status = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         NtCreateFile(
             ptr::from_mut(&mut handle),
             desired_access,
@@ -224,8 +224,7 @@ fn open_relative(
     if status < 0 {
         // SAFETY: converting an NTSTATUS returned by `NtCreateFile` has no
         // pointer or lifetime preconditions and does not retain process state.
-        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-        let os_code = unsafe { RtlNtStatusToDosErrorNoTeb(status) };
+        let os_code = unsafe { RtlNtStatusToDosErrorNoTeb(status) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         return Err(io::Error::from_raw_os_error(
             i32::try_from(os_code).unwrap_or(i32::MAX),
         ));
@@ -236,8 +235,7 @@ fn open_relative(
 
     // SAFETY: successful `NtCreateFile` returned a new owned handle, checked
     // above for null. This is its only ownership transfer; `File` closes it.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-    Ok(unsafe { File::from_raw_handle(handle) })
+    Ok(unsafe { File::from_raw_handle(handle) }) // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
 }
 
 pub fn file_identity(source: BorrowedHandle<'_>) -> io::Result<FileIdentity> {
@@ -251,8 +249,8 @@ pub fn file_identity(source: BorrowedHandle<'_>) -> io::Result<FileIdentity> {
     // does not retain the pointer after returning.
     // The generic Semgrep unsafe-usage rule is suppressed only at this audited
     // FFI boundary; the safety proof and crate-level unsafe lints remain active.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-    let succeeded = unsafe {
+    #[rustfmt::skip]
+    let succeeded = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         GetFileInformationByHandleEx(
             source.as_raw_handle(),
             FileIdInfo,
@@ -309,15 +307,15 @@ pub fn rename_noreplace(
     // u16 values fit before that NUL. The vector does not move during the copy.
     // The generic Semgrep unsafe-usage rule is suppressed only at this audited
     // buffer boundary; the safety proof and crate-level unsafe lints remain active.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-    unsafe {
+    #[rustfmt::skip]
+    let _: () = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let file_name = buffer
             .as_mut_ptr()
             .cast::<u8>()
             .add(offset_of!(FILE_RENAME_INFORMATION, FileName))
             .cast::<u16>();
         ptr::copy_nonoverlapping(encoded_name.as_ptr(), file_name, encoded_name.len());
-    }
+    };
 
     // SAFETY: `source` stays borrowed for the call.
     // `buffer` is correctly aligned, fully initialized for `buffer_size` bytes,
@@ -327,10 +325,10 @@ pub fn rename_noreplace(
     // Win32 consumes the buffer synchronously and does not retain its pointer.
     // The generic Semgrep unsafe-usage rule is suppressed only at this audited
     // FFI boundary; the safety proof and crate-level unsafe lints remain active.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let mut status_block = IO_STATUS_BLOCK::default();
     // SAFETY: the proof above applies to this synchronous native call.
-    let status = unsafe {
+    #[rustfmt::skip]
+    let status = unsafe { // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         NtSetInformationFile(
             source.as_raw_handle(),
             ptr::from_mut(&mut status_block),
@@ -342,8 +340,7 @@ pub fn rename_noreplace(
     if status < 0 {
         // SAFETY: converting the NTSTATUS returned by `NtSetInformationFile`
         // has no pointer or lifetime preconditions.
-        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-        let os_code = unsafe { RtlNtStatusToDosErrorNoTeb(status) };
+        let os_code = unsafe { RtlNtStatusToDosErrorNoTeb(status) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         Err(io::Error::from_raw_os_error(
             i32::try_from(os_code).unwrap_or(i32::MAX),
         ))
