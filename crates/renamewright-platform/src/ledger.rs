@@ -307,11 +307,26 @@ impl RenameLedger {
         Some((item.native_path.clone(), inspect_journal(&bytes)))
     }
 
-    pub(crate) fn entry(&self, ledger_id: LedgerId) -> Option<LedgerEntry> {
+    pub(crate) fn journal_path(&self, ledger_id: LedgerId) -> Option<&Path> {
         self.items
             .iter()
-            .find(|item| item.projection.ledger_id == ledger_id)
-            .map(|item| item.projection)
+            .find(|item| item.projection.ledger_id == ledger_id && item.inspectable)
+            .map(|item| item.native_path.as_path())
+    }
+
+    pub(crate) fn projection_matches_header(
+        &self,
+        ledger_id: LedgerId,
+        plan_id: PlanId,
+        source_generation: u64,
+        source_count: usize,
+    ) -> bool {
+        self.items.iter().any(|item| {
+            item.projection.ledger_id == ledger_id
+                && item.projection.plan_id == Some(plan_id)
+                && item.projection.source_generation == Some(source_generation)
+                && item.projection.source_count == source_count
+        })
     }
 
     pub(crate) fn journal_path_for_plan(&self, plan_id: PlanId) -> Option<PathBuf> {
@@ -430,9 +445,15 @@ fn project_inspection(ledger_id: LedgerId, inspection: &JournalInspection) -> Le
     };
     let has_recovery_locators = header
         .is_some_and(|(_, _, entries)| entries.iter().all(|entry| entry.native_parent().is_some()));
+    let has_parent_execution_identities = header.is_some_and(|(_, _, entries)| {
+        !entries.is_empty()
+            && entries
+                .iter()
+                .all(|entry| entry.parent_execution_identity().is_some())
+    });
     let (mut status, attention_step, mut recovery_available) = project_status(journal_status);
-    if !matches!(status, LedgerStatus::Completed | LedgerStatus::RolledBack)
-        && !has_recovery_locators
+    if status != LedgerStatus::RolledBack
+        && (!has_recovery_locators || !has_parent_execution_identities)
     {
         status = LedgerStatus::LegacyInspectionRequired;
         recovery_available = false;
@@ -450,7 +471,8 @@ fn project_inspection(ledger_id: LedgerId, inspection: &JournalInspection) -> Le
         undo_of_plan_id,
         undo_available: status == LedgerStatus::Completed
             && undo_of_plan_id.is_none()
-            && has_native_parents,
+            && has_native_parents
+            && has_parent_execution_identities,
     }
 }
 
@@ -583,7 +605,14 @@ fn open_journal_no_follow(path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
+    use std::path::PathBuf;
+
+    use renamewright_core::{
+        EntryKind, ExecutionIdentity, JournalEntry, JournalNameGraph, JournalRecord, ParentId,
+        PlanId, SourceFingerprint, SourceId,
+    };
 
     use super::{LedgerStatus, RenameLedger};
 
@@ -603,6 +632,41 @@ mod tests {
             statuses,
             vec![LedgerStatus::Torn, LedgerStatus::DiscoveryLimitExceeded]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_four_journal_without_parent_identity_is_legacy_and_non_mutating()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let record = JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(9),
+            source_generation: 1,
+            step_count: 2,
+            entries: vec![JournalEntry::with_native_parent(
+                SourceId::new(1),
+                ParentId::new(1),
+                JournalNameGraph::new(
+                    OsString::from("source.txt"),
+                    OsString::from("temporary.tmp"),
+                    OsString::from("final.txt"),
+                ),
+                SourceFingerprint::new(EntryKind::File, None, 1, None),
+                ExecutionIdentity::new(1, [2; 16]),
+                PathBuf::from("native-parent"),
+            )],
+        };
+        fs::write(
+            directory.path().join("legacy.rwj"),
+            crate::journal::encode_frame_for_version(0, &record, 0, 4)?,
+        )?;
+
+        let ledger = RenameLedger::discover(directory.path())?;
+        let entry = ledger.entries().next().ok_or("ledger was empty")?;
+
+        assert_eq!(entry.status(), LedgerStatus::LegacyInspectionRequired);
+        assert!(!entry.recovery_available());
+        assert!(!entry.undo_available());
         Ok(())
     }
 }

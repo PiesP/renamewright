@@ -109,7 +109,7 @@ if (Test-Path -LiteralPath $output) {
 $automationMarkers = @(
   'AUTOMATION TEST MODE',
   '--automation-root',
-  '--automation-fixture',
+  '--automation-profile',
   '127.0.0.1:26191'
 )
 $defaultText = Read-BinaryText -Path $defaultSource

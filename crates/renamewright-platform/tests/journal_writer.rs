@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use std::path::PathBuf;
 
 use renamewright_core::{
     EntryKind, ExecutionIdentity, JournalEntry, JournalNameGraph, JournalRecord, JournalStatus,
@@ -13,7 +14,7 @@ fn transaction_started() -> JournalRecord {
         plan_id: PlanId::new(1),
         source_generation: 2,
         step_count: 2,
-        entries: vec![JournalEntry::new(
+        entries: vec![JournalEntry::with_native_parent_identity(
             SourceId::new(3),
             ParentId::new(4),
             JournalNameGraph::new(
@@ -23,6 +24,8 @@ fn transaction_started() -> JournalRecord {
             ),
             SourceFingerprint::new(EntryKind::File, None, 5, None),
             ExecutionIdentity::new(6, [7; 16]),
+            ExecutionIdentity::new(8, [9; 16]),
+            PathBuf::from("native-parent"),
         )],
     }
 }

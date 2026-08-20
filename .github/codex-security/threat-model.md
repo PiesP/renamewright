@@ -28,8 +28,10 @@ Protect these assets:
   they may be truncated, corrupted, replaced, duplicated, or locally modified.
 - Native confirmation is a security boundary. UI projections and automation
   receive opaque IDs and display data, never mutation authority or native paths.
-- The feature-gated automation listener and fixture loader are test-only input
-  boundaries. Production builds must exclude their markers and entry points.
+- The feature-gated automation listener and built-in path-free profiles are
+  test-only input boundaries. Automation is read-only and cannot admit native
+  sources, persist presets, create journals, or invoke filesystem mutations.
+  Production builds must exclude its markers and entry points.
 - GitHub Actions, dependency locks, packaging scripts, release tags, checksums,
   SBOM generation, and future signing credentials form the build boundary.
 
@@ -42,9 +44,10 @@ Protect these assets:
   repeat, including when untrusted journals contain extreme values.
 - At most one mutation task is active and tracked. A second Apply, Recovery, or
   Undo cannot replace, detach, overlap, or outlive the tracked operation.
-- Every rename stays within the original parent, uses a no-replace primitive,
-  revalidates identity immediately before mutation, and records durable intent
-  and outcome before authority advances.
+- Every rename stays within the admitted parent identity, uses a retained parent
+  handle and a no-replace primitive, revalidates parent and source identity
+  immediately before mutation, and records durable intent and outcome before
+  authority advances. Legacy journals without parent identity cannot mutate.
 - Failures and cancellation preserve a replayable journal and enter explicit
   rollback, Recovery, reconciliation, or blocked states without silent success.
   Recovery and Undo require fresh path-free inspection plus native confirmation.

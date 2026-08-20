@@ -28,7 +28,7 @@ through the private channel.
   logs receive opaque IDs, display names, and structured codes.
 - Apply, Recovery, and Undo require native confirmation, fresh identity
   validation, a backend-selected journal, and journaled no-replace execution.
-- The production feature set contains no custom listener or fixture API.
+- The production feature set contains no custom listener or automation profile API.
 - Dynamic code execution, shell commands, plugins, and user scripts are absent.
 
 ## Development security

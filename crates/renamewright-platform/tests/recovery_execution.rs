@@ -8,7 +8,8 @@ use renamewright_core::{
 };
 use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, RecoveryAction, RecoveryActionErrorKind, RenameLedger,
-    SourceRegistry, decode_journal, encode_journal, freeze_execution_plan, recover_transaction,
+    SourceRegistry, decode_journal, encode_journal, freeze_execution_plan,
+    inspect_recovery_transaction_snapshot, recover_transaction, recover_transaction_from_snapshot,
 };
 
 #[cfg(target_os = "linux")]
@@ -95,6 +96,104 @@ fn resumes_a_forward_pending_transaction() -> Result<(), Box<dyn std::error::Err
     assert!(!directory.path().join("source.txt").exists());
     assert!(directory.path().join("final-source.txt").exists());
     assert_eq!(journal_status(&journal)?, JournalStatus::Completed);
+    Ok(())
+}
+
+#[test]
+fn bound_recovery_rejects_a_path_free_matching_journal_substitution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authorized_directory = tempfile::tempdir()?;
+    let authorized = fixture(&authorized_directory, 191)?;
+    let journal = authorized_directory.path().join("resume.rwj");
+    fs::write(&journal, encode_journal(&[authorized.header])?)?;
+    let ledger = RenameLedger::discover(authorized_directory.path())?;
+    let filesystem = filesystem();
+    let snapshot =
+        inspect_recovery_transaction_snapshot(&ledger, ledger_id(&ledger)?, &filesystem)?;
+
+    let replacement_directory = tempfile::tempdir()?;
+    let replacement = fixture(&replacement_directory, 191)?;
+    let replacement_journal = replacement_directory.path().join("replacement.rwj");
+    let replacement_bytes = encode_journal(&[replacement.header])?;
+    fs::write(&replacement_journal, &replacement_bytes)?;
+    let replacement_ledger = RenameLedger::discover(replacement_directory.path())?;
+    let replacement_snapshot = inspect_recovery_transaction_snapshot(
+        &replacement_ledger,
+        ledger_id(&replacement_ledger)?,
+        &filesystem,
+    )?;
+    assert_eq!(snapshot.inspection(), replacement_snapshot.inspection());
+
+    fs::write(&journal, &replacement_bytes)?;
+    let error = recover_transaction_from_snapshot(
+        &ledger,
+        snapshot,
+        &filesystem,
+        RecoveryAction::Resume,
+        || false,
+    )
+    .err()
+    .ok_or("a substituted journal reached recovery execution")?;
+
+    assert_eq!(
+        error.kind(),
+        RecoveryActionErrorKind::Journal {
+            kind: renamewright_platform::JournalStorageErrorKind::SnapshotChanged,
+        }
+    );
+    assert!(authorized_directory.path().join("source.txt").exists());
+    assert!(
+        !authorized_directory
+            .path()
+            .join("final-source.txt")
+            .exists()
+    );
+    assert!(replacement_directory.path().join("source.txt").exists());
+    assert!(
+        !replacement_directory
+            .path()
+            .join("final-source.txt")
+            .exists()
+    );
+    assert_eq!(fs::read(journal)?, replacement_bytes);
+    Ok(())
+}
+
+#[test]
+fn recovery_and_reconcile_authorization_reject_cached_projection_and_locked_journal_mixing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authorized_directory = tempfile::tempdir()?;
+    let authorized = fixture(&authorized_directory, 201)?;
+    let journal = authorized_directory.path().join("resume.rwj");
+    fs::write(&journal, encode_journal(&[authorized.header])?)?;
+    let ledger = RenameLedger::discover(authorized_directory.path())?;
+
+    let replacement_directory = tempfile::tempdir()?;
+    let replacement = fixture(&replacement_directory, 301)?;
+    fs::write(&journal, encode_journal(&[replacement.header])?)?;
+
+    let error = inspect_recovery_transaction_snapshot(&ledger, ledger_id(&ledger)?, &filesystem())
+        .err()
+        .ok_or("cached projection A was combined with locked journal B")?;
+
+    assert_eq!(
+        error.kind(),
+        renamewright_platform::RecoveryInspectionErrorKind::JournalDamaged
+    );
+    assert!(authorized_directory.path().join("source.txt").exists());
+    assert!(replacement_directory.path().join("source.txt").exists());
+    assert!(
+        !authorized_directory
+            .path()
+            .join("final-source.txt")
+            .exists()
+    );
+    assert!(
+        !replacement_directory
+            .path()
+            .join("final-source.txt")
+            .exists()
+    );
     Ok(())
 }
 

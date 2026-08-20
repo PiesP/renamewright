@@ -37,7 +37,7 @@ $binaryText = [System.Text.Encoding]::Latin1.GetString(
 foreach ($marker in @(
   'AUTOMATION TEST MODE',
   '--automation-root',
-  '--automation-fixture',
+  '--automation-profile',
   '127.0.0.1:26191'
 )) {
   if ($binaryText.Contains($marker, [System.StringComparison]::Ordinal)) {

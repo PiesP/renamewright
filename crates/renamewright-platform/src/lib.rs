@@ -32,8 +32,8 @@ pub use executor::{
     MAX_TEMPORARY_NAME_ATTEMPTS, execute_frozen_plan, freeze_execution_plan,
 };
 pub use journal::{
-    JOURNAL_SCHEMA_VERSION, JournalCodecError, JournalCodecErrorKind, JournalFrame,
-    JournalInspection, JournalStorageError, JournalStorageErrorKind, JournalWriter,
+    AuthorizedJournal, JOURNAL_SCHEMA_VERSION, JournalCodecError, JournalCodecErrorKind,
+    JournalFrame, JournalInspection, JournalStorageError, JournalStorageErrorKind, JournalWriter,
     MAX_JOURNAL_FILE_BYTES, MAX_JOURNAL_PAYLOAD_BYTES, MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION,
     decode_journal, encode_journal, inspect_journal,
 };
@@ -45,8 +45,9 @@ pub use recovery::{
     PreparedStepDisposition, PreparedStepInspection, RecoveryAction, RecoveryActionError,
     RecoveryActionErrorKind, RecoveryInspectionError, RecoveryInspectionErrorKind,
     RecoveryLocation, RecoveryLocationState, RecoveryObservation, RecoveryReadiness,
-    RecoveryTransactionInspection, inspect_prepared_step, inspect_recovery_transaction,
-    reconcile_prepared_step, recover_transaction,
+    RecoveryTransactionInspection, RecoveryTransactionSnapshot, inspect_prepared_step,
+    inspect_recovery_transaction, inspect_recovery_transaction_snapshot, reconcile_prepared_step,
+    reconcile_prepared_step_from_snapshot, recover_transaction, recover_transaction_from_snapshot,
 };
 pub use undo::{
     PreparedUndo, UndoBlockReason, UndoError, UndoErrorKind, UndoReadiness,
@@ -95,6 +96,7 @@ pub struct SourceRegistry {
     paths: BTreeMap<SourceId, PathBuf>,
     snapshots: BTreeMap<SourceId, SourceSnapshot>,
     execution_identities: BTreeMap<SourceId, ExecutionIdentity>,
+    parent_execution_identities: BTreeMap<PathBuf, ExecutionIdentity>,
     source_ids: BTreeMap<PathBuf, SourceId>,
     parent_ids: BTreeMap<PathBuf, ParentId>,
     next_source_id: u64,
@@ -196,29 +198,37 @@ impl SourceRegistry {
             }
 
             let execution_identity = admission_execution_identity(&path);
+            let parent_execution_identity =
+                path.parent().and_then(admission_parent_execution_identity);
             let current_fingerprint = fs::symlink_metadata(&path)
                 .ok()
                 .and_then(|metadata| fingerprint_for(&metadata));
             if current_fingerprint.as_ref() != Some(&fingerprint) {
                 return Err(AdmissionError::Unavailable(path));
             }
-            prepared.push((path, fingerprint, execution_identity));
+            prepared.push((
+                path,
+                fingerprint,
+                execution_identity,
+                parent_execution_identity,
+            ));
         }
 
         let admitted_count = prepared.len();
 
-        for (path, fingerprint, execution_identity) in prepared {
+        for (path, fingerprint, execution_identity, parent_execution_identity) in prepared {
             let source_id = SourceId::new(self.next_source_id);
             self.next_source_id = self.next_source_id.saturating_add(1);
             let parent = path
                 .parent()
                 .ok_or_else(|| AdmissionError::MissingFileName(path.clone()))?;
+            let parent_path = parent.to_path_buf();
             let parent_id = if let Some(parent_id) = self.parent_ids.get(parent) {
                 *parent_id
             } else {
                 let parent_id = ParentId::new(self.next_parent_id);
                 self.next_parent_id = self.next_parent_id.saturating_add(1);
-                self.parent_ids.insert(parent.to_path_buf(), parent_id);
+                self.parent_ids.insert(parent_path.clone(), parent_id);
                 parent_id
             };
             let name = path
@@ -236,6 +246,10 @@ impl SourceRegistry {
             if let Some(execution_identity) = execution_identity {
                 self.execution_identities
                     .insert(source_id, execution_identity);
+            }
+            if let Some(parent_execution_identity) = parent_execution_identity {
+                self.parent_execution_identities
+                    .insert(parent_path, parent_execution_identity);
             }
         }
 
@@ -271,6 +285,8 @@ impl SourceRegistry {
                 .collect::<BTreeSet<_>>();
             self.parent_ids
                 .retain(|_, parent_id| retained_parent_ids.contains(parent_id));
+            self.parent_execution_identities
+                .retain(|parent, _| self.parent_ids.contains_key(parent));
             self.generation = self.generation.saturating_add(1);
             self.cached_planning_snapshot = None;
         }
@@ -302,6 +318,11 @@ impl SourceRegistry {
     #[must_use]
     pub(crate) fn execution_identity_for(&self, source_id: SourceId) -> Option<ExecutionIdentity> {
         self.execution_identities.get(&source_id).copied()
+    }
+
+    #[must_use]
+    pub(crate) fn parent_execution_identity_for(&self, parent: &Path) -> Option<ExecutionIdentity> {
+        self.parent_execution_identities.get(parent).copied()
     }
 
     #[must_use]
@@ -404,6 +425,11 @@ fn admission_execution_identity(path: &Path) -> Option<ExecutionIdentity> {
     LinuxExecutionFileSystem::new().identity(parent, name).ok()
 }
 
+#[cfg(target_os = "linux")]
+fn admission_parent_execution_identity(parent: &Path) -> Option<ExecutionIdentity> {
+    LinuxExecutionFileSystem::new().parent_identity(parent).ok()
+}
+
 #[cfg(windows)]
 fn admission_execution_identity(path: &Path) -> Option<ExecutionIdentity> {
     let parent = path.parent()?;
@@ -411,8 +437,20 @@ fn admission_execution_identity(path: &Path) -> Option<ExecutionIdentity> {
     NativeExecutionFileSystem::new().identity(parent, name).ok()
 }
 
+#[cfg(windows)]
+fn admission_parent_execution_identity(parent: &Path) -> Option<ExecutionIdentity> {
+    NativeExecutionFileSystem::new()
+        .parent_identity(parent)
+        .ok()
+}
+
 #[cfg(not(any(target_os = "linux", windows)))]
 const fn admission_execution_identity(_path: &Path) -> Option<ExecutionIdentity> {
+    None
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+const fn admission_parent_execution_identity(_parent: &Path) -> Option<ExecutionIdentity> {
     None
 }
 

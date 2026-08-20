@@ -9,8 +9,9 @@ use renamewright_core::{
 
 use crate::executor::available_temporary_name;
 use crate::{
-    ExecutionFileSystem, ExecutionFsErrorKind, ExecutionOutcome, ExecutionStartError,
-    FrozenExecutionPlan, LedgerId, LedgerStatus, RenameLedger, execute_frozen_plan,
+    AuthorizedJournal, ExecutionFileSystem, ExecutionFsErrorKind, ExecutionOutcome,
+    ExecutionStartError, FrozenExecutionPlan, LedgerId, LedgerStatus, RenameLedger,
+    execute_frozen_plan,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +37,7 @@ pub struct UndoTransactionInspection {
 #[derive(Debug)]
 pub struct UndoTransactionSnapshot {
     inspection: UndoTransactionInspection,
-    records: Vec<JournalRecord>,
+    authorization: AuthorizedJournal,
 }
 
 impl UndoTransactionSnapshot {
@@ -81,6 +82,7 @@ pub enum UndoErrorKind {
     Superseded,
     InvalidProtocol,
     MissingNativeParent,
+    MissingParentExecutionIdentity,
     TemporaryNameExhausted,
     Schedule { kind: ScheduleError },
     Filesystem { kind: ExecutionFsErrorKind },
@@ -125,6 +127,7 @@ pub struct PreparedUndo {
     original_plan_id: PlanId,
     plan: FrozenExecutionPlan,
     journal_path: std::path::PathBuf,
+    _authorization_lock: AuthorizedJournal,
 }
 
 impl PreparedUndo {
@@ -158,30 +161,60 @@ pub fn inspect_undo_transaction_snapshot<F: ExecutionFileSystem + ?Sized>(
     ledger_id: LedgerId,
     filesystem: &F,
 ) -> Result<UndoTransactionSnapshot, UndoError> {
-    let projection = ledger
-        .entry(ledger_id)
+    let journal_path = ledger
+        .journal_path(ledger_id)
         .ok_or_else(|| UndoError::new(None, UndoErrorKind::JournalUnavailable))?;
-    if projection.status() != LedgerStatus::Completed || projection.undo_of_plan_id().is_some() {
-        return Err(UndoError::new(None, UndoErrorKind::ActionUnavailable));
-    }
-    if !projection.undo_available() {
-        return Err(UndoError::new(None, UndoErrorKind::Superseded));
-    }
-    let (_, journal) = ledger
-        .item(ledger_id)
-        .ok_or_else(|| UndoError::new(None, UndoErrorKind::JournalUnavailable))?;
-    if journal.issue().is_some() {
+    let authorization = AuthorizedJournal::open(journal_path)
+        .map_err(|_| UndoError::new(None, UndoErrorKind::JournalDamaged))?;
+    let records = authorization.records();
+    let (original_plan_id, entries) = header(records)?;
+    let source_generation = projection_generation(records)?;
+    if !ledger.projection_matches_header(
+        ledger_id,
+        original_plan_id,
+        source_generation,
+        entries.len(),
+    ) {
         return Err(UndoError::new(None, UndoErrorKind::JournalDamaged));
     }
-    let records = journal
-        .frames()
+    if entries
         .iter()
-        .map(|frame| frame.record().clone())
-        .collect::<Vec<_>>();
-    if replay_journal(&records) != Ok(JournalStatus::Completed) {
+        .any(|entry| entry.undo_of_plan_id().is_some())
+    {
+        return Err(UndoError::new(None, UndoErrorKind::ActionUnavailable));
+    }
+    let superseded = ledger.entries().any(|entry| {
+        entry.status() != LedgerStatus::RolledBack
+            && entry.undo_of_plan_id() == Some(original_plan_id)
+    });
+    if superseded {
+        return Err(UndoError::new(None, UndoErrorKind::Superseded));
+    }
+    let inspection = inspect_undo_records(ledger_id, records, filesystem)?;
+    Ok(UndoTransactionSnapshot {
+        inspection,
+        authorization,
+    })
+}
+
+fn inspect_undo_records<F: ExecutionFileSystem + ?Sized>(
+    ledger_id: LedgerId,
+    records: &[JournalRecord],
+    filesystem: &F,
+) -> Result<UndoTransactionInspection, UndoError> {
+    if replay_journal(records) != Ok(JournalStatus::Completed) {
         return Err(UndoError::new(None, UndoErrorKind::InvalidProtocol));
     }
-    let (original_plan_id, entries) = header(&records)?;
+    let (original_plan_id, entries) = header(records)?;
+    if entries
+        .iter()
+        .any(|entry| entry.parent_execution_identity().is_none())
+    {
+        return Err(UndoError::new(
+            None,
+            UndoErrorKind::MissingParentExecutionIdentity,
+        ));
+    }
     if entries
         .iter()
         .any(|entry| entry.undo_of_plan_id().is_some())
@@ -219,14 +252,11 @@ pub fn inspect_undo_transaction_snapshot<F: ExecutionFileSystem + ?Sized>(
         }
     }
 
-    Ok(UndoTransactionSnapshot {
-        inspection: UndoTransactionInspection {
-            ledger_id,
-            original_plan_id,
-            source_count: entries.len(),
-            readiness,
-        },
-        records,
+    Ok(UndoTransactionInspection {
+        ledger_id,
+        original_plan_id,
+        source_count: entries.len(),
+        readiness,
     })
 }
 
@@ -242,7 +272,7 @@ pub fn prepare_undo_transaction<F: ExecutionFileSystem + ?Sized>(
 
 pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
     ledger: &RenameLedger,
-    snapshot: UndoTransactionSnapshot,
+    mut snapshot: UndoTransactionSnapshot,
     new_plan_id: PlanId,
     filesystem: &F,
 ) -> Result<PreparedUndo, UndoError> {
@@ -250,8 +280,16 @@ pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
     if !inspection.undo_available() {
         return Err(UndoError::new(None, UndoErrorKind::ActionUnavailable));
     }
-    let (_, original_entries) = header(&snapshot.records)?;
-    let source_generation = projection_generation(&snapshot.records)?;
+    snapshot
+        .authorization
+        .verify_content()
+        .map_err(|_| UndoError::new(None, UndoErrorKind::JournalDamaged))?;
+    let records = snapshot.authorization.records();
+    if inspect_undo_records(inspection.ledger_id(), records, filesystem)? != inspection {
+        return Err(UndoError::new(None, UndoErrorKind::ActionUnavailable));
+    }
+    let (_, original_entries) = header(records)?;
+    let source_generation = projection_generation(records)?;
     let mut entries = Vec::with_capacity(original_entries.len());
     for original in original_entries {
         let parent = original.native_parent().ok_or_else(|| {
@@ -274,7 +312,13 @@ pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
                     };
                     UndoError::new(Some(original.source_id()), kind)
                 })?;
-        let entry = JournalEntry::with_native_parent(
+        let parent_identity = original.parent_execution_identity().ok_or_else(|| {
+            UndoError::new(
+                Some(original.source_id()),
+                UndoErrorKind::MissingParentExecutionIdentity,
+            )
+        })?;
+        let entry = JournalEntry::with_native_parent_identity(
             original.source_id(),
             original.parent_id(),
             JournalNameGraph::new(
@@ -284,6 +328,7 @@ pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
             ),
             original.admission_fingerprint().clone(),
             original.execution_identity(),
+            parent_identity,
             parent.to_path_buf(),
         )
         .into_undo_of(inspection.original_plan_id());
@@ -298,6 +343,7 @@ pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
         original_plan_id: inspection.original_plan_id(),
         plan,
         journal_path,
+        _authorization_lock: snapshot.authorization,
     })
 }
 
@@ -310,12 +356,14 @@ where
     F: ExecutionFileSystem + ?Sized,
     C: Fn() -> bool,
 {
-    execute_frozen_plan(
-        prepared.plan,
-        filesystem,
-        &prepared.journal_path,
-        should_cancel,
-    )
+    let PreparedUndo {
+        plan,
+        journal_path,
+        _authorization_lock,
+        ..
+    } = prepared;
+    let _authorization_lock = _authorization_lock;
+    execute_frozen_plan(plan, filesystem, &journal_path, should_cancel)
 }
 
 fn header(records: &[JournalRecord]) -> Result<(PlanId, &[JournalEntry]), UndoError> {
@@ -383,7 +431,13 @@ fn undo_destination_is_available<F: ExecutionFileSystem + ?Sized>(
         renamewright_core::ExecutionIdentity,
     >,
 ) -> Result<bool, UndoError> {
-    match filesystem.identity(parent, name) {
+    let parent_identity = entry.parent_execution_identity().ok_or_else(|| {
+        UndoError::new(
+            Some(entry.source_id()),
+            UndoErrorKind::MissingParentExecutionIdentity,
+        )
+    })?;
+    match filesystem.identity_in_parent(parent, name, parent_identity) {
         Ok(identity) => Ok(owned_final_destinations
             .get(&(parent.to_path_buf(), windows_name_comparison_key(name)))
             .is_some_and(|expected| *expected == identity)),
@@ -402,7 +456,13 @@ fn identity_state<F: ExecutionFileSystem + ?Sized>(
     name: &std::ffi::OsStr,
     entry: &JournalEntry,
 ) -> Result<IdentityState, UndoError> {
-    match filesystem.identity(parent, name) {
+    let parent_identity = entry.parent_execution_identity().ok_or_else(|| {
+        UndoError::new(
+            Some(entry.source_id()),
+            UndoErrorKind::MissingParentExecutionIdentity,
+        )
+    })?;
+    match filesystem.identity_in_parent(parent, name, parent_identity) {
         Ok(identity) if identity == entry.execution_identity() => Ok(IdentityState::Expected),
         Ok(_) => Ok(IdentityState::Other),
         Err(error) if error.kind() == ExecutionFsErrorKind::SourceUnavailable => {

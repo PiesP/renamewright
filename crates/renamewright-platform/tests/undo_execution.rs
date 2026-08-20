@@ -188,7 +188,7 @@ fn inspects_and_executes_undo_as_a_new_lineaged_transaction()
 }
 
 #[test]
-fn undo_preparation_keeps_the_journal_snapshot_validated_for_execution()
+fn undo_preparation_rejects_a_journal_replaced_after_inspection()
 -> Result<(), Box<dyn std::error::Error>> {
     let (authorized_directory, ledger) = completed_fixture()?;
     let (replacement_directory, _) =
@@ -197,19 +197,60 @@ fn undo_preparation_keeps_the_journal_snapshot_validated_for_execution()
     let replacement = fs::read(replacement_directory.path().join("replacement.rwj"))?;
     let filesystem = JournalSwappingFileSystem::new(authorized_journal, replacement);
 
-    let prepared = prepare_undo_transaction(
+    let error = prepare_undo_transaction(
         &ledger,
         first_ledger_id(&ledger)?,
         PlanId::new(82),
         &filesystem,
-    )?;
-    let JournalRecord::TransactionStarted { entries, .. } = prepared.initial_record() else {
-        return Err("prepared undo had no journal header".into());
-    };
+    )
+    .err()
+    .ok_or("a replaced journal reached undo preparation")?;
 
-    assert_eq!(entries[0].undo_of_plan_id(), Some(PlanId::new(81)));
-    assert_eq!(entries[0].names().original_name(), "final-source.txt");
-    assert_eq!(entries[0].names().final_name(), "source.txt");
+    assert_eq!(error.kind(), UndoErrorKind::JournalDamaged);
+    assert!(
+        authorized_directory
+            .path()
+            .join("final-source.txt")
+            .exists()
+    );
+    assert!(!authorized_directory.path().join("source.txt").exists());
+    Ok(())
+}
+
+#[test]
+fn undo_authorization_rejects_cached_projection_and_locked_journal_mixing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (authorized_directory, ledger) = completed_fixture()?;
+    let (replacement_directory, _) =
+        completed_fixture_named("attacker.txt", "replacement.rwj", PlanId::new(181))?;
+    fs::write(
+        authorized_directory.path().join("a-original.rwj"),
+        fs::read(replacement_directory.path().join("replacement.rwj"))?,
+    )?;
+
+    let error = inspect_undo_transaction(
+        &ledger,
+        first_ledger_id(&ledger)?,
+        &LinuxExecutionFileSystem::new(),
+    )
+    .err()
+    .ok_or("cached projection A was combined with locked undo journal B")?;
+
+    assert_eq!(error.kind(), UndoErrorKind::JournalDamaged);
+    assert!(
+        authorized_directory
+            .path()
+            .join("final-source.txt")
+            .exists()
+    );
+    assert!(
+        replacement_directory
+            .path()
+            .join("final-attacker.txt")
+            .exists()
+    );
+    assert!(!authorized_directory.path().join("source.txt").exists());
+    assert!(!replacement_directory.path().join("attacker.txt").exists());
     Ok(())
 }
 

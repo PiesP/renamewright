@@ -3,6 +3,6 @@ mod implementation;
 
 #[cfg(windows)]
 pub use implementation::{
-    EntryHandle, FileIdentity, HighContrastPalette, file_identity, high_contrast_palette,
-    rename_noreplace,
+    EntryHandle, FileIdentity, HighContrastPalette, ParentHandle, file_identity,
+    high_contrast_palette, rename_noreplace,
 };

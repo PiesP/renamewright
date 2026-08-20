@@ -22,15 +22,16 @@ journal. Ledger, Recovery, Rollback, Resume, Reconcile, cancellation, and Undo
 reuse that journaled execution boundary. Explicit directory selection never
 enumerates children; extension-only rules skip directories, ancestor/descendant
 selections are blocked, reparse points are not followed, and renames remain
-within the original parent.
+within the admitted parent identity through one retained parent handle. Older
+journals without that parent identity remain visible but cannot mutate files.
 
 The primary distributable is one portable `renamewright.exe`. Its Windows MSVC
 runtime is statically linked, so the executable does not require a separately
 installed Visual C++ runtime. Windows system libraries remain operating-system
-dependencies. The default feature set contains no custom inspection listener or
-fixture loader. Test automation is compiled only with the explicit `automation`
-Cargo feature and still requires `--automation`, an absolute disposable
-`--automation-root`, and a visible test-mode banner.
+dependencies. The default feature set contains no custom inspection listener.
+Test automation is compiled only with the explicit `automation` Cargo feature,
+requires `--automation`, an absolute disposable `--automation-root`, and a
+visible test-mode banner, and accepts only built-in path-free read-only profiles.
 
 ## Download
 
