@@ -1471,6 +1471,15 @@ impl ApplicationService {
     where
         F: ExecutionFileSystem + ?Sized,
     {
+        self.journal_authorization
+            .lock()
+            .map_err(|_| {
+                ApplicationServiceError::new(
+                    ApplicationServiceErrorKind::StateUnavailable,
+                    "the journal authorization state is unavailable",
+                )
+            })?
+            .invalidate();
         let mut ledger = self.ledger.lock().map_err(|_| {
             ApplicationServiceError::new(
                 ApplicationServiceErrorKind::StateUnavailable,
@@ -1525,6 +1534,10 @@ impl ApplicationService {
     where
         F: ExecutionFileSystem + ?Sized,
     {
+        self.journal_authorization
+            .lock()
+            .map_err(|_| UndoCommandErrorDto::from(UndoCommandErrorKind::StateUnavailable))?
+            .invalidate();
         let mut ledger = self
             .ledger
             .lock()
@@ -2617,6 +2630,7 @@ where
         return Err(RecoveryCommandErrorKind::ActionUnavailable);
     }
     if !confirm(request.action, inspection) {
+        drop(snapshot);
         let mut ledger = state
             .ledger
             .lock()
@@ -2682,6 +2696,11 @@ where
     F: ExecutionFileSystem + ?Sized,
     C: Fn() -> bool,
 {
+    state
+        .journal_authorization
+        .lock()
+        .map_err(|_| ApplyCommandErrorKind::StateUnavailable)?
+        .invalidate();
     let recovery_session =
         RecoverySession::begin(&state.recovery_control, true).map_err(|kind| match kind {
             RecoveryCommandErrorKind::Busy => ApplyCommandErrorKind::Busy,
@@ -2762,6 +2781,7 @@ where
         return Err(UndoCommandErrorKind::ActionUnavailable);
     }
     if !confirm(inspection) {
+        drop(snapshot);
         let mut ledger = state
             .ledger
             .lock()
@@ -4408,8 +4428,9 @@ mod tests {
         );
         let filesystem = LinuxExecutionFileSystem::new();
         let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
+        let journal_path = directory.path().join("private-journal.rwj");
         fs::write(
-            directory.path().join("private-journal.rwj"),
+            &journal_path,
             renamewright_platform::encode_journal(&[frozen.initial_record()])?,
         )?;
         let ledger = renamewright_platform::RenameLedger::discover(directory.path())?;
@@ -4451,8 +4472,9 @@ mod tests {
         );
         let filesystem = LinuxExecutionFileSystem::new();
         let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
+        let journal_path = directory.path().join("private-journal.rwj");
         fs::write(
-            directory.path().join("private-journal.rwj"),
+            &journal_path,
             renamewright_platform::encode_journal(&[frozen.initial_record()])?,
         )?;
         let state = ApplicationService::default();
@@ -4467,6 +4489,17 @@ mod tests {
                 .ledger_id()
         };
         let inspection = state.inspect_recovery(ledger_id.value(), &filesystem)?;
+        assert!(matches!(
+            renamewright_platform::JournalWriter::resume(&journal_path).map(|_| ()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    renamewright_platform::JournalStorageErrorKind::LockFailed { .. }
+                )
+        ));
+        let first_authorization_id = inspection.authorization_id();
+        let inspection = state.inspect_recovery(ledger_id.value(), &filesystem)?;
+        assert_ne!(inspection.authorization_id(), first_authorization_id);
         let request = RecoveryRequestDto::new(RecoveryCommandAction::Resume, &inspection);
 
         let cancelled = perform_recovery_request(&state, &request, &filesystem, |_, _| false)
@@ -4474,12 +4507,17 @@ mod tests {
         assert!(!cancelled.performed);
         assert_eq!(cancelled.outcome, "cancelled");
         assert!(source.exists());
+        drop(renamewright_platform::JournalWriter::resume(&journal_path)?);
         assert_eq!(
             perform_recovery_request(&state, &request, &filesystem, |_, _| true).err(),
             Some(RecoveryCommandErrorKind::InspectionChanged)
         );
 
         let inspection = state.inspect_recovery(ledger_id.value(), &filesystem)?;
+        assert_ne!(
+            inspection.authorization_id(),
+            request.inspection.authorization_id
+        );
         let mut stale = RecoveryRequestDto::new(RecoveryCommandAction::Resume, &inspection);
         stale.inspection.step_index = Some(usize::MAX);
         let confirmation_called = Cell::new(false);
@@ -4632,13 +4670,9 @@ mod tests {
         );
         let filesystem = LinuxExecutionFileSystem::new();
         let frozen = freeze_execution_plan(&registry, &plan, &filesystem)?;
+        let journal_path = directory.path().join("private-original-journal.rwj");
         assert_eq!(
-            execute_frozen_plan(
-                frozen,
-                &filesystem,
-                &directory.path().join("private-original-journal.rwj"),
-                || false,
-            )?,
+            execute_frozen_plan(frozen, &filesystem, &journal_path, || false)?,
             ExecutionOutcome::Completed
         );
         let state = ApplicationService::default();
@@ -4655,6 +4689,19 @@ mod tests {
         let inspection = state
             .inspect_undo(ledger_id.value(), &filesystem)
             .map_err(|_| "undo inspection failed")?;
+        assert!(matches!(
+            renamewright_platform::AuthorizedJournal::open(&journal_path),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    renamewright_platform::JournalStorageErrorKind::LockFailed { .. }
+                )
+        ));
+        let first_authorization_id = inspection.authorization_id();
+        let inspection = state
+            .inspect_undo(ledger_id.value(), &filesystem)
+            .map_err(|_| "repeated undo inspection failed")?;
+        assert_ne!(inspection.authorization_id(), first_authorization_id);
         let request = UndoRequestDto::new(inspection);
         let serialized = serde_json::to_string(&request.inspection)?;
         assert!(serialized.contains("\"undoAvailable\":true"));
@@ -4666,6 +4713,9 @@ mod tests {
             .map_err(|_| "cancelled undo request failed")?;
         assert!(!cancelled.performed);
         assert_eq!(cancelled.outcome, "cancelled");
+        drop(renamewright_platform::AuthorizedJournal::open(
+            &journal_path,
+        )?);
         assert!(
             directory
                 .path()
