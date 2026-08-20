@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::path::{Component, Path};
 
@@ -128,7 +128,7 @@ pub fn temporary_name(
     Ok(name)
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(target_os = "linux")]
 fn entry_path(parent: &Path, native_name: &OsStr) -> Result<PathBuf, ExecutionFsError> {
     validate_component(native_name)?;
     Ok(parent.join(native_name))
@@ -293,8 +293,10 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
         parent: &Path,
         native_name: &OsStr,
     ) -> Result<ExecutionIdentity, ExecutionFsError> {
-        let source_path = entry_path(parent, native_name)?;
-        let source = renamewright_windows_native::EntryHandle::open_final_component(&source_path)
+        validate_component(native_name)?;
+        let parent = renamewright_windows_native::ParentHandle::open(parent)
+            .map_err(map_windows_io_error)?;
+        let source = renamewright_windows_native::EntryHandle::open_relative(&parent, native_name)
             .map_err(map_windows_io_error)?;
         renamewright_windows_native::file_identity(source.as_handle())
             .map(to_execution_identity)
@@ -314,9 +316,13 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
                 None,
             ));
         }
-        let source_path = entry_path(parent, source_name)?;
-        let target_path = entry_path(parent, target_name)?;
-        let source = renamewright_windows_native::EntryHandle::open_final_component(&source_path)
+        validate_component(source_name)?;
+        validate_component(target_name)?;
+        let parent = renamewright_windows_native::ParentHandle::open(parent)
+            .map_err(map_windows_io_error)?;
+        let parent_identity = renamewright_windows_native::file_identity(parent.as_handle())
+            .map_err(map_windows_io_error)?;
+        let source = renamewright_windows_native::EntryHandle::open_relative(&parent, source_name)
             .map_err(map_windows_io_error)?;
         let current_identity = renamewright_windows_native::file_identity(source.as_handle())
             .map(to_execution_identity)
@@ -328,8 +334,25 @@ impl ExecutionFileSystem for NativeExecutionFileSystem {
             ));
         }
 
-        renamewright_windows_native::rename_noreplace(source.as_handle(), parent, target_name)
-            .map_err(|error| map_windows_rename_error(error, &target_path))?;
+        renamewright_windows_native::rename_noreplace(
+            source.as_handle(),
+            parent.as_handle(),
+            target_name,
+        )
+        .map_err(map_windows_io_error)?;
+        let observed_parent_identity =
+            renamewright_windows_native::file_identity(parent.as_handle()).map_err(|error| {
+                ExecutionFsError::new(
+                    ExecutionFsErrorKind::PostRenameIdentityUnavailable,
+                    error.raw_os_error(),
+                )
+            })?;
+        if observed_parent_identity != parent_identity {
+            return Err(ExecutionFsError::new(
+                ExecutionFsErrorKind::PostRenameIdentityMismatch,
+                None,
+            ));
+        }
         let observed_identity = renamewright_windows_native::file_identity(source.as_handle())
             .map(to_execution_identity)
             .map_err(|error| {
@@ -370,16 +393,4 @@ fn map_windows_io_error(error: std::io::Error) -> ExecutionFsError {
         _ => ExecutionFsErrorKind::IoFailure,
     };
     ExecutionFsError::new(kind, os_code)
-}
-
-#[cfg(windows)]
-fn map_windows_rename_error(error: std::io::Error, target: &Path) -> ExecutionFsError {
-    let mapped = map_windows_io_error(error);
-    if mapped.kind() == ExecutionFsErrorKind::AccessDenied
-        && std::fs::symlink_metadata(target).is_ok()
-    {
-        ExecutionFsError::new(ExecutionFsErrorKind::DestinationExists, mapped.os_code())
-    } else {
-        mapped
-    }
 }
