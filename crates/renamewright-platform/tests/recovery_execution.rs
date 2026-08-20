@@ -42,6 +42,42 @@ fn assert_substitution_fixtures_unchanged(authorized: &Path, replacement: &Path)
     assert!(!replacement.join("final-source.txt").exists());
 }
 
+fn assert_safe_post_lock_journal_state(
+    journal: &Path,
+    authorized_bytes: &[u8],
+    replacement_bytes: &[u8],
+    journal_root: &Path,
+    filesystem: &TestExecutionFileSystem,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let observed = fs::read(journal)?;
+    let refreshed = RenameLedger::discover(journal_root)?;
+    let refreshed_id = ledger_id(&refreshed)?;
+    if observed == authorized_bytes {
+        let reopened = inspect_recovery_transaction_snapshot(&refreshed, refreshed_id, filesystem)?;
+        drop(reopened);
+        assert_eq!(fs::read(journal)?, authorized_bytes);
+    } else {
+        assert_ne!(observed, replacement_bytes);
+        let projection = refreshed.entries().next().ok_or("ledger was empty")?;
+        assert!(matches!(
+            projection.status(),
+            renamewright_platform::LedgerStatus::Damaged
+                | renamewright_platform::LedgerStatus::Torn
+                | renamewright_platform::LedgerStatus::Unreadable
+        ));
+        assert!(!projection.recovery_available());
+        let error = inspect_recovery_transaction_snapshot(&refreshed, refreshed_id, filesystem)
+            .err()
+            .ok_or("a damaged journal regained recovery authorization")?;
+        assert!(matches!(
+            error.kind(),
+            renamewright_platform::RecoveryInspectionErrorKind::JournalDamaged
+                | renamewright_platform::RecoveryInspectionErrorKind::JournalUnavailable
+        ));
+    }
+    Ok(())
+}
+
 struct RecoveryFixture {
     header: JournalRecord,
     temporary_name: String,
@@ -171,11 +207,13 @@ fn bound_recovery_rejects_a_path_free_matching_journal_substitution()
                 replacement_directory.path(),
             );
             drop(snapshot);
-            assert_eq!(fs::read(&journal)?, authorized_bytes);
-            let reopened =
-                inspect_recovery_transaction_snapshot(&ledger, ledger_id(&ledger)?, &filesystem)?;
-            drop(reopened);
-            assert_eq!(fs::read(&journal)?, authorized_bytes);
+            assert_safe_post_lock_journal_state(
+                &journal,
+                &authorized_bytes,
+                &replacement_bytes,
+                authorized_directory.path(),
+                &filesystem,
+            )?;
         }
         Err(error) => return Err(error.into()),
     }
