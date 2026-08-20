@@ -100,7 +100,10 @@ checksums, and uploaded artifacts form the software supply-chain boundary.
   buffer construction, and handle-based rename calls. Every relevant audit must
   check current stable Rust, Microsoft bindings, OS facilities, and reviewed
   safe wrappers and remove or narrow the exception when equivalent safe,
-  handle-preserving semantics are available.
+  handle-preserving semantics are available. Source-level Semgrep suppressions
+  are confined to those individually documented blocks; SARIF publication
+  excludes only results marked `inSource` and preserves unsuppressed or
+  externally suppressed findings.
 - GitHub workflows use least privilege, immutable action pins, locked
   dependencies, and reviewed checksums for downloaded executables. Acceptance
   artifacts bind the source SHA, manifest, binaries, checklist, and path-free

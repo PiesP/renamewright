@@ -41,6 +41,7 @@ const SEMGREP_SARIF_FILTER: &str =
     include_str!("../../../scripts/security/filter-semgrep-sarif.jq");
 const PRE_COMMIT_HOOK: &str = include_str!("../../../.githooks/pre-commit");
 const DEPENDABOT_CONFIG: &str = include_str!("../../../.github/dependabot.yaml");
+const PULL_REQUEST_TEMPLATE: &str = include_str!("../../../.github/pull_request_template.md");
 
 #[test]
 fn repository_has_one_rust_owned_product_shell() {
@@ -63,6 +64,35 @@ fn repository_has_one_rust_owned_product_shell() {
     assert!(!ROOT_MANIFEST.contains("src-tauri"));
     assert!(APP_MANIFEST.contains("name = \"renamewright\""));
     assert!(APP_MANIFEST.contains("default = []"));
+}
+
+#[test]
+fn pull_request_template_uses_the_current_native_rust_contract() {
+    for required in [
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+        "cargo test --workspace --all-targets --all-features --locked",
+        "UI projections remain path-free",
+        "Apply, Recovery, and Undo retain confirmation",
+        "Production default features contain no automation listener",
+    ] {
+        assert!(
+            PULL_REQUEST_TEMPLATE.contains(required),
+            "pull request template omitted {required}"
+        );
+    }
+    for obsolete in [
+        "pnpm",
+        "WebView",
+        "TypeScript",
+        "read-only milestone",
+        "browser",
+    ] {
+        assert!(
+            !PULL_REQUEST_TEMPLATE.contains(obsolete),
+            "pull request template retained obsolete guidance: {obsolete}"
+        );
+    }
 }
 
 #[test]

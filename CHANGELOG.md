@@ -3,6 +3,23 @@
 This file summarizes user-visible changes. Source history and each GitHub
 Release retain the complete commit list and downloadable evidence.
 
+## 0.2.1 - 2026-08-20
+
+### Security
+
+- Bound Windows rename execution to retained admitted-parent handles and exact
+  journal snapshots, including Recovery, Reconcile, and Undo authorization.
+- Locked journals throughout mutation authorization and made damaged or
+  substituted journal state fail closed.
+- Kept automation profiles path-free and read-only, and aligned source-reviewed
+  FFI suppressions with GitHub code-scanning uploads.
+
+### Fixed
+
+- Prepared the Korean fallback font when the language menu first requests it.
+- Updated dependency and security-tool maintenance without weakening the
+  repository's cooling-window, source, or artifact-integrity controls.
+
 ## 0.2.0 - 2026-08-15
 
 The first public native Rust release replaces the historical Tauri bootstrap
