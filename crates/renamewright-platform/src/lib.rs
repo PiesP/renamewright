@@ -9,6 +9,7 @@ mod undo;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
@@ -57,6 +58,7 @@ pub use undo::{
 };
 
 pub const MAX_ADMITTED_SOURCES: usize = 10_000;
+pub const MAX_ENUMERATED_SIBLINGS_PER_PARENT: usize = MAX_ADMITTED_SOURCES;
 
 /// Applying a newly planned rename is enabled through the application service.
 #[must_use]
@@ -360,18 +362,15 @@ fn validation_environment<'a>(
             unavailable_parents.insert(*parent_id);
             continue;
         };
-        let mut parent_names = Vec::new();
-        for entry in entries {
-            let Ok(entry) = entry else {
-                unavailable_parents.insert(*parent_id);
-                parent_names.clear();
-                break;
-            };
-            let entry_path = entry.path();
-            if !source_paths.contains(entry_path.as_path()) {
-                parent_names.push(OccupiedName::new(*parent_id, entry.file_name()));
-            }
-        }
+        let entries = entries.map(|entry| {
+            entry
+                .map(|entry| (entry.path(), entry.file_name()))
+                .map_err(|_| ())
+        });
+        let Ok(parent_names) = collect_occupied_names(*parent_id, entries, &source_paths) else {
+            unavailable_parents.insert(*parent_id);
+            continue;
+        };
         occupied_names.extend(parent_names);
     }
     occupied_names.sort_by(|left, right| {
@@ -384,7 +383,46 @@ fn validation_environment<'a>(
         .with_ancestor_conflicts(ancestor_conflicts)
 }
 
+fn collect_occupied_names(
+    parent_id: ParentId,
+    entries: impl IntoIterator<Item = Result<(PathBuf, OsString), ()>>,
+    source_paths: &BTreeSet<&Path>,
+) -> Result<Vec<OccupiedName>, ()> {
+    let mut occupied_names = Vec::new();
+    for (index, entry) in entries.into_iter().enumerate() {
+        if index >= MAX_ENUMERATED_SIBLINGS_PER_PARENT {
+            return Err(());
+        }
+        let (path, native_name) = entry?;
+        if !source_paths.contains(path.as_path()) {
+            occupied_names.push(OccupiedName::new(parent_id, native_name));
+        }
+    }
+    Ok(occupied_names)
+}
+
 fn ancestor_conflicts<'a>(
+    paths: &BTreeMap<SourceId, PathBuf>,
+    snapshot_for: impl Copy + Fn(SourceId) -> Option<&'a SourceSnapshot>,
+) -> BTreeSet<SourceId> {
+    let conflicts = ancestor_conflicts_lexical(paths, snapshot_for);
+    #[cfg(windows)]
+    {
+        let mut conflicts = conflicts;
+        conflicts.extend(ancestor_conflicts_by_identity(
+            paths,
+            snapshot_for,
+            admission_parent_execution_identity,
+        ));
+        conflicts
+    }
+    #[cfg(not(windows))]
+    {
+        conflicts
+    }
+}
+
+fn ancestor_conflicts_lexical<'a>(
     paths: &BTreeMap<SourceId, PathBuf>,
     snapshot_for: impl Copy + Fn(SourceId) -> Option<&'a SourceSnapshot>,
 ) -> BTreeSet<SourceId> {
@@ -413,6 +451,60 @@ fn ancestor_conflicts<'a>(
         }
         if is_directory {
             directory_stack.push((path.as_path(), source_id));
+        }
+    }
+    conflicts
+}
+
+#[cfg(any(windows, test))]
+fn ancestor_conflicts_by_identity<'a>(
+    paths: &BTreeMap<SourceId, PathBuf>,
+    snapshot_for: impl Copy + Fn(SourceId) -> Option<&'a SourceSnapshot>,
+    mut identity_for: impl FnMut(&Path) -> Option<ExecutionIdentity>,
+) -> BTreeSet<SourceId> {
+    let mut identity_cache = BTreeMap::<PathBuf, Option<ExecutionIdentity>>::new();
+    let mut selected_directories = BTreeMap::<(u64, [u8; 16]), Vec<SourceId>>::new();
+
+    for (source_id, path) in paths {
+        if snapshot_for(*source_id).and_then(SourceSnapshot::entry_kind)
+            != Some(EntryKind::Directory)
+        {
+            continue;
+        }
+        let identity = *identity_cache
+            .entry(path.clone())
+            .or_insert_with(|| identity_for(path));
+        if let Some(identity) = identity {
+            selected_directories
+                .entry((identity.volume_serial_number(), identity.file_id()))
+                .or_default()
+                .push(*source_id);
+        }
+    }
+
+    let mut conflicts = BTreeSet::new();
+    for source_ids in selected_directories.values().filter(|ids| ids.len() > 1) {
+        conflicts.extend(source_ids.iter().copied());
+    }
+
+    for (source_id, path) in paths {
+        let mut ancestor = path.parent();
+        while let Some(parent) = ancestor {
+            let identity = *identity_cache
+                .entry(parent.to_path_buf())
+                .or_insert_with(|| identity_for(parent));
+            if let Some(identity) = identity
+                && let Some(directory_ids) =
+                    selected_directories.get(&(identity.volume_serial_number(), identity.file_id()))
+            {
+                for directory_id in directory_ids {
+                    if directory_id != source_id {
+                        conflicts.insert(*directory_id);
+                        conflicts.insert(*source_id);
+                    }
+                }
+            }
+            ancestor = parent.parent();
         }
     }
     conflicts
@@ -527,18 +619,73 @@ const fn entry_identity_signal(_metadata: &Metadata) -> Option<EntryIdentitySign
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    #[cfg(unix)]
-    use renamewright_core::EntryKind;
-    use renamewright_core::SourceId;
+    use renamewright_core::{
+        EntryKind, ExecutionIdentity, ParentId, SourceFingerprint, SourceId, SourceSnapshot,
+    };
 
     use super::{
-        AdmissionError, MAX_ADMITTED_SOURCES, SourceRegistry, normalize_entry_path,
+        AdmissionError, MAX_ADMITTED_SOURCES, MAX_ENUMERATED_SIBLINGS_PER_PARENT, SourceRegistry,
+        ancestor_conflicts_by_identity, collect_occupied_names, normalize_entry_path,
         plan_execution_is_enabled, recovery_execution_is_enabled,
     };
+
+    #[test]
+    fn occupied_name_collection_fails_before_retaining_beyond_the_parent_cap() {
+        let entries = (0..=MAX_ENUMERATED_SIBLINGS_PER_PARENT).map(|index| {
+            let name = format!("entry-{index}");
+            Ok((PathBuf::from(&name), name.into()))
+        });
+
+        assert!(collect_occupied_names(ParentId::new(1), entries, &BTreeSet::new()).is_err());
+    }
+
+    #[test]
+    fn identity_ancestry_catches_lexically_unrelated_windows_aliases() {
+        let directory_id = SourceId::new(1);
+        let descendant_id = SourceId::new(2);
+        let directory_path = PathBuf::from("/canonical");
+        let descendant_path = PathBuf::from("/alias/nested/report.txt");
+        let mut paths = BTreeMap::new();
+        paths.insert(directory_id, directory_path.clone());
+        paths.insert(descendant_id, descendant_path);
+        let snapshots = BTreeMap::from([
+            (
+                directory_id,
+                SourceSnapshot::with_fingerprint(
+                    directory_id,
+                    ParentId::new(1),
+                    "Archive".into(),
+                    SourceFingerprint::new(EntryKind::Directory, None, 0, None),
+                ),
+            ),
+            (
+                descendant_id,
+                SourceSnapshot::with_fingerprint(
+                    descendant_id,
+                    ParentId::new(2),
+                    "report.txt".into(),
+                    SourceFingerprint::new(EntryKind::File, None, 1, None),
+                ),
+            ),
+        ]);
+        let shared_identity = ExecutionIdentity::new(7, [9; 16]);
+
+        let conflicts = ancestor_conflicts_by_identity(
+            &paths,
+            |source_id| snapshots.get(&source_id),
+            |path| {
+                (path == directory_path || path == Path::new("/alias")).then_some(shared_identity)
+            },
+        );
+
+        assert_eq!(conflicts, BTreeSet::from([directory_id, descendant_id]));
+    }
 
     #[test]
     fn plan_execution_and_recovery_are_enabled_together() {
