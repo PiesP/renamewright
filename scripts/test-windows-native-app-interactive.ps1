@@ -453,18 +453,9 @@ $automationRoot = Join-Path `
   $temporaryDirectory `
   ("renamewright-automation-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $automationRoot | Out-Null
-$fixtureDirectory = Join-Path $automationRoot 'fixtures'
-New-Item -ItemType Directory -Path $fixtureDirectory | Out-Null
-$performanceFixture = [ordered]@{
-  schemaVersion = 2
-  syntheticSample = $true
-}
-$performanceFixture |
-  ConvertTo-Json |
-  Set-Content -LiteralPath (Join-Path $fixtureDirectory 'performance.json') -Encoding utf8
 $automationArguments = (
   "--automation --automation-root `"$automationRoot`" " +
-  '--automation-fixture "performance.json"'
+  '--automation-profile performance'
 )
 $artifactSuffix = if ($EvidenceLabel -ceq 'current') { '' } else { "-$EvidenceLabel" }
 $processOutputPath = Join-Path $artifactRoot "interactive-process$artifactSuffix.stdout.txt"

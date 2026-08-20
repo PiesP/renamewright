@@ -13,8 +13,8 @@ previous Tauri-based bootstrap and must not be replaced or retagged.
 ## Artifact boundary
 
 The portable executable is built from the default Cargo feature set. The
-`automation` feature, inspection probe, test fixture loader, and loopback
-listener are not release inputs. Every published bundle contains:
+`automation` feature, inspection probe, path-free synthetic profiles, and
+loopback listener are not release inputs. Every published bundle contains:
 
 - `Renamewright-<version>-windows-x86_64-portable.exe`;
 - `Renamewright-<version>.cdx.json`;

@@ -196,36 +196,27 @@ struct RuleDragPayload {
 
 #[cfg(feature = "automation")]
 pub mod automation {
+    use std::ffi::OsStr;
     use std::fmt::{Display, Formatter};
-    use std::fs::{self, File, OpenOptions};
-    use std::io::{Read as _, Write as _};
+    use std::fs;
     use std::net::{TcpListener, TcpStream, ToSocketAddrs as _};
-    use std::path::{Component, Path, PathBuf};
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     use eframe::egui;
     use egui_inspection::{InspectionPlugin, Request, Response};
-    use serde::Deserialize;
 
     pub const AUTOMATION_BIND_ADDRESS: &str = "127.0.0.1:26191";
-    pub const MAX_AUTOMATION_FIXTURE_BYTES: u64 = 256 * 1024;
     pub const MAX_AUTOMATION_MESSAGE_BYTES: usize = 1024 * 1024;
-    pub const MAX_AUTOMATION_TEXT_BYTES: usize = 4 * 1024;
     pub const MAX_AUTOMATION_EVENTS: usize = 256;
     pub const MAX_AUTOMATION_REQUESTS_PER_CONNECTION: usize = 128;
     pub const MAX_AUTOMATION_SETTLE_STEPS: u64 = 256;
-    pub const MAX_AUTOMATION_SOURCES: usize = 10_000;
-    const MAX_AUTOMATION_RELATIVE_PATH_BYTES: usize = 4 * 1024;
     const MAX_AUTOMATION_CONNECTION_DURATION: Duration = Duration::from_secs(120);
     const AUTOMATION_IO_TIMEOUT: Duration = Duration::from_secs(5);
     const AUTOMATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
     const MAX_AUTOMATION_VIEWPORT_WIDTH: u32 = 3_840;
     const MAX_AUTOMATION_VIEWPORT_HEIGHT: u32 = 2_160;
-    const LOCK_FILE_NAME: &str = ".renamewright-automation.lock";
-    const FIXTURE_DIRECTORY_NAME: &str = "fixtures";
-    const STATE_DIRECTORY_NAME: &str = "state";
-    const JOURNAL_DIRECTORY_NAME: &str = "journals";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum AutomationRootErrorKind {
@@ -233,13 +224,7 @@ pub mod automation {
         RootUnavailable,
         RootNotDirectory,
         ReparsePointRejected,
-        ConcurrentSession,
-        InvalidRelativePath,
-        RelativePathTooLong,
-        FixtureUnavailable,
-        FixtureTooLarge,
-        InvalidFixture,
-        FixtureEscapedRoot,
+        InvalidProfile,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,94 +255,33 @@ pub mod automation {
 
     impl std::error::Error for AutomationRootError {}
 
-    #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "camelCase")]
-    pub enum AutomationFilter {
-        All,
-        Changed,
-        Blocked,
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum AutomationProfile {
+        #[default]
+        Empty,
+        Performance,
     }
 
-    #[derive(Debug, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    pub struct AutomationFixture {
-        schema_version: u16,
-        #[serde(default)]
-        synthetic_sample: Option<bool>,
-        #[serde(default)]
-        prefix: Option<String>,
-        #[serde(default)]
-        source_query: Option<String>,
-        #[serde(default)]
-        filter: Option<AutomationFilter>,
-        #[serde(default)]
-        sources: Vec<String>,
-        #[serde(skip)]
-        resolved_sources: Vec<PathBuf>,
-    }
-
-    impl AutomationFixture {
-        pub fn parse(bytes: &[u8]) -> Result<Self, AutomationRootError> {
-            let fixture: Self = serde_json::from_slice(bytes)
-                .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::InvalidFixture))?;
-            if !matches!(fixture.schema_version, 1 | 2)
-                || (fixture.schema_version == 1 && fixture.synthetic_sample.is_some())
-                || fixture
-                    .prefix
-                    .as_ref()
-                    .is_some_and(|value| value.len() > MAX_AUTOMATION_TEXT_BYTES)
-                || fixture
-                    .source_query
-                    .as_ref()
-                    .is_some_and(|value| value.len() > MAX_AUTOMATION_TEXT_BYTES)
-                || fixture.sources.len() > MAX_AUTOMATION_SOURCES
-                || (fixture.synthetic_sample == Some(true) && !fixture.sources.is_empty())
-                || fixture.sources.iter().any(|source| {
-                    source.is_empty() || source.len() > MAX_AUTOMATION_RELATIVE_PATH_BYTES
-                })
-            {
-                return Err(AutomationRootError::new(
-                    AutomationRootErrorKind::InvalidFixture,
-                ));
+    impl AutomationProfile {
+        pub fn parse(value: &OsStr) -> Result<Self, AutomationRootError> {
+            match value.to_str() {
+                Some("empty") => Ok(Self::Empty),
+                Some("performance") => Ok(Self::Performance),
+                _ => Err(AutomationRootError::new(
+                    AutomationRootErrorKind::InvalidProfile,
+                )),
             }
-            Ok(fixture)
         }
 
         #[must_use]
-        pub fn prefix(&self) -> Option<&str> {
-            self.prefix.as_deref()
-        }
-
-        #[must_use]
-        pub fn source_query(&self) -> Option<&str> {
-            self.source_query.as_deref()
-        }
-
-        #[must_use]
-        pub const fn filter(&self) -> Option<AutomationFilter> {
-            self.filter
-        }
-
-        #[must_use]
-        pub fn synthetic_sample(&self) -> bool {
-            self.synthetic_sample
-                .unwrap_or(self.schema_version == 1 && self.sources.is_empty())
-        }
-
-        #[must_use]
-        pub fn sources(&self) -> &[PathBuf] {
-            &self.resolved_sources
+        pub const fn synthetic_sample(self) -> bool {
+            matches!(self, Self::Performance)
         }
     }
 
     #[derive(Debug)]
     pub struct AutomationRoot {
         canonical_root: PathBuf,
-        fixture_root: PathBuf,
-        state_root: PathBuf,
-        journal_root: PathBuf,
-        lock_path: PathBuf,
-        _lock: File,
     }
 
     impl AutomationRoot {
@@ -381,124 +305,12 @@ pub mod automation {
             }
             let canonical_root = fs::canonicalize(root)
                 .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
-            let lock_path = canonical_root.join(LOCK_FILE_NAME);
-            let mut lock = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-                .map_err(|_| {
-                    AutomationRootError::new(AutomationRootErrorKind::ConcurrentSession)
-                })?;
-            if writeln!(lock, "{}", std::process::id()).is_err() || lock.sync_all().is_err() {
-                let _ = fs::remove_file(&lock_path);
-                return Err(AutomationRootError::new(
-                    AutomationRootErrorKind::RootUnavailable,
-                ));
-            }
-
-            let result = Self::prepare(canonical_root, lock_path, lock);
-            if result.is_err() {
-                let _ = fs::remove_file(root.join(LOCK_FILE_NAME));
-            }
-            result
-        }
-
-        fn prepare(
-            canonical_root: PathBuf,
-            lock_path: PathBuf,
-            lock: File,
-        ) -> Result<Self, AutomationRootError> {
-            let fixture_root = prepare_child_directory(&canonical_root, FIXTURE_DIRECTORY_NAME)?;
-            let state_root = prepare_child_directory(&canonical_root, STATE_DIRECTORY_NAME)?;
-            let journal_root = prepare_child_directory(&canonical_root, JOURNAL_DIRECTORY_NAME)?;
-            Ok(Self {
-                canonical_root,
-                fixture_root,
-                state_root,
-                journal_root,
-                lock_path,
-                _lock: lock,
-            })
+            Ok(Self { canonical_root })
         }
 
         #[must_use]
         pub fn root(&self) -> &Path {
             &self.canonical_root
-        }
-
-        #[must_use]
-        pub fn state_root(&self) -> &Path {
-            &self.state_root
-        }
-
-        #[must_use]
-        pub fn journal_root(&self) -> &Path {
-            &self.journal_root
-        }
-
-        pub fn read_fixture(&self, relative: &Path) -> Result<Vec<u8>, AutomationRootError> {
-            validate_relative_path(relative)?;
-            let candidate = self.fixture_root.join(relative);
-            verify_existing_path(&self.fixture_root, &candidate)?;
-            let metadata = fs::metadata(&candidate).map_err(|_| {
-                AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
-            })?;
-            if !metadata.is_file() {
-                return Err(AutomationRootError::new(
-                    AutomationRootErrorKind::FixtureUnavailable,
-                ));
-            }
-            if metadata.len() > MAX_AUTOMATION_FIXTURE_BYTES {
-                return Err(AutomationRootError::new(
-                    AutomationRootErrorKind::FixtureTooLarge,
-                ));
-            }
-            let file = File::open(&candidate).map_err(|_| {
-                AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
-            })?;
-            let mut bytes = Vec::with_capacity(metadata.len() as usize);
-            file.take(MAX_AUTOMATION_FIXTURE_BYTES + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| {
-                    AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
-                })?;
-            if bytes.len() as u64 > MAX_AUTOMATION_FIXTURE_BYTES {
-                return Err(AutomationRootError::new(
-                    AutomationRootErrorKind::FixtureTooLarge,
-                ));
-            }
-            Ok(bytes)
-        }
-
-        pub fn load_fixture(
-            &self,
-            relative: &Path,
-        ) -> Result<AutomationFixture, AutomationRootError> {
-            let mut fixture = AutomationFixture::parse(&self.read_fixture(relative)?)?;
-            let mut resolved_sources = Vec::with_capacity(fixture.sources.len());
-            for relative_source in &fixture.sources {
-                let relative_source = Path::new(relative_source);
-                validate_relative_path(relative_source)?;
-                let candidate = self.fixture_root.join(relative_source);
-                verify_existing_path(&self.fixture_root, &candidate)?;
-                let metadata = fs::symlink_metadata(&candidate).map_err(|_| {
-                    AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
-                })?;
-                if !(metadata.is_file() || metadata.is_dir()) {
-                    return Err(AutomationRootError::new(
-                        AutomationRootErrorKind::FixtureUnavailable,
-                    ));
-                }
-                resolved_sources.push(candidate);
-            }
-            fixture.resolved_sources = resolved_sources;
-            Ok(fixture)
-        }
-    }
-
-    impl Drop for AutomationRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.lock_path);
         }
     }
 
@@ -688,89 +500,6 @@ pub mod automation {
                 *max_steps > 0 && *max_steps <= MAX_AUTOMATION_SETTLE_STEPS
             }
         }
-    }
-
-    fn validate_relative_path(path: &Path) -> Result<(), AutomationRootError> {
-        if path.as_os_str().as_encoded_bytes().len() > MAX_AUTOMATION_RELATIVE_PATH_BYTES {
-            return Err(AutomationRootError::new(
-                AutomationRootErrorKind::RelativePathTooLong,
-            ));
-        }
-        if path.as_os_str().is_empty()
-            || path.is_absolute()
-            || path
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(AutomationRootError::new(
-                AutomationRootErrorKind::InvalidRelativePath,
-            ));
-        }
-        Ok(())
-    }
-
-    fn prepare_child_directory(root: &Path, name: &str) -> Result<PathBuf, AutomationRootError> {
-        let path = root.join(name);
-        match fs::create_dir(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => {
-                return Err(AutomationRootError::new(
-                    AutomationRootErrorKind::RootUnavailable,
-                ));
-            }
-        }
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
-        if !metadata.is_dir() {
-            return Err(AutomationRootError::new(
-                AutomationRootErrorKind::RootNotDirectory,
-            ));
-        }
-        if metadata_is_reparse_point(&metadata) {
-            return Err(AutomationRootError::new(
-                AutomationRootErrorKind::ReparsePointRejected,
-            ));
-        }
-        let canonical = fs::canonicalize(&path)
-            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::RootUnavailable))?;
-        if !canonical.starts_with(root) {
-            return Err(AutomationRootError::new(
-                AutomationRootErrorKind::FixtureEscapedRoot,
-            ));
-        }
-        Ok(canonical)
-    }
-
-    fn verify_existing_path(root: &Path, candidate: &Path) -> Result<(), AutomationRootError> {
-        let relative = candidate
-            .strip_prefix(root)
-            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::FixtureEscapedRoot))?;
-        let mut current = root.to_path_buf();
-        for component in relative.components() {
-            let Component::Normal(component) = component else {
-                return Err(AutomationRootError::new(
-                    AutomationRootErrorKind::InvalidRelativePath,
-                ));
-            };
-            current.push(component);
-            let metadata = fs::symlink_metadata(&current).map_err(|_| {
-                AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable)
-            })?;
-            if metadata_is_reparse_point(&metadata) {
-                return Err(AutomationRootError::new(
-                    AutomationRootErrorKind::ReparsePointRejected,
-                ));
-            }
-        }
-        let canonical = fs::canonicalize(candidate)
-            .map_err(|_| AutomationRootError::new(AutomationRootErrorKind::FixtureUnavailable))?;
-        if !canonical.starts_with(root) {
-            return Err(AutomationRootError::new(
-                AutomationRootErrorKind::FixtureEscapedRoot,
-            ));
-        }
-        Ok(())
     }
 
     #[cfg(windows)]
@@ -2507,43 +2236,19 @@ impl RenamewrightApp {
     pub fn new_automated(
         palette: NativePalette,
         automation_root: automation::AutomationRoot,
-        fixture: Option<&automation::AutomationFixture>,
+        profile: automation::AutomationProfile,
     ) -> Self {
-        let preset_path = automation_root.state_root().join("presets.json");
-        let journal_root = automation_root.journal_root().to_path_buf();
-        let synthetic_fixture =
-            fixture.is_some_and(automation::AutomationFixture::synthetic_sample);
+        let synthetic_fixture = profile.synthetic_sample();
         let mut app = Self::new_configured(
             true,
             palette,
-            Some(preset_path),
-            Some(journal_root),
+            None,
+            None,
             synthetic_fixture,
             AppearancePreferences::default(),
         );
-        if let Some(fixture) = fixture {
-            if let Some(prefix) = fixture.prefix() {
-                app.set_prefix(prefix);
-            }
-            if let Some(source_query) = fixture.source_query() {
-                app.source_query = source_query.to_owned();
-            }
-            if let Some(filter) = fixture.filter() {
-                app.filter = match filter {
-                    automation::AutomationFilter::All => PlanFilter::All,
-                    automation::AutomationFilter::Changed => PlanFilter::Changed,
-                    automation::AutomationFilter::Blocked => PlanFilter::Blocked,
-                };
-            }
-            if fixture.sources().is_empty() {
-                app.status = "Automation fixture loaded".to_owned();
-            } else {
-                app.admit_sources_immediately(fixture.sources().to_vec());
-                app.status = format!(
-                    "Automation fixture loaded · {} sources",
-                    fixture.sources().len()
-                );
-            }
+        if synthetic_fixture {
+            app.status = "Automation performance profile loaded".to_owned();
         }
         app._automation_root = Some(automation_root);
         app
@@ -2644,7 +2349,7 @@ impl RenamewrightApp {
         indices
     }
 
-    #[cfg(any(test, feature = "automation"))]
+    #[cfg(test)]
     fn admit_sources_immediately(&mut self, paths: Vec<PathBuf>) {
         self.supersede_pending_plan_refresh();
         let previous_source_count = self.plan.as_ref().map_or(0, |plan| plan.rows().len());
@@ -2653,8 +2358,16 @@ impl RenamewrightApp {
         self.apply_admission_result(previous_source_count, result);
     }
 
+    fn filesystem_authority_enabled(&self) -> bool {
+        #[cfg(feature = "automation")]
+        if self.automation_mode {
+            return false;
+        }
+        true
+    }
+
     fn start_source_admission(&mut self, paths: Vec<PathBuf>, context: &egui::Context) {
-        if paths.is_empty() {
+        if paths.is_empty() || !self.filesystem_authority_enabled() {
             return;
         }
         if self.admission_task.is_some() || self.planning_task.is_some() {
@@ -2968,6 +2681,7 @@ impl RenamewrightApp {
     }
 
     #[cfg(any(test, feature = "automation"))]
+    #[cfg(test)]
     fn set_prefix(&mut self, prefix: &str) {
         if let Some(RuleRequestDto::Prefix { value, .. }) = self
             .rules
@@ -3193,6 +2907,9 @@ impl RenamewrightApp {
     }
 
     fn save_presets(&mut self, next: PresetDocumentDto, success: String) {
+        if !self.filesystem_authority_enabled() {
+            return;
+        }
         if let Some(path) = &self.preset_path
             && let Err(error) = next.save(path)
         {
@@ -3220,6 +2937,9 @@ impl RenamewrightApp {
     }
 
     fn apply_preset(&mut self, preset_id: u64) {
+        if !self.filesystem_authority_enabled() {
+            return;
+        }
         let Some((name, rules)) = self
             .presets
             .presets()
@@ -3249,6 +2969,9 @@ impl RenamewrightApp {
     }
 
     fn delete_preset(&mut self, preset_id: u64) {
+        if !self.filesystem_authority_enabled() {
+            return;
+        }
         let mut next = self.presets.clone();
         next.remove(preset_id);
         self.save_presets(
@@ -3260,7 +2983,7 @@ impl RenamewrightApp {
     }
 
     fn refresh_ledger(&mut self) {
-        if self.journal_root.is_none() {
+        if !self.filesystem_authority_enabled() || self.journal_root.is_none() {
             self.status = self
                 .locale
                 .text(
@@ -3289,6 +3012,9 @@ impl RenamewrightApp {
     }
 
     fn inspect_selected_recovery(&mut self) {
+        if !self.filesystem_authority_enabled() {
+            return;
+        }
         let Some(ledger_id) = self.selected_ledger_id else {
             return;
         };
@@ -3310,6 +3036,9 @@ impl RenamewrightApp {
     }
 
     fn inspect_selected_undo(&mut self) {
+        if !self.filesystem_authority_enabled() {
+            return;
+        }
         let Some(ledger_id) = self.selected_ledger_id else {
             return;
         };
@@ -3424,6 +3153,16 @@ impl RenamewrightApp {
     }
 
     fn start_confirmed_mutation(&mut self, confirmation: PendingConfirmation) {
+        if !self.filesystem_authority_enabled() {
+            self.status = self
+                .locale
+                .text(
+                    "Automation mode is read-only",
+                    "자동화 모드는 읽기 전용입니다",
+                )
+                .to_owned();
+            return;
+        }
         if self.mutation_task.is_some() && !matches!(&confirmation, PendingConfirmation::Cancel) {
             self.status = self
                 .locale
@@ -3586,11 +3325,12 @@ impl RenamewrightApp {
     }
 
     fn show_ledger(&mut self, ui: &mut egui::Ui) {
+        let filesystem_authority = self.filesystem_authority_enabled();
         ui.horizontal(|ui| {
             ui.heading(self.locale.text(semantics::LEDGER, "원장"));
             if ui
                 .add_enabled(
-                    self.ledger_task.is_none(),
+                    filesystem_authority && self.ledger_task.is_none(),
                     egui::Button::new(
                         self.locale
                             .text(semantics::REFRESH_LEDGER, "원장 새로 고침"),
@@ -3675,8 +3415,10 @@ impl RenamewrightApp {
             self.undo_inspection = None;
         }
 
-        let mutation_idle =
-            self.mutation_task.is_none() && self.ledger_task.is_none() && self.ledger_ready;
+        let mutation_idle = filesystem_authority
+            && self.mutation_task.is_none()
+            && self.ledger_task.is_none()
+            && self.ledger_ready;
         let (recovery_available, undo_available) = self
             .selected_ledger_id
             .and_then(|ledger_id| {
@@ -3794,6 +3536,9 @@ impl RenamewrightApp {
     }
 
     fn choose_files(&mut self, context: &egui::Context) {
+        if !self.filesystem_authority_enabled() {
+            return;
+        }
         match rfd::FileDialog::new()
             .set_title("Add files to Renamewright")
             .pick_files()
@@ -3809,6 +3554,9 @@ impl RenamewrightApp {
     }
 
     fn choose_folder_entry(&mut self, context: &egui::Context) {
+        if !self.filesystem_authority_enabled() {
+            return;
+        }
         match rfd::FileDialog::new()
             .set_title("Add one directory entry to Renamewright")
             .pick_folder()
@@ -4198,13 +3946,21 @@ impl RenamewrightApp {
                     }
                 }
                 if ui
-                    .button(self.locale.text(semantics::ADD_FOLDER, "폴더 자체 추가"))
+                    .add_enabled(
+                        self.filesystem_authority_enabled(),
+                        egui::Button::new(
+                            self.locale.text(semantics::ADD_FOLDER, "폴더 자체 추가"),
+                        ),
+                    )
                     .clicked()
                 {
                     self.choose_folder_entry(ui.ctx());
                 }
                 if ui
-                    .button(self.locale.text(semantics::ADD_FILES, "파일 추가"))
+                    .add_enabled(
+                        self.filesystem_authority_enabled(),
+                        egui::Button::new(self.locale.text(semantics::ADD_FILES, "파일 추가")),
+                    )
                     .clicked()
                 {
                     self.choose_files(ui.ctx());
@@ -4575,6 +4331,7 @@ impl RenamewrightApp {
     }
 
     fn show_rule_tools(&mut self, ui: &mut egui::Ui) {
+        let filesystem_authority = self.filesystem_authority_enabled();
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(
@@ -4583,7 +4340,8 @@ impl RenamewrightApp {
                     .color(self.palette.ink),
             );
             let preset_label = ui.label(self.locale.text(semantics::PRESET_NAME, "프리셋 이름"));
-            ui.add(
+            ui.add_enabled(
+                filesystem_authority,
                 egui::TextEdit::singleline(&mut self.preset_name)
                     .id_salt("preset-name")
                     .desired_width(160.0)
@@ -4591,7 +4349,10 @@ impl RenamewrightApp {
             )
             .labelled_by(preset_label.id);
             if ui
-                .button(self.locale.text(semantics::SAVE_PRESET, "프리셋 저장"))
+                .add_enabled(
+                    filesystem_authority,
+                    egui::Button::new(self.locale.text(semantics::SAVE_PRESET, "프리셋 저장")),
+                )
                 .clicked()
             {
                 self.save_current_preset();
@@ -4616,7 +4377,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some() && self.document_task.is_none(),
+                    filesystem_authority && self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::EXPORT_JSON, "JSON 내보내기")),
                 )
                 .clicked()
@@ -4625,7 +4386,7 @@ impl RenamewrightApp {
             }
             if ui
                 .add_enabled(
-                    self.plan.is_some() && self.document_task.is_none(),
+                    filesystem_authority && self.plan.is_some() && self.document_task.is_none(),
                     egui::Button::new(self.locale.text(semantics::EXPORT_CSV, "CSV 내보내기")),
                 )
                 .clicked()
@@ -4644,16 +4405,22 @@ impl RenamewrightApp {
                         ui.push_id(preset.preset_id(), |ui| {
                             ui.label(preset.name());
                             if ui
-                                .small_button(
-                                    self.locale.text(semantics::APPLY_PRESET, "프리셋 적용"),
+                                .add_enabled(
+                                    filesystem_authority,
+                                    egui::Button::new(
+                                        self.locale.text(semantics::APPLY_PRESET, "프리셋 적용"),
+                                    ),
                                 )
                                 .clicked()
                             {
                                 apply_preset = Some(preset.preset_id());
                             }
                             if ui
-                                .small_button(
-                                    self.locale.text(semantics::DELETE_PRESET, "프리셋 삭제"),
+                                .add_enabled(
+                                    filesystem_authority,
+                                    egui::Button::new(
+                                        self.locale.text(semantics::DELETE_PRESET, "프리셋 삭제"),
+                                    ),
                                 )
                                 .clicked()
                             {
@@ -5114,7 +4881,8 @@ impl RenamewrightApp {
             },
         );
         let unchanged_count = total_count.saturating_sub(changed_count + blocked_count);
-        let can_apply = self.plan.as_ref().is_some_and(PlanDto::can_apply)
+        let can_apply = self.filesystem_authority_enabled()
+            && self.plan.as_ref().is_some_and(PlanDto::can_apply)
             && self.journal_root.is_some()
             && self.mutation_task.is_none()
             && self.plan_is_current
@@ -5265,7 +5033,7 @@ impl RenamewrightApp {
     }
 
     fn export_plan(&mut self, json: bool) {
-        if self.document_task.is_some() {
+        if self.document_task.is_some() || !self.filesystem_authority_enabled() {
             return;
         }
         let Some(plan_id) = self.plan.as_ref().map(PlanDto::plan_id) else {
@@ -5569,14 +5337,17 @@ impl RenamewrightApp {
             egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::ArrowLeft);
         let move_rule_after =
             egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::ArrowRight);
-        if ui
-            .ctx()
-            .input_mut(|input| input.consume_shortcut(&add_folder_shortcut))
+        let filesystem_authority = self.filesystem_authority_enabled();
+        if filesystem_authority
+            && ui
+                .ctx()
+                .input_mut(|input| input.consume_shortcut(&add_folder_shortcut))
         {
             self.choose_folder_entry(ui.ctx());
-        } else if ui
-            .ctx()
-            .input_mut(|input| input.consume_shortcut(&add_files_shortcut))
+        } else if filesystem_authority
+            && ui
+                .ctx()
+                .input_mut(|input| input.consume_shortcut(&add_files_shortcut))
         {
             self.choose_files(ui.ctx());
         }
@@ -5598,15 +5369,23 @@ impl RenamewrightApp {
         {
             self.source_query_focus_requested = true;
         }
-        let hovered_source_count = ui.ctx().input(|input| input.raw.hovered_files.len());
-        let dropped_paths = ui.ctx().input(|input| {
-            input
-                .raw
-                .dropped_files
-                .iter()
-                .map(|file| file.path().to_path_buf())
-                .collect::<Vec<_>>()
-        });
+        let hovered_source_count = if filesystem_authority {
+            ui.ctx().input(|input| input.raw.hovered_files.len())
+        } else {
+            0
+        };
+        let dropped_paths = if filesystem_authority {
+            ui.ctx().input(|input| {
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .map(|file| file.path().to_path_buf())
+                    .collect::<Vec<_>>()
+            })
+        } else {
+            Vec::new()
+        };
         if !dropped_paths.is_empty() {
             self.start_source_admission(dropped_paths, ui.ctx());
         }
@@ -5869,8 +5648,6 @@ mod tests {
     use std::collections::BTreeMap;
     use std::error::Error;
     use std::fs;
-    #[cfg(feature = "automation")]
-    use std::path::Path;
     use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -5880,9 +5657,7 @@ mod tests {
     use kittest::{NodeT as _, Queryable as _};
 
     #[cfg(feature = "automation")]
-    use super::automation::{
-        AutomationRoot, AutomationRootErrorKind, MAX_AUTOMATION_FIXTURE_BYTES,
-    };
+    use super::automation::{AutomationProfile, AutomationRoot, AutomationRootErrorKind};
     use super::{
         AccentChoice, AppearanceTheme, InterfaceDensity, KoreanFontState, LedgerMessage,
         LedgerTask, Locale, MutationTask, NativePalette, PLANNING_DEBOUNCE,
@@ -6787,7 +6562,7 @@ mod tests {
 
     #[cfg(feature = "automation")]
     #[test]
-    fn automation_workbench_without_a_fixture_matches_the_product_empty_state()
+    fn automation_workbench_with_empty_profile_matches_the_product_empty_state()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let root = AutomationRoot::open(directory.path())?;
@@ -6795,7 +6570,11 @@ mod tests {
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(
                 |ui, app| app.show(ui),
-                RenamewrightApp::new_automated(NativePalette::default(), root, None),
+                RenamewrightApp::new_automated(
+                    NativePalette::default(),
+                    root,
+                    AutomationProfile::Empty,
+                ),
             );
 
         harness.get_by_label(semantics::AUTOMATION_BANNER);
@@ -7335,7 +7114,11 @@ mod tests {
     {
         let directory = tempfile::tempdir()?;
         let root = AutomationRoot::open(directory.path())?;
-        let mut app = RenamewrightApp::new_automated(NativePalette::default(), root, None);
+        let mut app = RenamewrightApp::new_automated(
+            NativePalette::default(),
+            root,
+            AutomationProfile::Empty,
+        );
         app.appearance.theme = AppearanceTheme::Dark;
         let mut storage = MemoryStorage::default();
 
@@ -7347,146 +7130,92 @@ mod tests {
 
     #[cfg(feature = "automation")]
     #[test]
-    fn automation_root_is_exclusive_and_prepares_isolated_state() -> Result<(), Box<dyn Error>> {
+    fn automation_root_validation_is_read_only() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let root = AutomationRoot::open(directory.path())?;
+        let second = AutomationRoot::open(directory.path())?;
 
         assert_eq!(root.root(), fs::canonicalize(directory.path())?);
-        assert!(root.state_root().is_dir());
-        assert!(root.journal_root().is_dir());
-        let Err(error) = AutomationRoot::open(directory.path()) else {
-            return Err("a concurrent automation session acquired the same root".into());
-        };
-        assert_eq!(error.kind(), AutomationRootErrorKind::ConcurrentSession);
+        assert_eq!(second.root(), root.root());
+        assert_eq!(fs::read_dir(directory.path())?.count(), 0);
         Ok(())
     }
 
     #[cfg(feature = "automation")]
     #[test]
-    fn automation_fixture_reads_are_relative_and_bounded() -> Result<(), Box<dyn Error>> {
-        let directory = tempfile::tempdir()?;
-        let fixture_directory = directory.path().join("fixtures").join("nested");
-        fs::create_dir_all(&fixture_directory)?;
-        let fixture_json =
-            br#"{"schemaVersion":2,"syntheticSample":true,"prefix":"fixture_","filter":"blocked"}"#;
-        fs::write(fixture_directory.join("fixture.json"), fixture_json)?;
-        let oversized = fixture_directory.join("oversized.json");
-        fs::File::create(&oversized)?.set_len(MAX_AUTOMATION_FIXTURE_BYTES + 1)?;
-        let root = AutomationRoot::open(directory.path())?;
-
+    fn automation_profiles_are_bounded_and_path_free() -> Result<(), Box<dyn Error>> {
         assert_eq!(
-            root.read_fixture(Path::new("nested/fixture.json"))?,
-            fixture_json
+            AutomationProfile::parse("empty".as_ref())?,
+            AutomationProfile::Empty
         );
-        let fixture = root.load_fixture(Path::new("nested/fixture.json"))?;
-        assert!(fixture.synthetic_sample());
-        assert_eq!(fixture.prefix(), Some("fixture_"));
         assert_eq!(
-            fixture.filter(),
-            Some(super::automation::AutomationFilter::Blocked)
+            AutomationProfile::parse("performance".as_ref())?,
+            AutomationProfile::Performance
         );
-        for rejected in [Path::new("../fixture.json"), directory.path()] {
-            let Err(error) = root.read_fixture(rejected) else {
-                return Err("an invalid automation fixture path was accepted".into());
-            };
-            assert_eq!(error.kind(), AutomationRootErrorKind::InvalidRelativePath);
+        for rejected in ["performance.json", "../performance", "C:\\fixture.json"] {
+            let error = AutomationProfile::parse(rejected.as_ref())
+                .err()
+                .ok_or("a path-bearing automation profile was accepted")?;
+            assert_eq!(error.kind(), AutomationRootErrorKind::InvalidProfile);
         }
-        let Err(error) = root.read_fixture(Path::new("nested/oversized.json")) else {
-            return Err("an oversized automation fixture was accepted".into());
-        };
-        assert_eq!(error.kind(), AutomationRootErrorKind::FixtureTooLarge);
-        let legacy_fixture = super::automation::AutomationFixture::parse(
-            br#"{"schemaVersion":1,"prefix":"legacy_"}"#,
-        )?;
-        assert!(legacy_fixture.synthetic_sample());
-        let Err(error) = super::automation::AutomationFixture::parse(
-            br#"{"schemaVersion":2,"syntheticSample":true,"sources":["fixture.json"]}"#,
-        ) else {
-            return Err("a synthetic sample accepted real fixture sources".into());
-        };
-        assert_eq!(error.kind(), AutomationRootErrorKind::InvalidFixture);
         Ok(())
     }
 
     #[cfg(feature = "automation")]
     #[test]
-    fn automation_fixture_initializes_a_deterministic_ui_state() -> Result<(), Box<dyn Error>> {
+    fn automation_performance_profile_is_synthetic_and_read_only() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
-        fs::create_dir(directory.path().join("fixtures"))?;
-        fs::write(
-            directory.path().join("fixtures/session.json"),
-            br#"{"schemaVersion":2,"syntheticSample":true,"prefix":"fixture_","filter":"blocked"}"#,
-        )?;
         let root = AutomationRoot::open(directory.path())?;
-        let fixture = root.load_fixture(Path::new("session.json"))?;
+        let mut app = RenamewrightApp::new_automated(
+            NativePalette::default(),
+            root,
+            AutomationProfile::Performance,
+        );
+        app.tools_open = true;
+        assert!(!app.filesystem_authority_enabled());
+        assert!(app.preset_path.is_none());
+        assert!(app.journal_root.is_none());
+        assert!(app.ledger_task.is_none());
+        app.preset_name = "must-not-persist".to_owned();
+        app.save_current_preset();
+        assert!(app.presets.presets().is_empty());
+        app.start_confirmed_mutation(PendingConfirmation::Apply {
+            plan_id: 1,
+            changed_count: 1,
+        });
+        assert!(app.mutation_task.is_none());
+        assert_eq!(app.status, "Automation mode is read-only");
         let harness = Harness::builder()
             .with_size(egui::vec2(1_100.0, 720.0))
-            .build_ui_state(
-                |ui, app| app.show(ui),
-                RenamewrightApp::new_automated(NativePalette::default(), root, Some(&fixture)),
-            );
+            .build_ui_state(|ui, app| app.show(ui), app);
 
-        harness.get_by_label("Automation fixture loaded");
-        harness.get_by_label("10 shown");
-        harness.get_by_label("fixture_IMG_00997.jpg");
-        Ok(())
-    }
-
-    #[cfg(feature = "automation")]
-    #[test]
-    fn automation_fixture_admits_only_confined_real_sources() -> Result<(), Box<dyn Error>> {
-        let directory = tempfile::tempdir()?;
-        let fixtures = directory.path().join("fixtures");
-        fs::create_dir(&fixtures)?;
-        fs::write(fixtures.join("report.txt"), b"report")?;
-        fs::create_dir(fixtures.join("folder"))?;
-        fs::write(fixtures.join("folder/child.txt"), b"child")?;
-        fs::write(
-            fixtures.join("session.json"),
-            br#"{"schemaVersion":1,"prefix":"final-","sources":["report.txt","folder"]}"#,
-        )?;
-        let root = AutomationRoot::open(directory.path())?;
-        let fixture = root.load_fixture(Path::new("session.json"))?;
-        assert_eq!(fixture.sources().len(), 2);
-
-        let harness = Harness::builder()
-            .with_size(egui::vec2(1_100.0, 720.0))
-            .build_ui_state(
-                |ui, app| app.show(ui),
-                RenamewrightApp::new_automated(NativePalette::default(), root, Some(&fixture)),
-            );
-        harness.get_by_label("report.txt");
-        harness.get_by_label("final-report.txt");
-        harness.get_by_label("folder");
-        harness.get_by_label("final-folder");
-        harness.get_by_label("Automation fixture loaded · 2 sources");
-        Ok(())
-    }
-
-    #[cfg(all(feature = "automation", unix))]
-    #[test]
-    fn automation_fixture_rejects_symlink_escape() -> Result<(), Box<dyn Error>> {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::tempdir()?;
-        let outside = tempfile::tempdir()?;
-        fs::write(outside.path().join("secret.json"), b"secret")?;
-        fs::create_dir(directory.path().join("fixtures"))?;
-        symlink(outside.path(), directory.path().join("fixtures/escape"))?;
-        fs::write(
-            directory.path().join("fixtures/session.json"),
-            br#"{"schemaVersion":1,"sources":["escape/secret.json"]}"#,
-        )?;
-        let root = AutomationRoot::open(directory.path())?;
-
-        let Err(error) = root.read_fixture(Path::new("escape/secret.json")) else {
-            return Err("a symlink escaped the automation root".into());
-        };
-        assert_eq!(error.kind(), AutomationRootErrorKind::ReparsePointRejected);
-        let Err(error) = root.load_fixture(Path::new("session.json")) else {
-            return Err("a symlinked source escaped the automation root".into());
-        };
-        assert_eq!(error.kind(), AutomationRootErrorKind::ReparsePointRejected);
+        harness.get_by_label("Automation mode is read-only");
+        harness.get_by_label("10000 shown");
+        assert!(
+            harness
+                .get_by_label(semantics::ADD_FILES)
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert!(
+            harness
+                .get_by_label(semantics::ADD_FOLDER)
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert!(
+            harness
+                .get_by_label(semantics::APPLY)
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert!(
+            harness
+                .get_by_label(semantics::SAVE_PRESET)
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert_eq!(fs::read_dir(directory.path())?.count(), 0);
         Ok(())
     }
 }

@@ -417,9 +417,14 @@ fn windows_acceptance_flushes_redirected_process_streams_before_hashing() {
 
 #[test]
 fn windows_performance_acceptance_requests_the_synthetic_sample_explicitly() {
+    assert!(APP_MAIN.contains("--automation-profile"));
+    assert!(!APP_MAIN.contains("root.load_fixture"));
+    assert!(!APP_SOURCE.contains("pub fn read_fixture"));
+    assert!(APP_SOURCE.contains("Automation mode is read-only"));
+    assert!(APP_SOURCE.contains("filesystem_authority_enabled"));
     for script in [RUNTIME_ACCEPTANCE, INTERACTIVE_ACCEPTANCE] {
-        assert!(script.contains("schemaVersion = 2"));
-        assert!(script.contains("syntheticSample = $true"));
-        assert!(script.contains("--automation-fixture \"performance.json\""));
+        assert!(script.contains("--automation-profile performance"));
+        assert!(!script.contains("--automation-fixture"));
+        assert!(!script.contains("syntheticSample"));
     }
 }

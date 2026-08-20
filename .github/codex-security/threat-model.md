@@ -28,8 +28,10 @@ Protect these assets:
   they may be truncated, corrupted, replaced, duplicated, or locally modified.
 - Native confirmation is a security boundary. UI projections and automation
   receive opaque IDs and display data, never mutation authority or native paths.
-- The feature-gated automation listener and fixture loader are test-only input
-  boundaries. Production builds must exclude their markers and entry points.
+- The feature-gated automation listener and built-in path-free profiles are
+  test-only input boundaries. Automation is read-only and cannot admit native
+  sources, persist presets, create journals, or invoke filesystem mutations.
+  Production builds must exclude its markers and entry points.
 - GitHub Actions, dependency locks, packaging scripts, release tags, checksums,
   SBOM generation, and future signing credentials form the build boundary.
 

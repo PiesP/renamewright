@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use eframe::egui;
 #[cfg(feature = "automation")]
-use renamewright_app::automation::AutomationFixture;
-#[cfg(feature = "automation")]
-use renamewright_app::automation::{AUTOMATION_BIND_ADDRESS, AutomationRoot, serve_bounded};
+use renamewright_app::automation::{
+    AUTOMATION_BIND_ADDRESS, AutomationProfile, AutomationRoot, serve_bounded,
+};
 use renamewright_app::{NativePalette, RenamewrightApp, install_base_fonts};
 
 #[cfg(windows)]
@@ -56,7 +56,7 @@ fn native_palette() -> Result<NativePalette, std::io::Error> {
 #[cfg(feature = "automation")]
 struct AutomationLaunch {
     root: AutomationRoot,
-    fixture: Option<AutomationFixture>,
+    profile: AutomationProfile,
 }
 
 #[cfg(feature = "automation")]
@@ -72,27 +72,32 @@ fn automation_launch_from(
             Ok::<_, Infallible>(PathBuf::from(argument))
         })
         .map_err(|_| "the automation root argument was invalid".to_owned())?;
-    let fixture_path = arguments
-        .opt_value_from_os_str("--automation-fixture", |argument| {
+    let profile_argument = arguments
+        .opt_value_from_os_str("--automation-profile", |argument| {
             Ok::<_, Infallible>(PathBuf::from(argument))
         })
-        .map_err(|_| "the automation fixture argument was invalid".to_owned())?;
+        .map_err(|_| "the automation profile argument was invalid".to_owned())?;
+    let profile_supplied = profile_argument.is_some();
+    let profile = profile_argument
+        .map_or(Ok(AutomationProfile::Empty), |value| {
+            AutomationProfile::parse(value.as_os_str())
+        })
+        .map_err(|error| error.to_string())?;
     if !arguments.finish().is_empty() {
         return Err("Renamewright received an unsupported argument".to_owned());
     }
-    match (automation_requested, root, fixture_path) {
-        (true, Some(root), fixture_path) => {
+    match (automation_requested, root, profile, profile_supplied) {
+        (true, Some(root), profile, _) => {
             let root = AutomationRoot::open(&root).map_err(|error| error.to_string())?;
-            let fixture = fixture_path
-                .map(|path| root.load_fixture(&path))
-                .transpose()
-                .map_err(|error| error.to_string())?;
-            Ok(Some(AutomationLaunch { root, fixture }))
+            Ok(Some(AutomationLaunch { root, profile }))
         }
-        (true, None, _) => Err("automation mode requires --automation-root".to_owned()),
-        (false, Some(_), _) => Err("--automation-root requires --automation".to_owned()),
-        (false, None, Some(_)) => Err("--automation-fixture requires --automation".to_owned()),
-        (false, None, None) => Ok(None),
+        (true, None, _, _) => Err("automation mode requires --automation-root".to_owned()),
+        (false, Some(_), _, _) => Err("--automation-root requires --automation".to_owned()),
+        (false, None, _, true) => Err("--automation-profile requires --automation".to_owned()),
+        (false, None, AutomationProfile::Empty, false) => Ok(None),
+        (false, None, AutomationProfile::Performance, false) => {
+            Err("automation profile state is inconsistent".to_owned())
+        }
     }
 }
 
@@ -146,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(Box::new(RenamewrightApp::new_automated(
                     palette,
                     automation_launch.root,
-                    automation_launch.fixture.as_ref(),
+                    automation_launch.profile,
                 )));
             }
             let data_root = native_data_root();
@@ -166,10 +171,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(all(test, feature = "automation", unix))]
 mod tests {
     use std::ffi::OsString;
-    use std::fs;
     use std::os::unix::ffi::OsStringExt;
 
-    use super::automation_launch_from;
+    use super::{AutomationProfile, automation_launch_from};
 
     #[test]
     fn automation_arguments_reject_non_utf8_input_without_panicking() {
@@ -206,29 +210,48 @@ mod tests {
     }
 
     #[test]
-    fn automation_fixture_path_is_relative_to_the_explicit_root()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn automation_profile_is_path_free_and_explicit() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        fs::create_dir(directory.path().join("fixtures"))?;
-        fs::write(
-            directory.path().join("fixtures/session.json"),
-            br#"{"schemaVersion":1,"prefix":"fixture_"}"#,
-        )?;
         let arguments = pico_args::Arguments::from_vec(vec![
             OsString::from("--automation"),
             OsString::from("--automation-root"),
             directory.path().as_os_str().to_owned(),
-            OsString::from("--automation-fixture"),
-            OsString::from("session.json"),
+            OsString::from("--automation-profile"),
+            OsString::from("performance"),
         ]);
 
         let Some(launch) = automation_launch_from(arguments)? else {
             return Err("automation launch options were not retained".into());
         };
-        assert_eq!(
-            launch.fixture.as_ref().and_then(|fixture| fixture.prefix()),
-            Some("fixture_")
-        );
+        assert_eq!(launch.profile, AutomationProfile::Performance);
+        Ok(())
+    }
+
+    #[test]
+    fn automation_rejects_legacy_fixture_and_path_bearing_profile_arguments()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        for arguments in [
+            vec![
+                OsString::from("--automation"),
+                OsString::from("--automation-root"),
+                directory.path().as_os_str().to_owned(),
+                OsString::from("--automation-fixture"),
+                OsString::from("session.json"),
+            ],
+            vec![
+                OsString::from("--automation"),
+                OsString::from("--automation-root"),
+                directory.path().as_os_str().to_owned(),
+                OsString::from("--automation-profile"),
+                OsString::from("../performance.json"),
+            ],
+        ] {
+            assert!(
+                automation_launch_from(pico_args::Arguments::from_vec(arguments)).is_err(),
+                "a path-bearing automation argument was accepted"
+            );
+        }
         Ok(())
     }
 }
