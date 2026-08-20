@@ -33,9 +33,9 @@ pub use executor::{
 };
 pub use journal::{
     JOURNAL_SCHEMA_VERSION, JournalCodecError, JournalCodecErrorKind, JournalFrame,
-    JournalInspection, JournalStorageError, JournalStorageErrorKind, JournalWriter,
-    MAX_JOURNAL_FILE_BYTES, MAX_JOURNAL_PAYLOAD_BYTES, MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION,
-    decode_journal, encode_journal, inspect_journal,
+    JournalInspection, JournalSnapshotLock, JournalStorageError, JournalStorageErrorKind,
+    JournalWriter, MAX_JOURNAL_FILE_BYTES, MAX_JOURNAL_PAYLOAD_BYTES,
+    MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION, decode_journal, encode_journal, inspect_journal,
 };
 pub use ledger::{
     LedgerDiscoveryError, LedgerDiscoveryErrorKind, LedgerEntry, LedgerId, LedgerStatus,

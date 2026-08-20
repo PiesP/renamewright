@@ -10,7 +10,8 @@ use renamewright_core::{
 use crate::executor::available_temporary_name;
 use crate::{
     ExecutionFileSystem, ExecutionFsErrorKind, ExecutionOutcome, ExecutionStartError,
-    FrozenExecutionPlan, LedgerId, LedgerStatus, RenameLedger, execute_frozen_plan,
+    FrozenExecutionPlan, JournalSnapshotLock, LedgerId, LedgerStatus, RenameLedger,
+    execute_frozen_plan,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +126,7 @@ pub struct PreparedUndo {
     original_plan_id: PlanId,
     plan: FrozenExecutionPlan,
     journal_path: std::path::PathBuf,
+    _authorization_lock: JournalSnapshotLock,
 }
 
 impl PreparedUndo {
@@ -178,10 +180,22 @@ pub fn inspect_undo_transaction_snapshot<F: ExecutionFileSystem + ?Sized>(
         .iter()
         .map(|frame| frame.record().clone())
         .collect::<Vec<_>>();
-    if replay_journal(&records) != Ok(JournalStatus::Completed) {
+    let inspection = inspect_undo_records(ledger_id, &records, filesystem)?;
+    Ok(UndoTransactionSnapshot {
+        inspection,
+        records,
+    })
+}
+
+fn inspect_undo_records<F: ExecutionFileSystem + ?Sized>(
+    ledger_id: LedgerId,
+    records: &[JournalRecord],
+    filesystem: &F,
+) -> Result<UndoTransactionInspection, UndoError> {
+    if replay_journal(records) != Ok(JournalStatus::Completed) {
         return Err(UndoError::new(None, UndoErrorKind::InvalidProtocol));
     }
-    let (original_plan_id, entries) = header(&records)?;
+    let (original_plan_id, entries) = header(records)?;
     if entries
         .iter()
         .any(|entry| entry.undo_of_plan_id().is_some())
@@ -219,14 +233,11 @@ pub fn inspect_undo_transaction_snapshot<F: ExecutionFileSystem + ?Sized>(
         }
     }
 
-    Ok(UndoTransactionSnapshot {
-        inspection: UndoTransactionInspection {
-            ledger_id,
-            original_plan_id,
-            source_count: entries.len(),
-            readiness,
-        },
-        records,
+    Ok(UndoTransactionInspection {
+        ledger_id,
+        original_plan_id,
+        source_count: entries.len(),
+        readiness,
     })
 }
 
@@ -248,6 +259,14 @@ pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
 ) -> Result<PreparedUndo, UndoError> {
     let inspection = snapshot.inspection();
     if !inspection.undo_available() {
+        return Err(UndoError::new(None, UndoErrorKind::ActionUnavailable));
+    }
+    let original_journal_path = ledger
+        .journal_path(inspection.ledger_id())
+        .ok_or_else(|| UndoError::new(None, UndoErrorKind::JournalUnavailable))?;
+    let authorization_lock = JournalSnapshotLock::open(original_journal_path, &snapshot.records)
+        .map_err(|_| UndoError::new(None, UndoErrorKind::JournalDamaged))?;
+    if inspect_undo_records(inspection.ledger_id(), &snapshot.records, filesystem)? != inspection {
         return Err(UndoError::new(None, UndoErrorKind::ActionUnavailable));
     }
     let (_, original_entries) = header(&snapshot.records)?;
@@ -298,6 +317,7 @@ pub fn prepare_undo_transaction_from_snapshot<F: ExecutionFileSystem + ?Sized>(
         original_plan_id: inspection.original_plan_id(),
         plan,
         journal_path,
+        _authorization_lock: authorization_lock,
     })
 }
 
@@ -310,12 +330,14 @@ where
     F: ExecutionFileSystem + ?Sized,
     C: Fn() -> bool,
 {
-    execute_frozen_plan(
-        prepared.plan,
-        filesystem,
-        &prepared.journal_path,
-        should_cancel,
-    )
+    let PreparedUndo {
+        plan,
+        journal_path,
+        _authorization_lock,
+        ..
+    } = prepared;
+    let _authorization_lock = _authorization_lock;
+    execute_frozen_plan(plan, filesystem, &journal_path, should_cancel)
 }
 
 fn header(records: &[JournalRecord]) -> Result<(PlanId, &[JournalEntry]), UndoError> {

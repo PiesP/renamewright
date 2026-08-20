@@ -21,8 +21,7 @@ use renamewright_platform::{
     PlanningSnapshot, PreparedStepDisposition, RecoveryAction, RecoveryReadiness,
     RecoveryTransactionInspection, RecoveryTransactionSnapshot, RenameLedger, SourceRegistry,
     UndoBlockReason, UndoReadiness, UndoTransactionInspection, execute_frozen_plan,
-    execute_prepared_undo, freeze_execution_plan, inspect_recovery_transaction,
-    inspect_recovery_transaction_snapshot, inspect_undo_transaction,
+    execute_prepared_undo, freeze_execution_plan, inspect_recovery_transaction_snapshot,
     inspect_undo_transaction_snapshot, prepare_undo_transaction_from_snapshot,
     reconcile_prepared_step_from_snapshot, recover_transaction_from_snapshot,
 };
@@ -37,8 +36,42 @@ pub struct ApplicationService {
     latest_plan: Mutex<Option<StoredPlan>>,
     mutation_lock: Mutex<()>,
     recovery_control: Mutex<RecoveryControl>,
+    journal_authorization: Mutex<JournalAuthorizationState>,
     ledger: Mutex<RenameLedger>,
     journal_root: Mutex<Option<PathBuf>>,
+}
+
+#[derive(Debug)]
+enum JournalAuthorization {
+    Recovery(RecoveryTransactionSnapshot),
+    Undo(renamewright_platform::UndoTransactionSnapshot),
+}
+
+#[derive(Debug, Default)]
+struct JournalAuthorizationState {
+    next_id: u64,
+    active: Option<(u64, JournalAuthorization)>,
+}
+
+impl JournalAuthorizationState {
+    fn issue(&mut self, authorization: JournalAuthorization) -> Result<u64, ()> {
+        let authorization_id = self.next_id.max(1);
+        self.next_id = authorization_id.checked_add(1).ok_or(())?;
+        self.active = Some((authorization_id, authorization));
+        Ok(authorization_id)
+    }
+
+    fn take(&mut self, authorization_id: u64) -> Option<JournalAuthorization> {
+        let (active_id, _) = self.active.as_ref()?;
+        if *active_id != authorization_id {
+            return None;
+        }
+        self.active.take().map(|(_, authorization)| authorization)
+    }
+
+    fn invalidate(&mut self) {
+        self.active = None;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1200,6 +1233,7 @@ impl Default for ApplicationService {
             latest_plan: Mutex::new(None),
             mutation_lock: Mutex::new(()),
             recovery_control: Mutex::new(RecoveryControl::default()),
+            journal_authorization: Mutex::new(JournalAuthorizationState::default()),
             ledger: Mutex::new(RenameLedger::default()),
             journal_root: Mutex::new(None),
         }
@@ -1212,6 +1246,15 @@ impl ApplicationService {
     }
 
     pub fn initialize(&self, journal_root: &Path) -> Result<(), ApplicationServiceError> {
+        self.journal_authorization
+            .lock()
+            .map_err(|_| {
+                ApplicationServiceError::new(
+                    ApplicationServiceErrorKind::StateUnavailable,
+                    "the journal authorization state is unavailable",
+                )
+            })?
+            .invalidate();
         std::fs::create_dir_all(journal_root).map_err(|_| {
             ApplicationServiceError::new(
                 ApplicationServiceErrorKind::JournalPreparationFailed,
@@ -1389,6 +1432,15 @@ impl ApplicationService {
     }
 
     pub fn list_ledger(&self) -> Result<Vec<LedgerEntryDto>, ApplicationServiceError> {
+        self.journal_authorization
+            .lock()
+            .map_err(|_| {
+                ApplicationServiceError::new(
+                    ApplicationServiceErrorKind::StateUnavailable,
+                    "the journal authorization state is unavailable",
+                )
+            })?
+            .invalidate();
         let mut ledger = self.ledger.lock().map_err(|_| {
             ApplicationServiceError::new(
                 ApplicationServiceErrorKind::StateUnavailable,
@@ -1434,14 +1486,38 @@ impl ApplicationService {
                 "the rename ledger could not be refreshed",
             )
         })?;
-        inspect_recovery_transaction(&ledger, LedgerId::from_value(ledger_id), filesystem)
-            .map(RecoveryInspectionDto::from)
+        let snapshot = inspect_recovery_transaction_snapshot(
+            &ledger,
+            LedgerId::from_value(ledger_id),
+            filesystem,
+        )
+        .map_err(|_| {
+            ApplicationServiceError::new(
+                ApplicationServiceErrorKind::RecoveryInspectionFailed,
+                "the recovery state could not be inspected",
+            )
+        })?;
+        let inspection = snapshot.inspection();
+        let authorization_id = self
+            .journal_authorization
+            .lock()
             .map_err(|_| {
                 ApplicationServiceError::new(
-                    ApplicationServiceErrorKind::RecoveryInspectionFailed,
-                    "the recovery state could not be inspected",
+                    ApplicationServiceErrorKind::StateUnavailable,
+                    "the journal authorization state is unavailable",
                 )
-            })
+            })?
+            .issue(JournalAuthorization::Recovery(snapshot))
+            .map_err(|()| {
+                ApplicationServiceError::new(
+                    ApplicationServiceErrorKind::StateUnavailable,
+                    "the journal authorization sequence is exhausted",
+                )
+            })?;
+        Ok(RecoveryInspectionDto::authorized(
+            inspection,
+            authorization_id,
+        ))
     }
 
     pub fn inspect_undo<F>(
@@ -1459,9 +1535,17 @@ impl ApplicationService {
         ledger
             .refresh()
             .map_err(|_| UndoCommandErrorKind::LedgerRefreshFailed)?;
-        inspect_undo_transaction(&ledger, LedgerId::from_value(ledger_id), filesystem)
-            .map(UndoInspectionDto::from)
-            .map_err(|_| UndoCommandErrorDto::from(UndoCommandErrorKind::ActionUnavailable))
+        let snapshot =
+            inspect_undo_transaction_snapshot(&ledger, LedgerId::from_value(ledger_id), filesystem)
+                .map_err(|_| UndoCommandErrorDto::from(UndoCommandErrorKind::ActionUnavailable))?;
+        let inspection = snapshot.inspection();
+        let authorization_id = self
+            .journal_authorization
+            .lock()
+            .map_err(|_| UndoCommandErrorDto::from(UndoCommandErrorKind::StateUnavailable))?
+            .issue(JournalAuthorization::Undo(snapshot))
+            .map_err(|()| UndoCommandErrorDto::from(UndoCommandErrorKind::StateUnavailable))?;
+        Ok(UndoInspectionDto::authorized(inspection, authorization_id))
     }
 
     pub fn apply_recovery_action<F, C>(
@@ -1632,6 +1716,7 @@ impl LedgerEntryDto {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoInspectionDto {
+    authorization_id: u64,
     ledger_id: u64,
     original_plan_id: u64,
     source_count: usize,
@@ -1719,6 +1804,7 @@ impl From<UndoCommandErrorKind> for UndoCommandErrorDto {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryInspectionDto {
+    authorization_id: u64,
     ledger_id: u64,
     plan_id: u64,
     source_generation: u64,
@@ -1732,6 +1818,17 @@ pub struct RecoveryInspectionDto {
 }
 
 impl RecoveryInspectionDto {
+    fn authorized(inspection: RecoveryTransactionInspection, authorization_id: u64) -> Self {
+        let mut dto = Self::from(inspection);
+        dto.authorization_id = authorization_id;
+        dto
+    }
+
+    #[must_use]
+    pub const fn authorization_id(&self) -> u64 {
+        self.authorization_id
+    }
+
     #[must_use]
     pub const fn ledger_id(&self) -> u64 {
         self.ledger_id
@@ -1794,6 +1891,7 @@ pub enum RecoveryCommandAction {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryExpectationDto {
+    authorization_id: u64,
     ledger_id: u64,
     plan_id: u64,
     source_generation: u64,
@@ -1819,6 +1917,7 @@ impl RecoveryRequestDto {
         Self {
             action,
             inspection: RecoveryExpectationDto {
+                authorization_id: inspection.authorization_id,
                 ledger_id: inspection.ledger_id,
                 plan_id: inspection.plan_id,
                 source_generation: inspection.source_generation,
@@ -1890,6 +1989,17 @@ impl RecoveryCommandErrorDto {
 }
 
 impl UndoInspectionDto {
+    fn authorized(inspection: UndoTransactionInspection, authorization_id: u64) -> Self {
+        let mut dto = Self::from(inspection);
+        dto.authorization_id = authorization_id;
+        dto
+    }
+
+    #[must_use]
+    pub const fn authorization_id(&self) -> u64 {
+        self.authorization_id
+    }
+
     #[must_use]
     pub const fn ledger_id(&self) -> u64 {
         self.ledger_id
@@ -2429,6 +2539,7 @@ impl From<UndoTransactionInspection> for UndoInspectionDto {
             UndoReadiness::Blocked { reason } => ("blocked", Some(undo_block_reason_name(reason))),
         };
         Self {
+            authorization_id: 0,
             ledger_id: inspection.ledger_id().value(),
             original_plan_id: inspection.original_plan_id().value(),
             source_count: inspection.source_count(),
@@ -2450,6 +2561,7 @@ impl From<RecoveryTransactionInspection> for RecoveryInspectionDto {
             RecoveryReadiness::Blocked => ("blocked", None),
         };
         Self {
+            authorization_id: 0,
             ledger_id: inspection.ledger_id().value(),
             plan_id: inspection.plan_id().value(),
             source_generation: inspection.source_generation(),
@@ -2460,24 +2572,6 @@ impl From<RecoveryTransactionInspection> for RecoveryInspectionDto {
             resume_available: inspection.resume_available(),
             rollback_available: inspection.rollback_available(),
             reconcile_available: inspection.reconcile_available(),
-        }
-    }
-}
-
-impl From<RecoveryTransactionInspection> for RecoveryExpectationDto {
-    fn from(inspection: RecoveryTransactionInspection) -> Self {
-        let dto = RecoveryInspectionDto::from(inspection);
-        Self {
-            ledger_id: dto.ledger_id,
-            plan_id: dto.plan_id,
-            source_generation: dto.source_generation,
-            direction: dto.direction.to_owned(),
-            step_index: dto.step_index,
-            readiness: dto.readiness.to_owned(),
-            disposition: dto.disposition.map(str::to_owned),
-            resume_available: dto.resume_available,
-            rollback_available: dto.rollback_available,
-            reconcile_available: dto.reconcile_available,
         }
     }
 }
@@ -2499,14 +2593,32 @@ where
             return Err(RecoveryCommandErrorKind::StateUnavailable);
         }
     };
-    let ledger_id = LedgerId::from_value(request.inspection.ledger_id);
-    let inspection = {
-        let mut ledger = state
-            .ledger
+    let authorization_id = request.inspection.authorization_id;
+    let snapshot = {
+        let authorization = state
+            .journal_authorization
             .lock()
-            .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
-        validate_recovery_expectation(&mut ledger, request, ledger_id, filesystem)?.inspection()
+            .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?
+            .take(authorization_id)
+            .ok_or(RecoveryCommandErrorKind::InspectionChanged)?;
+        match authorization {
+            JournalAuthorization::Recovery(snapshot) => snapshot,
+            JournalAuthorization::Undo(_) => {
+                return Err(RecoveryCommandErrorKind::InspectionChanged);
+            }
+        }
     };
+    let inspection = snapshot.inspection();
+    let expected = RecoveryRequestDto::new(
+        request.action,
+        &RecoveryInspectionDto::authorized(inspection, authorization_id),
+    );
+    if expected.inspection != request.inspection {
+        return Err(RecoveryCommandErrorKind::InspectionChanged);
+    }
+    if !recovery_action_is_available(request.action, inspection) {
+        return Err(RecoveryCommandErrorKind::ActionUnavailable);
+    }
     if !confirm(request.action, inspection) {
         let mut ledger = state
             .ledger
@@ -2526,7 +2638,6 @@ where
         .ledger
         .lock()
         .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
-    let snapshot = validate_recovery_expectation(&mut ledger, request, ledger_id, filesystem)?;
     let recovery_session = RecoverySession::begin(
         &state.recovery_control,
         request.action == RecoveryCommandAction::Resume
@@ -2630,15 +2741,30 @@ where
         Err(TryLockError::WouldBlock) => return Err(UndoCommandErrorKind::Busy),
         Err(TryLockError::Poisoned(_)) => return Err(UndoCommandErrorKind::StateUnavailable),
     };
-    let ledger_id = LedgerId::from_value(request.inspection.ledger_id);
     let snapshot = {
-        let mut ledger = state
-            .ledger
+        let authorization = state
+            .journal_authorization
             .lock()
-            .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
-        validate_undo_expectation(&mut ledger, request, ledger_id, filesystem)?
+            .map_err(|_| UndoCommandErrorKind::StateUnavailable)?
+            .take(request.inspection.authorization_id)
+            .ok_or(UndoCommandErrorKind::InspectionChanged)?;
+        match authorization {
+            JournalAuthorization::Undo(snapshot) => snapshot,
+            JournalAuthorization::Recovery(_) => {
+                return Err(UndoCommandErrorKind::InspectionChanged);
+            }
+        }
     };
-    if !confirm(snapshot.inspection()) {
+    let inspection = snapshot.inspection();
+    if UndoInspectionDto::authorized(inspection, request.inspection.authorization_id)
+        != request.inspection
+    {
+        return Err(UndoCommandErrorKind::InspectionChanged);
+    }
+    if !inspection.undo_available() {
+        return Err(UndoCommandErrorKind::ActionUnavailable);
+    }
+    if !confirm(inspection) {
         let mut ledger = state
             .ledger
             .lock()
@@ -2657,7 +2783,6 @@ where
         .ledger
         .lock()
         .map_err(|_| UndoCommandErrorKind::StateUnavailable)?;
-    let snapshot = validate_undo_expectation(&mut ledger, request, ledger_id, filesystem)?;
     let plan_id = allocate_transaction_plan_id(state, &ledger)?;
     let prepared = prepare_undo_transaction_from_snapshot(&ledger, snapshot, plan_id, filesystem)
         .map_err(|_| UndoCommandErrorKind::InspectionChanged)?;
@@ -2680,30 +2805,6 @@ where
     })
 }
 
-fn validate_undo_expectation<F>(
-    ledger: &mut RenameLedger,
-    request: &UndoRequestDto,
-    ledger_id: LedgerId,
-    filesystem: &F,
-) -> Result<renamewright_platform::UndoTransactionSnapshot, UndoCommandErrorKind>
-where
-    F: ExecutionFileSystem + ?Sized,
-{
-    ledger
-        .refresh()
-        .map_err(|_| UndoCommandErrorKind::LedgerRefreshFailed)?;
-    let snapshot = inspect_undo_transaction_snapshot(ledger, ledger_id, filesystem)
-        .map_err(|_| UndoCommandErrorKind::InspectionChanged)?;
-    let inspection = snapshot.inspection();
-    if UndoInspectionDto::from(inspection) != request.inspection {
-        return Err(UndoCommandErrorKind::InspectionChanged);
-    }
-    if !inspection.undo_available() {
-        return Err(UndoCommandErrorKind::ActionUnavailable);
-    }
-    Ok(snapshot)
-}
-
 fn allocate_transaction_plan_id(
     state: &ApplicationService,
     ledger: &RenameLedger,
@@ -2721,30 +2822,6 @@ fn allocate_transaction_plan_id(
         .checked_add(1)
         .ok_or(UndoCommandErrorKind::PlanSequenceExhausted)?;
     Ok(PlanId::new(value))
-}
-
-fn validate_recovery_expectation<F>(
-    ledger: &mut RenameLedger,
-    request: &RecoveryRequestDto,
-    ledger_id: LedgerId,
-    filesystem: &F,
-) -> Result<RecoveryTransactionSnapshot, RecoveryCommandErrorKind>
-where
-    F: ExecutionFileSystem + ?Sized,
-{
-    ledger
-        .refresh()
-        .map_err(|_| RecoveryCommandErrorKind::LedgerRefreshFailed)?;
-    let snapshot = inspect_recovery_transaction_snapshot(ledger, ledger_id, filesystem)
-        .map_err(|_| RecoveryCommandErrorKind::InspectionChanged)?;
-    let inspection = snapshot.inspection();
-    if RecoveryExpectationDto::from(inspection) != request.inspection {
-        return Err(RecoveryCommandErrorKind::InspectionChanged);
-    }
-    if !recovery_action_is_available(request.action, inspection) {
-        return Err(RecoveryCommandErrorKind::ActionUnavailable);
-    }
-    Ok(snapshot)
 }
 
 fn request_recovery_cancellation(
@@ -3201,28 +3278,22 @@ const fn undo_block_reason_name(reason: UndoBlockReason) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
-    use std::cell::{Cell, RefCell};
-    use std::error::Error;
-    use std::ffi::OsString;
-    use std::fs;
-    #[cfg(target_os = "linux")]
-    use std::path::{Path, PathBuf};
-    #[cfg(target_os = "linux")]
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[cfg(target_os = "linux")]
-    use renamewright_core::{ExecutionIdentity, RenameRule, build_plan_with_environment};
     use renamewright_core::{
         ParentId, PlanId, SourceId, SourceSnapshot, TargetPolicy, ValidationEnvironment,
         build_plan_with_rule_pipeline_overrides_and_environment,
     };
     #[cfg(target_os = "linux")]
+    use renamewright_core::{RenameRule, build_plan_with_environment};
+    #[cfg(target_os = "linux")]
     use renamewright_platform::{
-        ExecutionFileSystem, ExecutionFsError, ExecutionFsErrorKind, ExecutionOutcome,
-        LinuxExecutionFileSystem, execute_frozen_plan, freeze_execution_plan,
-        inspect_recovery_transaction, inspect_undo_transaction,
+        ExecutionOutcome, LinuxExecutionFileSystem, execute_frozen_plan, freeze_execution_plan,
+        inspect_recovery_transaction,
     };
+    #[cfg(target_os = "linux")]
+    use std::cell::{Cell, RefCell};
+    use std::error::Error;
+    use std::ffi::OsString;
+    use std::fs;
 
     use super::{
         ApplicationService, ApplicationServiceErrorKind, CaseModeDto, CharacterClassDto,
@@ -3237,46 +3308,11 @@ mod tests {
     };
 
     #[cfg(target_os = "linux")]
-    struct JournalSwappingFileSystem {
-        inner: LinuxExecutionFileSystem,
-        journal_path: PathBuf,
-        replacement: Vec<u8>,
-        identity_calls: AtomicUsize,
-    }
-
-    #[cfg(target_os = "linux")]
-    impl ExecutionFileSystem for JournalSwappingFileSystem {
-        fn identity(
-            &self,
-            parent: &Path,
-            native_name: &std::ffi::OsStr,
-        ) -> Result<ExecutionIdentity, ExecutionFsError> {
-            let identity = self.inner.identity(parent, native_name);
-            if self.identity_calls.fetch_add(1, Ordering::SeqCst) == 3
-                && fs::write(&self.journal_path, &self.replacement).is_err()
-            {
-                return Err(ExecutionFsError::from_kind(ExecutionFsErrorKind::IoFailure));
-            }
-            identity
-        }
-
-        fn rename_no_replace(
-            &self,
-            parent: &Path,
-            source_name: &std::ffi::OsStr,
-            target_name: &std::ffi::OsStr,
-            expected_identity: ExecutionIdentity,
-        ) -> Result<ExecutionIdentity, ExecutionFsError> {
-            self.inner
-                .rename_no_replace(parent, source_name, target_name, expected_identity)
-        }
-    }
-    #[cfg(target_os = "linux")]
     use super::{
         PrepareExecutionError, RecoveryCommandAction, RecoveryCommandErrorKind,
-        RecoveryExpectationDto, RecoveryInspectionDto, RecoveryRequestDto, RecoverySession,
-        UndoCommandErrorKind, UndoInspectionDto, UndoRequestDto, perform_recovery_request,
-        perform_undo_request, prepare_latest_execution, request_confirmed_cancellation,
+        RecoveryInspectionDto, RecoveryRequestDto, RecoverySession, UndoCommandErrorKind,
+        UndoRequestDto, perform_recovery_request, perform_undo_request, prepare_latest_execution,
+        request_confirmed_cancellation,
     };
 
     #[test]
@@ -4422,27 +4458,29 @@ mod tests {
         let state = ApplicationService::default();
         *state.ledger.lock().map_err(|_| "ledger lock failed")? =
             renamewright_platform::RenameLedger::discover(directory.path())?;
-        let inspection = {
+        let ledger_id = {
             let ledger = state.ledger.lock().map_err(|_| "ledger lock failed")?;
-            let ledger_id = ledger
+            ledger
                 .entries()
                 .next()
                 .ok_or("ledger was empty")?
-                .ledger_id();
-            inspect_recovery_transaction(&ledger, ledger_id, &filesystem)?
+                .ledger_id()
         };
-        let request = RecoveryRequestDto {
-            action: RecoveryCommandAction::Resume,
-            inspection: RecoveryExpectationDto::from(inspection),
-        };
+        let inspection = state.inspect_recovery(ledger_id.value(), &filesystem)?;
+        let request = RecoveryRequestDto::new(RecoveryCommandAction::Resume, &inspection);
 
         let cancelled = perform_recovery_request(&state, &request, &filesystem, |_, _| false)
             .map_err(|_| "cancelled request failed")?;
         assert!(!cancelled.performed);
         assert_eq!(cancelled.outcome, "cancelled");
         assert!(source.exists());
+        assert_eq!(
+            perform_recovery_request(&state, &request, &filesystem, |_, _| true).err(),
+            Some(RecoveryCommandErrorKind::InspectionChanged)
+        );
 
-        let mut stale = request.clone();
+        let inspection = state.inspect_recovery(ledger_id.value(), &filesystem)?;
+        let mut stale = RecoveryRequestDto::new(RecoveryCommandAction::Resume, &inspection);
         stale.inspection.step_index = Some(usize::MAX);
         let confirmation_called = Cell::new(false);
         let error = perform_recovery_request(&state, &stale, &filesystem, |_, _| {
@@ -4457,6 +4495,8 @@ mod tests {
         let moved_source = directory.path().join("moved-during-confirmation.txt");
         let ledger_available_during_confirmation = Cell::new(false);
         let move_succeeded = Cell::new(false);
+        let inspection = state.inspect_recovery(ledger_id.value(), &filesystem)?;
+        let request = RecoveryRequestDto::new(RecoveryCommandAction::Resume, &inspection);
         let result = perform_recovery_request(&state, &request, &filesystem, |_, _| {
             ledger_available_during_confirmation.set(state.ledger.try_lock().is_ok());
             move_succeeded.set(fs::rename(&source, &moved_source).is_ok());
@@ -4467,9 +4507,11 @@ mod tests {
         let error = result
             .err()
             .ok_or("a changed post-confirmation inspection was accepted")?;
-        assert_eq!(error, RecoveryCommandErrorKind::InspectionChanged);
+        assert_eq!(error, RecoveryCommandErrorKind::RecoveryFailed);
         fs::rename(&moved_source, &source)?;
 
+        let inspection = state.inspect_recovery(ledger_id.value(), &filesystem)?;
+        let request = RecoveryRequestDto::new(RecoveryCommandAction::Resume, &inspection);
         let completed = perform_recovery_request(&state, &request, &filesystem, |_, _| true)
             .map_err(|_| "confirmed request failed")?;
         assert!(completed.performed);
@@ -4537,27 +4579,19 @@ mod tests {
         let state = ApplicationService::default();
         *state.ledger.lock().map_err(|_| "ledger lock failed")? =
             renamewright_platform::RenameLedger::discover(authorized_directory.path())?;
-        let inspection = {
+        let ledger_id = {
             let ledger = state.ledger.lock().map_err(|_| "ledger lock failed")?;
-            let ledger_id = ledger
+            ledger
                 .entries()
                 .next()
                 .ok_or("ledger was empty")?
-                .ledger_id();
-            inspect_recovery_transaction(&ledger, ledger_id, &plain_filesystem)?
+                .ledger_id()
         };
-        let request = RecoveryRequestDto {
-            action: RecoveryCommandAction::Resume,
-            inspection: RecoveryExpectationDto::from(inspection),
-        };
-        let swapping_filesystem = JournalSwappingFileSystem {
-            inner: LinuxExecutionFileSystem::new(),
-            journal_path,
-            replacement,
-            identity_calls: AtomicUsize::new(0),
-        };
+        let inspection = state.inspect_recovery(ledger_id.value(), &plain_filesystem)?;
+        let request = RecoveryRequestDto::new(RecoveryCommandAction::Resume, &inspection);
+        fs::write(journal_path, replacement)?;
 
-        let error = perform_recovery_request(&state, &request, &swapping_filesystem, |_, _| true)
+        let error = perform_recovery_request(&state, &request, &plain_filesystem, |_, _| true)
             .err()
             .ok_or("a post-confirmation journal substitution reached mutation")?;
 
@@ -4610,18 +4644,18 @@ mod tests {
         let state = ApplicationService::default();
         *state.ledger.lock().map_err(|_| "ledger lock failed")? =
             renamewright_platform::RenameLedger::discover(directory.path())?;
-        let inspection = {
+        let ledger_id = {
             let ledger = state.ledger.lock().map_err(|_| "ledger lock failed")?;
-            let ledger_id = ledger
+            ledger
                 .entries()
                 .next()
                 .ok_or("ledger was empty")?
-                .ledger_id();
-            inspect_undo_transaction(&ledger, ledger_id, &filesystem)?
+                .ledger_id()
         };
-        let request = UndoRequestDto {
-            inspection: UndoInspectionDto::from(inspection),
-        };
+        let inspection = state
+            .inspect_undo(ledger_id.value(), &filesystem)
+            .map_err(|_| "undo inspection failed")?;
+        let request = UndoRequestDto::new(inspection);
         let serialized = serde_json::to_string(&request.inspection)?;
         assert!(serialized.contains("\"undoAvailable\":true"));
         assert!(!serialized.contains("private-source"));
@@ -4638,8 +4672,15 @@ mod tests {
                 .join("private-final-private-source.txt")
                 .exists()
         );
+        assert_eq!(
+            perform_undo_request(&state, &request, &filesystem, |_| true).err(),
+            Some(UndoCommandErrorKind::InspectionChanged)
+        );
 
-        let mut stale = request.clone();
+        let inspection = state
+            .inspect_undo(ledger_id.value(), &filesystem)
+            .map_err(|_| "undo inspection failed")?;
+        let mut stale = UndoRequestDto::new(inspection);
         stale.inspection.source_count = usize::MAX;
         let confirmation_called = Cell::new(false);
         let error = perform_undo_request(&state, &stale, &filesystem, |_| {
@@ -4653,6 +4694,10 @@ mod tests {
 
         let ledger_available_during_confirmation = Cell::new(false);
         let occupant_created = Cell::new(false);
+        let inspection = state
+            .inspect_undo(ledger_id.value(), &filesystem)
+            .map_err(|_| "undo inspection failed")?;
+        let request = UndoRequestDto::new(inspection);
         let result = perform_undo_request(&state, &request, &filesystem, |_| {
             ledger_available_during_confirmation.set(state.ledger.try_lock().is_ok());
             occupant_created.set(fs::write(&source, b"occupant").is_ok());
@@ -4663,6 +4708,10 @@ mod tests {
         assert_eq!(result.err(), Some(UndoCommandErrorKind::InspectionChanged));
         fs::remove_file(&source)?;
 
+        let inspection = state
+            .inspect_undo(ledger_id.value(), &filesystem)
+            .map_err(|_| "undo inspection failed")?;
+        let request = UndoRequestDto::new(inspection);
         let completed = perform_undo_request(&state, &request, &filesystem, |_| true)
             .map_err(|_| "confirmed undo request failed")?;
         assert!(completed.performed);

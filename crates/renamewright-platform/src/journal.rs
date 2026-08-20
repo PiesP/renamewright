@@ -149,6 +149,7 @@ pub enum JournalStorageErrorKind {
     ResumeProtocol { kind: JournalReplayErrorKind },
     ResumeVersion { version: u16 },
     ResumeTerminal,
+    SnapshotChanged,
     HeaderAfterStart,
     RecordAfterTerminal,
     Codec { kind: JournalCodecErrorKind },
@@ -195,6 +196,78 @@ impl Error for JournalStorageError {}
 #[derive(Debug)]
 pub struct JournalWriter {
     appender: DurableAppender<File>,
+}
+
+#[derive(Debug)]
+pub struct JournalSnapshotLock {
+    _file: File,
+}
+
+impl JournalSnapshotLock {
+    pub fn open(
+        path: &Path,
+        expected_records: &[JournalRecord],
+    ) -> Result<Self, JournalStorageError> {
+        let mut file = open_existing_journal_no_follow(path).map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::OpenFailed {
+                    io_kind: error.kind(),
+                },
+            )
+        })?;
+        file.try_lock().map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::LockFailed {
+                    io_kind: io::Error::from(error).kind(),
+                },
+            )
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeReadFailed {
+                    io_kind: error.kind(),
+                },
+            )
+        })?;
+        if !metadata.is_file() || metadata.len() > MAX_JOURNAL_FILE_BYTES {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::ResumeTooLarge,
+            ));
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(MAX_JOURNAL_FILE_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                JournalStorageError::new(
+                    0,
+                    JournalStorageErrorKind::ResumeReadFailed {
+                        io_kind: error.kind(),
+                    },
+                )
+            })?;
+        let frames = decode_journal(&bytes).map_err(|error| {
+            JournalStorageError::new(
+                u64::try_from(error.frame_index()).unwrap_or(u64::MAX),
+                JournalStorageErrorKind::ResumeCodec { kind: error.kind() },
+            )
+        })?;
+        let records = frames
+            .into_iter()
+            .map(JournalFrame::into_record)
+            .collect::<Vec<_>>();
+        if records != expected_records {
+            return Err(JournalStorageError::new(
+                0,
+                JournalStorageErrorKind::SnapshotChanged,
+            ));
+        }
+        Ok(Self { _file: file })
+    }
 }
 
 impl JournalWriter {
