@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
+#[cfg(not(windows))]
+use std::io::Write;
 use std::path::Path;
 #[cfg(not(windows))]
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const ROOT_MANIFEST: &str = include_str!("../../../Cargo.toml");
 const APP_MANIFEST: &str = include_str!("../Cargo.toml");
@@ -35,6 +37,8 @@ const CODEX_SECURITY_THREAT_MODEL: &str =
     include_str!("../../../.github/codex-security/threat-model.md");
 const CODEX_SECURITY_SCAN_PROMPT: &str = include_str!("../../../.github/codex-security/scan.md");
 const CODEX_SECURITY_HELPER: &str = include_str!("../../../scripts/security/codex-security.sh");
+const SEMGREP_SARIF_FILTER: &str =
+    include_str!("../../../scripts/security/filter-semgrep-sarif.jq");
 const PRE_COMMIT_HOOK: &str = include_str!("../../../.githooks/pre-commit");
 const DEPENDABOT_CONFIG: &str = include_str!("../../../.github/dependabot.yaml");
 
@@ -142,6 +146,44 @@ fn hosted_gates_are_cargo_only() {
     assert!(CI_WORKFLOW.contains("--example large_batch_budget"));
     assert!(SECURITY_WORKFLOW.contains("language: [actions, rust]"));
     assert!(SECURITY_WORKFLOW.contains("--config=/src/.github/codex-security/osv-scanner.toml"));
+}
+
+#[test]
+fn semgrep_upload_excludes_only_source_reviewed_suppressions()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert!(SECURITY_WORKFLOW.contains("name: Exclude source-reviewed Semgrep suppressions"));
+    assert!(
+        SECURITY_WORKFLOW
+            .contains("jq --from-file scripts/security/filter-semgrep-sarif.jq semgrep.sarif")
+    );
+    assert!(SECURITY_WORKFLOW.contains("sarif_file: ${{ runner.temp }}/semgrep-upload.sarif"));
+    assert!(SEMGREP_SARIF_FILTER.contains(".kind == \"inSource\""));
+
+    #[cfg(not(windows))]
+    {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let filter = repository_root.join("scripts/security/filter-semgrep-sarif.jq");
+        let fixture = r#"{"runs":[{"results":[{"ruleId":"reviewed","suppressions":[{"kind":"inSource"}]},{"ruleId":"external","suppressions":[{"kind":"external"}]},{"ruleId":"real"}]}]}"#;
+        let mut jq = Command::new("jq")
+            .arg("--compact-output")
+            .arg("--from-file")
+            .arg(filter)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        jq.stdin
+            .take()
+            .ok_or("jq stdin is unavailable")?
+            .write_all(fixture.as_bytes())?;
+        let output = jq.wait_with_output()?;
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout)?.trim(),
+            r#"{"runs":[{"results":[{"ruleId":"external","suppressions":[{"kind":"external"}]},{"ruleId":"real"}]}]}"#
+        );
+    }
+
+    Ok(())
 }
 
 #[test]
