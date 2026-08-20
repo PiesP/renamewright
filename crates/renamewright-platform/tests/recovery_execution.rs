@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io;
+use std::path::Path;
 
 use renamewright_core::{
     JournalRecord, JournalStatus, PlanId, RenameRule, RollbackCause, TargetPolicy,
@@ -32,6 +33,13 @@ fn is_mandatory_lock_error(error: &io::Error) -> bool {
         let _ = error;
         false
     }
+}
+
+fn assert_substitution_fixtures_unchanged(authorized: &Path, replacement: &Path) {
+    assert!(authorized.join("source.txt").exists());
+    assert!(!authorized.join("final-source.txt").exists());
+    assert!(replacement.join("source.txt").exists());
+    assert!(!replacement.join("final-source.txt").exists());
 }
 
 struct RecoveryFixture {
@@ -158,8 +166,12 @@ fn bound_recovery_rejects_a_path_free_matching_journal_substitution()
             assert_eq!(fs::read(&journal)?, replacement_bytes);
         }
         Err(error) if is_mandatory_lock_error(&error) => {
-            assert_eq!(fs::read(&journal)?, authorized_bytes);
+            assert_substitution_fixtures_unchanged(
+                authorized_directory.path(),
+                replacement_directory.path(),
+            );
             drop(snapshot);
+            assert_eq!(fs::read(&journal)?, authorized_bytes);
             let reopened =
                 inspect_recovery_transaction_snapshot(&ledger, ledger_id(&ledger)?, &filesystem)?;
             drop(reopened);
@@ -167,19 +179,9 @@ fn bound_recovery_rejects_a_path_free_matching_journal_substitution()
         }
         Err(error) => return Err(error.into()),
     }
-    assert!(authorized_directory.path().join("source.txt").exists());
-    assert!(
-        !authorized_directory
-            .path()
-            .join("final-source.txt")
-            .exists()
-    );
-    assert!(replacement_directory.path().join("source.txt").exists());
-    assert!(
-        !replacement_directory
-            .path()
-            .join("final-source.txt")
-            .exists()
+    assert_substitution_fixtures_unchanged(
+        authorized_directory.path(),
+        replacement_directory.path(),
     );
     Ok(())
 }
