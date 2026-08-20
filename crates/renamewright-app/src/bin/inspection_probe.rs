@@ -14,6 +14,7 @@ struct ProbeArguments {
     screenshot_path: Option<PathBuf>,
     exercise_performance: bool,
     select_theme: Option<String>,
+    select_language: Option<String>,
     open_advanced_appearance: bool,
     wide_viewport: bool,
     compact_viewport: bool,
@@ -30,6 +31,7 @@ fn parse_screenshot_path(
 ) -> Result<ProbeArguments, pico_args::Error> {
     let exercise_performance = arguments.contains("--exercise-performance");
     let select_theme = arguments.opt_value_from_str("--select-theme")?;
+    let select_language = arguments.opt_value_from_str("--select-language")?;
     let open_advanced_appearance = arguments.contains("--open-advanced-appearance");
     let wide_viewport = arguments.contains("--wide-viewport");
     let compact_viewport = arguments.contains("--compact-viewport");
@@ -40,6 +42,7 @@ fn parse_screenshot_path(
         screenshot_path,
         exercise_performance,
         select_theme,
+        select_language,
         open_advanced_appearance,
         wide_viewport,
         compact_viewport,
@@ -152,13 +155,43 @@ fn prepare_visual_state(
             "dark" => "Dark",
             _ => return Err(format!("unsupported theme {theme:?}").into()),
         };
-        click_label(stream, "Appearance")?;
+        click_label(stream, "Display")?;
         click_label(stream, label)?;
         settle(stream)?;
     }
+    if let Some(language) = &arguments.select_language {
+        match language.as_str() {
+            "english" => {}
+            "korean" => {
+                click_label(stream, "English")?;
+                let started = Instant::now();
+                loop {
+                    let current_tree = tree(stream)?;
+                    if contains_text(&current_tree, "한국어") {
+                        break;
+                    }
+                    if started.elapsed() >= Duration::from_secs(3) {
+                        return Err("the Korean language option did not become ready".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                click_label(stream, "한국어")?;
+                settle(stream)?;
+            }
+            _ => return Err(format!("unsupported language {language:?}").into()),
+        }
+    }
     if arguments.open_advanced_appearance {
-        click_label(stream, "Appearance")?;
-        click_label(stream, "Advanced appearance")?;
+        let korean = arguments.select_language.as_deref() == Some("korean");
+        click_label(stream, if korean { "화면 설정" } else { "Display" })?;
+        click_label(
+            stream,
+            if korean {
+                "고급 화면 설정"
+            } else {
+                "Advanced display settings"
+            },
+        )?;
         settle(stream)?;
     }
     if arguments.wide_viewport && arguments.compact_viewport {
@@ -170,7 +203,14 @@ fn prepare_visual_state(
         resize(stream, 820, 560)?;
     }
     if arguments.scroll_appearance_bottom {
-        scroll_label_to_bottom(stream, "Accent color")?;
+        scroll_label_to_bottom(
+            stream,
+            if arguments.select_language.as_deref() == Some("korean") {
+                "강조 색상"
+            } else {
+                "Accent color"
+            },
+        )?;
     }
     Ok(())
 }
@@ -205,6 +245,7 @@ fn rightmost_role_center(
 fn exercise_performance(
     stream: &mut TcpStream,
     initial_tree: &egui::accesskit::TreeUpdate,
+    korean: bool,
 ) -> Result<(), Box<dyn Error>> {
     let preview_point = initial_tree
         .nodes
@@ -264,7 +305,8 @@ fn exercise_performance(
     let filtered_tree = tree(stream)?;
     let filter_milliseconds = filter_started.elapsed().as_millis();
     let filter_target_visible = contains_text(&filtered_tree, "IMG_09999.jpg");
-    let filter_count_visible = contains_text(&filtered_tree, "1 shown");
+    let filter_count_visible =
+        contains_text(&filtered_tree, if korean { "1개 표시" } else { "1 shown" });
 
     println!(
         "scroll_ms={scroll_milliseconds} scroll_last_visible={scroll_last_visible} \
@@ -303,19 +345,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                 })
             };
             let apply_disabled = accesskit.as_ref().is_some_and(|tree| {
-                tree.nodes
-                    .iter()
-                    .any(|(_, node)| node.label() == Some("Apply") && node.is_disabled())
+                tree.nodes.iter().any(|(_, node)| {
+                    node.label()
+                        .is_some_and(|label| label.starts_with("Rename "))
+                        && node.is_disabled()
+                })
             });
             let read_only_workbench = [
                 "Replace",
                 "Prefix",
                 "Suffix",
                 "Number",
-                "Remove range",
-                "Extension",
-                "Case",
-                "Active rules",
+                "Edit range",
+                "Change extension",
+                "Change case",
+                "Rule order",
                 "Prefix text",
                 "All diagnostics",
             ]
@@ -329,7 +373,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                  automation_banner={} hangul_sample={} apply_disabled={apply_disabled} \
                  read_only_workbench={read_only_workbench} rule_actions_named={rule_actions_named}",
                 has_text("AUTOMATION TEST MODE"),
-                has_text("한글 IME 입력 확인"),
+                has_text("정리_"),
             );
             accesskit.ok_or("the inspection tree was unavailable")?
         }
@@ -359,7 +403,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if arguments.exercise_performance {
-        exercise_performance(&mut stream, &initial_tree)?;
+        exercise_performance(
+            &mut stream,
+            &initial_tree,
+            arguments.select_language.as_deref() == Some("korean"),
+        )?;
     }
 
     Ok(())
@@ -382,6 +430,24 @@ mod tests {
         };
 
         assert_eq!(path.as_os_str().as_bytes(), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn visual_probe_accepts_an_explicit_korean_language() -> Result<(), pico_args::Error> {
+        let arguments = pico_args::Arguments::from_vec(vec![
+            OsString::from("--select-language"),
+            OsString::from("korean"),
+            OsString::from("capture.png"),
+        ]);
+
+        let parsed = parse_screenshot_path(arguments)?;
+
+        assert_eq!(parsed.select_language.as_deref(), Some("korean"));
+        assert_eq!(
+            parsed.screenshot_path.as_deref(),
+            Some(std::path::Path::new("capture.png"))
+        );
         Ok(())
     }
 }

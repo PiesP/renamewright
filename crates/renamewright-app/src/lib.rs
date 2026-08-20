@@ -17,12 +17,12 @@ use eframe::egui::{
     ScrollArea, Stroke,
 };
 use renamewright_application::{
-    ApplicationService, ApplyCommandErrorDto, ApplyCommandResultDto, CaseModeDto,
-    CharacterClassDto, CharacterClassOperationDto, ExtensionOperationDto, FilenamePartDto,
-    LedgerEntryDto, PlanDto, PlanningCommandErrorDto, PresetDocumentDto, RangeOperationDto,
-    RangeOriginDto, RecoveryCommandAction, RecoveryCommandErrorDto, RecoveryCommandResultDto,
-    RecoveryInspectionDto, RecoveryRequestDto, RulePipelineRequestDto, RuleRequestDto,
-    SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, SourceOverrideDto,
+    ApplicationService, ApplicationServiceErrorKind, ApplyCommandErrorDto, ApplyCommandResultDto,
+    CaseModeDto, CharacterClassDto, CharacterClassOperationDto, ExtensionOperationDto,
+    FilenamePartDto, LedgerEntryDto, PlanDto, PlanningCommandErrorDto, PresetDocumentDto,
+    RangeOperationDto, RangeOriginDto, RecoveryCommandAction, RecoveryCommandErrorDto,
+    RecoveryCommandResultDto, RecoveryInspectionDto, RecoveryRequestDto, RulePipelineRequestDto,
+    RuleRequestDto, SequenceOrderDto, SequencePlacementDto, SequenceScopeDto, SourceOverrideDto,
     UndoCommandErrorDto, UndoCommandResultDto, UndoInspectionDto, UndoRequestDto,
     UnicodeNormalizationFormDto,
 };
@@ -116,43 +116,38 @@ fn adjacent_selection_index(
 pub mod semantics {
     pub const PRODUCT_NAME: &str = "Renamewright";
     pub const TAGLINE: &str = "Plan every rename.";
-    pub const ADD_FOLDER: &str = "Add folder entry";
+    pub const ADD_FOLDER: &str = "Add folder name";
     pub const ADD_FILES: &str = "Add files";
-    pub const RULES_HEADING: &str = "Name rules";
-    pub const RULES_ORDER_HELP: &str = "Applied left to right";
-    pub const ACTIVE_RULES: &str = "Active rules";
+    pub const RULES_HEADING: &str = "Rename rules";
+    pub const RULES_ORDER_HELP: &str = "Earlier rules run first";
+    pub const ACTIVE_RULES: &str = "Rule order";
     pub const MORE_RULES: &str = "More rules";
-    pub const TOOLS: &str = "Presets and inspection";
-    pub const HISTORY: &str = "History";
-    pub const DONE_EDITING: &str = "Done editing";
-    pub const CANCEL_EDITING: &str = "Cancel editing";
-    pub const RULE_PREFIX: &str = "Prefix";
-    pub const RULE_SEQUENCE: &str = "Sequence";
-    pub const RULE_EXTENSION: &str = "Extension";
+    pub const TOOLS: &str = "Advanced tools";
+    pub const HISTORY: &str = "Rename history";
+    pub const DONE_EDITING: &str = "Close editor";
+    pub const CANCEL_EDITING: &str = "Discard new rule";
     pub const PREFIX_LABEL: &str = "Prefix text";
-    pub const HANGUL_IME_HELP: &str = "한글 IME 입력 확인";
     pub const PREVIEW_HEADING: &str = "Preview";
     pub const FILTER_ALL: &str = "All";
-    pub const FILTER_CHANGED: &str = "Changed";
-    pub const FILTER_BLOCKED: &str = "Blocked";
+    pub const FILTER_CHANGED: &str = "Will change";
+    pub const FILTER_BLOCKED: &str = "Cannot apply";
     pub const SOURCE_QUERY_LABEL: &str = "Filter names";
-    pub const APPLY: &str = "Apply";
-    pub const APPLY_LOCKED: &str = "Apply locked";
+    pub const APPLY: &str = "Rename entries";
     pub const MOVE_RULE_UP: &str = "Move rule up";
     pub const MOVE_RULE_DOWN: &str = "Move rule down";
     pub const DRAG_RULE: &str = "Drag rule";
     pub const REMOVE_RULE: &str = "Remove rule";
-    pub const EXCLUDE_SOURCE: &str = "Remove from plan";
+    pub const EXCLUDE_SOURCE: &str = "Leave out of plan";
     pub const ENABLE_RULE: &str = "Enable rule";
     pub const LANGUAGE: &str = "Language";
-    pub const APPEARANCE: &str = "Appearance";
+    pub const APPEARANCE: &str = "Display";
     pub const THEME_SYSTEM: &str = "System";
     pub const THEME_LIGHT: &str = "Light";
     pub const THEME_DARK: &str = "Dark";
-    pub const ADVANCED_APPEARANCE: &str = "Advanced appearance";
-    pub const CLOSE_APPEARANCE: &str = "Close appearance settings";
+    pub const ADVANCED_APPEARANCE: &str = "Advanced display settings";
+    pub const CLOSE_APPEARANCE: &str = "Close display settings";
     pub const ACCENT_COLOR: &str = "Accent color";
-    pub const DENSITY: &str = "Density";
+    pub const DENSITY: &str = "Spacing";
     pub const DENSITY_STANDARD: &str = "Standard";
     pub const DENSITY_COMPACT: &str = "Compact";
     pub const PREVIEW_COLUMNS: &str = "Preview columns";
@@ -162,31 +157,30 @@ pub mod semantics {
     pub const HIGH_CONTRAST_OVERRIDES_APPEARANCE: &str =
         "Windows high contrast overrides appearance colors";
     pub const DIAGNOSTIC_FILTER: &str = "Diagnostic filter";
-    pub const INSPECT_JSON: &str = "Inspect JSON";
-    pub const INSPECT_CSV: &str = "Inspect CSV";
+    pub const INSPECT_JSON: &str = "View plan JSON";
+    pub const INSPECT_CSV: &str = "View plan CSV";
     pub const EXPORT_JSON: &str = "Export JSON";
     pub const EXPORT_CSV: &str = "Export CSV";
-    pub const CLOSE_INSPECTOR: &str = "Close inspector";
-    pub const SAVE_OVERRIDE: &str = "Save override";
-    pub const CANCEL_OVERRIDE: &str = "Cancel override";
-    pub const PRESETS: &str = "Local presets";
+    pub const CLOSE_INSPECTOR: &str = "Close plan document";
+    pub const SAVE_OVERRIDE: &str = "Save assigned name";
+    pub const CANCEL_OVERRIDE: &str = "Cancel";
+    pub const PRESETS: &str = "Saved presets";
     pub const PRESET_NAME: &str = "Preset name";
     pub const SAVE_PRESET: &str = "Save preset";
-    pub const APPLY_PRESET: &str = "Apply preset";
+    pub const APPLY_PRESET: &str = "Load preset";
     pub const DELETE_PRESET: &str = "Delete preset";
-    pub const NO_SOURCES: &str = "No sources selected";
+    pub const NO_SOURCES: &str = "No entries added yet";
     pub const AUTOMATION_BANNER: &str = "AUTOMATION TEST MODE";
     pub const HIGH_CONTRAST_ACTIVE: &str = "Windows high contrast palette active";
-    pub const LEDGER: &str = "Ledger";
-    pub const REFRESH_LEDGER: &str = "Refresh ledger";
-    pub const INSPECT_RECOVERY: &str = "Inspect recovery";
-    pub const INSPECT_UNDO: &str = "Inspect Undo";
-    pub const RESUME: &str = "Resume";
-    pub const ROLLBACK: &str = "Rollback";
-    pub const RECONCILE: &str = "Reconcile";
-    pub const UNDO: &str = "Undo";
+    pub const LEDGER: &str = "Rename history";
+    pub const REFRESH_LEDGER: &str = "Refresh rename history";
+    pub const INSPECT_RECOVERY: &str = "Review recovery options";
+    pub const INSPECT_UNDO: &str = "Review Undo";
+    pub const RESUME: &str = "Resume rename";
+    pub const ROLLBACK: &str = "Restore previous names";
+    pub const RECONCILE: &str = "Check current file state";
+    pub const UNDO: &str = "Undo name change";
     pub const CANCEL_MUTATION: &str = "Cancel operation";
-    pub const CONFIRM_ACTION: &str = "Confirm action";
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -727,8 +721,8 @@ impl InterfaceDensity {
 
     const fn label(self, locale: Locale) -> &'static str {
         match self {
-            Self::Standard => locale.text(semantics::DENSITY_STANDARD, "표준"),
-            Self::Compact => locale.text(semantics::DENSITY_COMPACT, "컴팩트"),
+            Self::Standard => locale.text(semantics::DENSITY_STANDARD, "보통"),
+            Self::Compact => locale.text(semantics::DENSITY_COMPACT, "좁게"),
         }
     }
 
@@ -745,9 +739,9 @@ impl AppearanceTheme {
 
     const fn label(self, locale: Locale) -> &'static str {
         match self {
-            Self::System => locale.text(semantics::THEME_SYSTEM, "시스템"),
-            Self::Light => locale.text(semantics::THEME_LIGHT, "라이트"),
-            Self::Dark => locale.text(semantics::THEME_DARK, "다크"),
+            Self::System => locale.text(semantics::THEME_SYSTEM, "시스템 설정"),
+            Self::Light => locale.text(semantics::THEME_LIGHT, "밝게"),
+            Self::Dark => locale.text(semantics::THEME_DARK, "어둡게"),
         }
     }
 
@@ -1016,14 +1010,14 @@ impl RuleKind {
             Self::Prefix => locale.text("Prefix", "앞에 붙이기"),
             Self::Suffix => locale.text("Suffix", "뒤에 붙이기"),
             Self::LiteralReplace => locale.text("Replace", "찾아 바꾸기"),
-            Self::RegexReplace => locale.text("Pattern replace", "패턴 바꾸기"),
+            Self::RegexReplace => locale.text("Replace with pattern", "패턴으로 바꾸기"),
             Self::Sequence => locale.text("Number", "번호 붙이기"),
-            Self::Extension => locale.text("Extension", "확장자"),
-            Self::Case => locale.text("Case", "대소문자"),
+            Self::Extension => locale.text("Change extension", "확장자 바꾸기"),
+            Self::Case => locale.text("Change case", "대/소문자 바꾸기"),
             Self::WhitespaceCleanup => locale.text("Clean whitespace", "공백 정리"),
             Self::UnicodeNormalization => locale.text("Normalize Unicode", "유니코드 정규화"),
-            Self::Range => locale.text("Remove range", "일부 지우기"),
-            Self::CharacterClass => locale.text("Filter character class", "문자 종류 필터"),
+            Self::Range => locale.text("Edit range", "구간 편집"),
+            Self::CharacterClass => locale.text("Keep or remove characters", "문자 종류 정리"),
         }
     }
 
@@ -1206,8 +1200,12 @@ fn rule_summary(rule: &RuleRequestDto, locale: Locale) -> String {
             ),
         },
         RuleRequestDto::Case { mode, .. } => match mode {
-            CaseModeDto::Lowercase => locale.text("Case · lower", "대소문자 · 소문자"),
-            CaseModeDto::Uppercase => locale.text("Case · upper", "대소문자 · 대문자"),
+            CaseModeDto::Lowercase => {
+                locale.text("Change case · lowercase", "대/소문자 · 소문자로")
+            }
+            CaseModeDto::Uppercase => {
+                locale.text("Change case · uppercase", "대/소문자 · 대문자로")
+            }
         }
         .to_owned(),
         RuleRequestDto::WhitespaceCleanup { .. }
@@ -1232,12 +1230,13 @@ enum DiagnosticFilter {
     OccupiedDestination,
     StaleSource,
     ParentUnavailable,
+    InvalidRule,
     SequenceOverflow,
     AncestorDescendantConflict,
 }
 
 impl DiagnosticFilter {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::All,
         Self::Unchanged,
         Self::EmptyName,
@@ -1250,6 +1249,7 @@ impl DiagnosticFilter {
         Self::OccupiedDestination,
         Self::StaleSource,
         Self::ParentUnavailable,
+        Self::InvalidRule,
         Self::SequenceOverflow,
         Self::AncestorDescendantConflict,
     ];
@@ -1268,6 +1268,7 @@ impl DiagnosticFilter {
             Self::OccupiedDestination => Some("occupiedDestination"),
             Self::StaleSource => Some("staleSource"),
             Self::ParentUnavailable => Some("parentUnavailable"),
+            Self::InvalidRule => Some("invalidRule"),
             Self::SequenceOverflow => Some("sequenceOverflow"),
             Self::AncestorDescendantConflict => Some("ancestorDescendantConflict"),
         }
@@ -1277,22 +1278,38 @@ impl DiagnosticFilter {
         match self {
             Self::All => locale.text("All diagnostics", "모든 진단"),
             Self::Unchanged => locale.text("No change", "변경 없음"),
-            Self::EmptyName => locale.text("Empty name", "빈 이름"),
+            Self::EmptyName => locale.text("Name would be empty", "이름이 비게 됨"),
             Self::IllegalCharacter => locale.text("Illegal Windows character", "Windows 금지 문자"),
-            Self::TrailingDotOrSpace => locale.text("Trailing dot or space", "끝의 점 또는 공백"),
+            Self::TrailingDotOrSpace => locale.text(
+                "Name ends with a dot or space",
+                "이름 끝에 점 또는 공백이 있음",
+            ),
             Self::ReservedName => locale.text("Reserved Windows name", "Windows 예약 이름"),
-            Self::NameTooLong => locale.text("Name too long", "이름이 너무 김"),
-            Self::DuplicateDestination => locale.text("Duplicate target", "대상 이름 중복"),
-            Self::UnsupportedEncoding => {
-                locale.text("Unsupported encoding", "지원하지 않는 인코딩")
+            Self::NameTooLong => locale.text("Name too long", "바뀔 이름이 너무 김"),
+            Self::DuplicateDestination => locale.text(
+                "Same new name used more than once",
+                "같은 새 이름을 여러 항목에 사용함",
+            ),
+            Self::UnsupportedEncoding => locale.text(
+                "Name cannot be changed safely",
+                "이름을 안전하게 변경할 수 없음",
+            ),
+            Self::OccupiedDestination => {
+                locale.text("New name already exists", "같은 이름의 항목이 이미 있음")
             }
-            Self::OccupiedDestination => locale.text("Target exists", "대상이 이미 존재함"),
-            Self::StaleSource => locale.text("Source changed", "원본이 변경됨"),
-            Self::ParentUnavailable => locale.text("Parent unavailable", "상위 폴더 확인 불가"),
-            Self::SequenceOverflow => locale.text("Sequence overflow", "일련번호 범위 초과"),
+            Self::StaleSource => {
+                locale.text("Entry changed after preview", "미리보기 후 항목이 변경됨")
+            }
+            Self::ParentUnavailable => {
+                locale.text("Folder cannot be checked", "상위 폴더를 확인할 수 없음")
+            }
+            Self::InvalidRule => locale.text("Rule cannot be applied", "규칙을 적용할 수 없음"),
+            Self::SequenceOverflow => {
+                locale.text("Number is out of range", "번호가 허용 범위를 넘음")
+            }
             Self::AncestorDescendantConflict => locale.text(
-                "Ancestor and descendant selected",
-                "상위 및 하위 항목이 함께 선택됨",
+                "Folder and an item inside it are both selected",
+                "폴더와 그 안의 항목을 함께 선택함",
             ),
         }
     }
@@ -1302,7 +1319,339 @@ fn diagnostic_label(code: &str, locale: Locale) -> &str {
     DiagnosticFilter::ALL
         .into_iter()
         .find(|candidate| candidate.code() == Some(code))
-        .map_or(code, |candidate| candidate.label(locale))
+        .map_or_else(
+            || locale.text("Unknown problem", "알 수 없는 문제"),
+            |candidate| candidate.label(locale),
+        )
+}
+
+fn planning_error_message(code: &str, locale: Locale) -> &'static str {
+    match code {
+        "tooManySources" => locale.text(
+            "Too many entries were selected. Add no more than 10,000 at a time.",
+            "한 번에 10,000개 이하의 항목을 추가하세요.",
+        ),
+        "sourceAdmissionFailed" => locale.text(
+            "Some selected entries could not be added. Check that they still exist and try again.",
+            "선택한 항목을 추가하지 못했습니다. 항목이 그대로 있는지 확인한 뒤 다시 시도하세요.",
+        ),
+        "stateUnavailable" => locale.text(
+            "Renamewright could not read the current workbench state. Try again.",
+            "현재 작업 상태를 확인하지 못했습니다. 다시 시도하세요.",
+        ),
+        "stalePlanningSnapshot" => locale.text(
+            "The selected entries changed while the preview was updating. Review the latest preview.",
+            "미리보기를 만드는 동안 선택한 항목이 변경되었습니다. 최신 미리보기를 확인하세요.",
+        ),
+        "planSequenceExhausted" => locale.text(
+            "A new rename plan could not be created. Restart Renamewright before trying again.",
+            "새 이름 변경 계획을 만들지 못했습니다. Renamewright를 다시 시작한 뒤 시도하세요.",
+        ),
+        "tooManyRules" => locale.text(
+            "The rule limit has been reached. Remove a rule before adding another.",
+            "규칙 개수 한도에 도달했습니다. 다른 규칙을 추가하기 전에 하나를 제거하세요.",
+        ),
+        "ruleTextTooLong" => locale.text(
+            "This rule contains too much text. Shorten the value and try again.",
+            "규칙에 입력한 내용이 너무 깁니다. 내용을 줄인 뒤 다시 시도하세요.",
+        ),
+        "emptyLiteralSearch" => {
+            locale.text("Enter the text to find.", "찾을 내용을 입력하세요.")
+        }
+        "invalidRegex" => locale.text(
+            "Check the pattern syntax.",
+            "패턴 문법을 확인하세요.",
+        ),
+        "invalidSequenceStart" => locale.text(
+            "Enter a valid starting number.",
+            "올바른 시작 번호를 입력하세요.",
+        ),
+        "invalidSequenceStep" => locale.text(
+            "The increment must be at least 1.",
+            "증가값은 1 이상이어야 합니다.",
+        ),
+        "invalidSequencePadding" => locale.text(
+            "The number of digits must be between 1 and 32.",
+            "자릿수는 1에서 32 사이여야 합니다.",
+        ),
+        "invalidExtensionReplacement" => locale.text(
+            "Check the new extension. Enter it without a leading dot.",
+            "새 확장자를 확인하세요. 앞의 점(.)은 빼고 입력하세요.",
+        ),
+        "invalidRangeOffset" => locale.text(
+            "Enter a valid starting position.",
+            "올바른 시작 위치를 입력하세요.",
+        ),
+        "invalidRangeLength" => locale.text(
+            "The selected length must be at least 1.",
+            "선택할 길이는 1 이상이어야 합니다.",
+        ),
+        "tooManyOverrides" => locale.text(
+            "Too many entries have directly assigned names. Remove an override before adding another.",
+            "직접 이름을 지정한 항목이 너무 많습니다. 기존 직접 지정을 제거한 뒤 다시 시도하세요.",
+        ),
+        "overrideTextTooLong" => locale.text(
+            "The directly assigned name is too long.",
+            "직접 지정한 이름이 너무 깁니다.",
+        ),
+        "unknownSourceId" | "excludedOverrideSource" | "invalidOverrideSourceId"
+        | "duplicateOverrideSourceId" | "unknownOverrideSource" => locale.text(
+            "The selected entry is no longer in the current plan. Review the latest preview.",
+            "선택한 항목이 현재 계획에 없습니다. 최신 미리보기를 확인하세요.",
+        ),
+        "unsupportedRuleSchema" | "invalidRuleId" | "duplicateRuleId" => locale.text(
+            "This rule could not be read. Remove it and create the rule again.",
+            "이 규칙을 읽지 못했습니다. 규칙을 제거한 뒤 다시 만드세요.",
+        ),
+        _ => locale.text(
+            "The preview could not be updated. Review the rule and try again.",
+            "미리보기를 갱신하지 못했습니다. 규칙을 확인한 뒤 다시 시도하세요.",
+        ),
+    }
+}
+
+fn preset_error_message(code: &str, locale: Locale) -> &'static str {
+    match code {
+        "invalidPresetName" => locale.text("Enter a preset name.", "프리셋 이름을 입력하세요."),
+        "duplicatePresetName" => locale.text(
+            "A preset with this name already exists. Choose another name.",
+            "같은 이름의 프리셋이 이미 있습니다. 다른 이름을 입력하세요.",
+        ),
+        "tooManyPresets" => locale.text(
+            "The preset limit has been reached. Delete a preset before saving another.",
+            "프리셋 개수 한도에 도달했습니다. 기존 프리셋을 삭제한 뒤 저장하세요.",
+        ),
+        "presetDocumentTooLarge" => locale.text(
+            "The preset file is too large to open.",
+            "프리셋 파일이 너무 커서 열 수 없습니다.",
+        ),
+        "unsupportedPresetSchema" | "invalidPresetDocument" => locale.text(
+            "The preset file could not be read.",
+            "프리셋 파일을 읽을 수 없습니다.",
+        ),
+        "presetStorageUnavailable" => locale.text(
+            "Presets could not be saved. Check the storage location and try again.",
+            "프리셋을 저장하지 못했습니다. 저장 위치를 확인한 뒤 다시 시도하세요.",
+        ),
+        _ => locale.text("Presets are unavailable.", "프리셋을 사용할 수 없습니다."),
+    }
+}
+
+fn application_error_message(kind: ApplicationServiceErrorKind, locale: Locale) -> &'static str {
+    match kind {
+        ApplicationServiceErrorKind::JournalPreparationFailed
+        | ApplicationServiceErrorKind::JournalResolutionFailed
+        | ApplicationServiceErrorKind::LedgerLoadFailed
+        | ApplicationServiceErrorKind::LedgerRefreshFailed => locale.text(
+            "Rename history could not be read. Try refreshing it.",
+            "이름 변경 기록을 읽지 못했습니다. 기록을 새로 고쳐 보세요.",
+        ),
+        ApplicationServiceErrorKind::PlanSequenceExhausted => locale.text(
+            "A new rename plan could not be created. Restart Renamewright before trying again.",
+            "새 이름 변경 계획을 만들지 못했습니다. Renamewright를 다시 시작한 뒤 시도하세요.",
+        ),
+        ApplicationServiceErrorKind::StateUnavailable => locale.text(
+            "Renamewright could not read the current workbench state. Try again.",
+            "현재 작업 상태를 확인하지 못했습니다. 다시 시도하세요.",
+        ),
+        ApplicationServiceErrorKind::RecoveryInspectionFailed => locale.text(
+            "Recovery options could not be checked. Refresh rename history and try again.",
+            "복구 방법을 확인하지 못했습니다. 이름 변경 기록을 새로 고친 뒤 다시 시도하세요.",
+        ),
+        ApplicationServiceErrorKind::PlanInspectionFailed => locale.text(
+            "The plan document could not be prepared.",
+            "계획 문서를 준비하지 못했습니다.",
+        ),
+        ApplicationServiceErrorKind::PlanExportFailed => locale.text(
+            "The plan could not be exported. Choose another file name or location and try again.",
+            "계획을 내보내지 못했습니다. 다른 파일 이름이나 저장 위치를 선택해 다시 시도하세요.",
+        ),
+    }
+}
+
+fn apply_error_message(code: &str, locale: Locale) -> &'static str {
+    match code {
+        "busy" => locale.text(
+            "Another file operation is already running.",
+            "다른 파일 작업이 이미 실행 중입니다.",
+        ),
+        "planUnavailable" | "planChanged" => locale.text(
+            "The plan changed after the preview. Review the latest preview and try again.",
+            "미리보기 이후 계획이 변경되었습니다. 최신 미리보기를 확인한 뒤 다시 시도하세요.",
+        ),
+        "journalUnavailable" | "ledgerRefreshFailed" => locale.text(
+            "Rename history is unavailable, so the names were not changed.",
+            "이름 변경 기록을 사용할 수 없어 이름을 바꾸지 않았습니다.",
+        ),
+        "executionFailed" => locale.text(
+            "The rename did not finish. Open rename history to review recovery options.",
+            "이름 변경을 마치지 못했습니다. 이름 변경 기록에서 복구 방법을 확인하세요.",
+        ),
+        _ => locale.text(
+            "The names could not be changed. Review the latest preview and try again.",
+            "이름을 바꾸지 못했습니다. 최신 미리보기를 확인한 뒤 다시 시도하세요.",
+        ),
+    }
+}
+
+fn recovery_error_message(code: &str, locale: Locale) -> &'static str {
+    match code {
+        "busy" => locale.text(
+            "Another file operation is already running.",
+            "다른 파일 작업이 이미 실행 중입니다.",
+        ),
+        "inspectionChanged" => locale.text(
+            "The files changed after recovery was reviewed. Check recovery options again.",
+            "복구 방법을 확인한 뒤 파일 상태가 변경되었습니다. 복구 방법을 다시 확인하세요.",
+        ),
+        "actionUnavailable" => locale.text(
+            "This recovery option is no longer available. Check the current file state again.",
+            "이 복구 방법을 더 이상 사용할 수 없습니다. 현재 파일 상태를 다시 확인하세요.",
+        ),
+        _ => locale.text(
+            "Recovery did not finish. Refresh rename history and review the available options.",
+            "복구를 마치지 못했습니다. 이름 변경 기록을 새로 고친 뒤 가능한 방법을 확인하세요.",
+        ),
+    }
+}
+
+fn undo_error_message(code: &str, locale: Locale) -> &'static str {
+    match code {
+        "busy" => locale.text(
+            "Another file operation is already running.",
+            "다른 파일 작업이 이미 실행 중입니다.",
+        ),
+        "inspectionChanged" | "actionUnavailable" => locale.text(
+            "The files changed after Undo was reviewed. Check Undo again.",
+            "되돌리기를 확인한 뒤 파일 상태가 변경되었습니다. 되돌리기 가능 여부를 다시 확인하세요.",
+        ),
+        "planSequenceExhausted" => locale.text(
+            "Undo could not start. Restart Renamewright before trying again.",
+            "되돌리기를 시작하지 못했습니다. Renamewright를 다시 시작한 뒤 시도하세요.",
+        ),
+        _ => locale.text(
+            "Undo did not finish. Refresh rename history and review the current state.",
+            "되돌리기를 마치지 못했습니다. 이름 변경 기록을 새로 고친 뒤 현재 상태를 확인하세요.",
+        ),
+    }
+}
+
+fn outcome_label(outcome: &str, locale: Locale) -> &'static str {
+    match outcome {
+        "completed" => locale.text("Completed", "완료됨"),
+        "rolledBack" => locale.text("Previous names restored", "변경 전 이름으로 되돌림"),
+        "recoveryRequired" => locale.text("Recovery required", "복구 필요"),
+        "cancelled" => locale.text("Cancelled", "취소됨"),
+        _ => locale.text("Finished", "작업 종료"),
+    }
+}
+
+fn ledger_status_label(status: &str, locale: Locale) -> &'static str {
+    match status {
+        "completed" => locale.text("Completed", "완료됨"),
+        "rolledBack" => locale.text("Previous names restored", "변경 전 이름으로 되돌림"),
+        "forwardPending" | "completionPending" => {
+            locale.text("Rename interrupted", "이름 변경 중단됨")
+        }
+        "rollbackPending" | "rollbackCompletionPending" => {
+            locale.text("Restore interrupted", "되돌리기 중단됨")
+        }
+        "reconciliationRequired" => locale.text("File state check required", "파일 상태 확인 필요"),
+        "recoveryRequired" => locale.text("Recovery required", "복구 필요"),
+        "legacyInspectionRequired" => locale.text("Manual review required", "직접 확인 필요"),
+        "unsupportedVersion" => {
+            locale.text("Unsupported history version", "지원하지 않는 기록 형식")
+        }
+        "tooLarge" => locale.text("History entry too large", "기록 항목이 너무 큼"),
+        "discoveryLimitExceeded" => {
+            locale.text("Too many history entries", "기록 항목이 너무 많음")
+        }
+        "torn" | "damaged" | "unreadable" => {
+            locale.text("History entry unreadable", "기록 항목을 읽을 수 없음")
+        }
+        _ => locale.text("Status unavailable", "상태 확인 불가"),
+    }
+}
+
+fn recovery_direction_label(direction: &str, locale: Locale) -> &'static str {
+    match direction {
+        "forward" => locale.text("Continue rename", "이름 변경 이어가기"),
+        "rollback" => locale.text("Restore previous names", "변경 전 이름으로 되돌리기"),
+        _ => locale.text("Recovery", "복구"),
+    }
+}
+
+fn recovery_readiness_label(readiness: &str, locale: Locale) -> &'static str {
+    match readiness {
+        "ready" => locale.text("Ready", "진행 가능"),
+        "reconciliationRequired" => locale.text(
+            "Current file state must be checked",
+            "현재 파일 상태 확인 필요",
+        ),
+        "blocked" => locale.text("Unavailable", "진행 불가"),
+        _ => locale.text("Status unavailable", "상태 확인 불가"),
+    }
+}
+
+fn undo_readiness_label(readiness: &str, locale: Locale) -> &'static str {
+    match readiness {
+        "ready" => locale.text("Ready to undo", "되돌리기 가능"),
+        "blocked" => locale.text("Undo unavailable", "되돌리기 불가"),
+        _ => locale.text("Status unavailable", "상태 확인 불가"),
+    }
+}
+
+fn undo_block_reason_label(reason: &str, locale: Locale) -> &'static str {
+    match reason {
+        "sourceChanged" => locale.text(
+            "A file or folder changed after the rename, so Undo is unavailable.",
+            "이름을 바꾼 뒤 파일 또는 폴더가 변경되어 되돌릴 수 없습니다.",
+        ),
+        "destinationOccupied" => locale.text(
+            "A previous name is already in use, so Undo is unavailable.",
+            "이전 이름을 다른 항목이 사용하고 있어 되돌릴 수 없습니다.",
+        ),
+        _ => locale.text(
+            "Undo is unavailable for the current file state.",
+            "현재 파일 상태에서는 되돌릴 수 없습니다.",
+        ),
+    }
+}
+
+fn recovery_action_label(action: RecoveryCommandAction, locale: Locale) -> &'static str {
+    match action {
+        RecoveryCommandAction::Resume => locale.text(semantics::RESUME, "이어서 진행"),
+        RecoveryCommandAction::Rollback => {
+            locale.text(semantics::ROLLBACK, "변경 전 이름으로 되돌리기")
+        }
+        RecoveryCommandAction::Reconcile => {
+            locale.text(semantics::RECONCILE, "현재 파일 상태 확인")
+        }
+    }
+}
+
+fn entry_count_label(count: usize, locale: Locale) -> String {
+    match locale {
+        Locale::English if count == 1 => "1 entry".to_owned(),
+        Locale::English => format!("{count} entries"),
+        Locale::Korean => format!("항목 {count}개"),
+    }
+}
+
+fn rename_entries_label(count: usize, locale: Locale) -> String {
+    match locale {
+        Locale::English if count == 1 => "Rename 1 entry".to_owned(),
+        Locale::English => format!("Rename {count} entries"),
+        Locale::Korean => format!("{count}개 이름 바꾸기"),
+    }
+}
+
+fn undo_entries_label(count: usize, locale: Locale) -> String {
+    match locale {
+        Locale::English if count == 1 => "Undo 1 name change".to_owned(),
+        Locale::English => format!("Undo {count} name changes"),
+        Locale::Korean => format!("{count}개 이름 되돌리기"),
+    }
 }
 
 #[derive(Debug)]
@@ -1381,11 +1730,11 @@ struct AdmissionTask {
 #[derive(Debug)]
 enum LedgerMessage {
     Snapshot {
-        result: Result<Vec<LedgerEntryDto>, String>,
+        result: Result<Vec<LedgerEntryDto>, ApplicationServiceErrorKind>,
         announce: bool,
     },
-    Recovery(Result<RecoveryInspectionDto, String>),
-    Undo(Result<UndoInspectionDto, String>),
+    Recovery(Result<RecoveryInspectionDto, ApplicationServiceErrorKind>),
+    Undo(Result<UndoInspectionDto, &'static str>),
 }
 
 #[derive(Debug)]
@@ -1398,11 +1747,11 @@ struct LedgerTask {
 enum DocumentMessage {
     Inspection {
         json: bool,
-        result: Result<String, String>,
+        result: Result<String, ApplicationServiceErrorKind>,
     },
     Export {
         extension: &'static str,
-        result: Result<(), String>,
+        result: Result<(), ApplicationServiceErrorKind>,
     },
 }
 
@@ -1568,6 +1917,7 @@ fn filename_part_control(
     request_focus: &mut bool,
 ) -> bool {
     let before = *target;
+    ui.label(locale.text("Part to change", "바꿀 부분"));
     let response = egui::ComboBox::from_id_salt("filename-part")
         .selected_text(filename_part_label(*target, locale))
         .show_ui(ui, |ui| {
@@ -1671,31 +2021,33 @@ fn rule_editor(
                 separator,
                 ..
             } => {
-                ui.label(locale.text("Scope", "범위"));
+                ui.label(locale.text("Numbering group", "번호 매기기 단위"));
                 let before = *scope;
                 egui::ComboBox::from_id_salt("sequence-scope")
                     .selected_text(match scope {
-                        SequenceScopeDto::AllSources => locale.text("All sources", "모든 원본"),
-                        SequenceScopeDto::PerParent => locale.text("Per folder", "폴더별"),
+                        SequenceScopeDto::AllSources => locale.text("All entries", "전체 항목"),
+                        SequenceScopeDto::PerParent => {
+                            locale.text("Restart in each folder", "폴더마다 다시 시작")
+                        }
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             scope,
                             SequenceScopeDto::AllSources,
-                            locale.text("All sources", "모든 원본"),
+                            locale.text("All entries", "전체 항목"),
                         );
                         ui.selectable_value(
                             scope,
                             SequenceScopeDto::PerParent,
-                            locale.text("Per folder", "폴더별"),
+                            locale.text("Restart in each folder", "폴더마다 다시 시작"),
                         );
                     });
                 changed |= before != *scope;
-                ui.label(locale.text("Order", "정렬"));
+                ui.label(locale.text("Number order", "번호 순서 기준"));
                 let before = *order;
                 egui::ComboBox::from_id_salt("sequence-order")
                     .selected_text(match order {
-                        SequenceOrderDto::SourceOrder => locale.text("Source order", "원본 순서"),
+                        SequenceOrderDto::SourceOrder => locale.text("Order added", "추가한 순서"),
                         SequenceOrderDto::NameAscending => {
                             locale.text("Name ascending", "이름 오름차순")
                         }
@@ -1704,7 +2056,7 @@ fn rule_editor(
                         ui.selectable_value(
                             order,
                             SequenceOrderDto::SourceOrder,
-                            locale.text("Source order", "원본 순서"),
+                            locale.text("Order added", "추가한 순서"),
                         );
                         ui.selectable_value(
                             order,
@@ -1714,24 +2066,25 @@ fn rule_editor(
                     });
                 changed |= before != *order;
                 ui.horizontal(|ui| {
-                    ui.label(locale.text("Start", "시작"));
+                    ui.label(locale.text("First number", "시작 번호"));
                     let start_response = ui.add(egui::DragValue::new(start));
                     focus_once(&start_response, &mut request_focus);
                     changed |= start_response.changed();
-                    ui.label(locale.text("Step", "증가"));
+                    ui.label(locale.text("Increment", "증가값"));
                     changed |= ui
                         .add(egui::DragValue::new(step).range(1..=u64::MAX))
                         .changed();
                 });
                 ui.horizontal(|ui| {
-                    ui.label(locale.text("Digits", "자리수"));
+                    ui.label(locale.text("Number of digits", "자릿수"));
                     changed |= ui
                         .add(egui::DragValue::new(padding).range(1..=32))
                         .changed();
-                    ui.label(locale.text("Separator", "구분자"));
+                    ui.label(locale.text("Between number and name", "번호와 이름 사이"));
                     changed |= ui.text_edit_singleline(separator).changed();
                 });
                 let before = *placement;
+                ui.label(locale.text("Number position", "번호 위치"));
                 egui::ComboBox::from_id_salt("sequence-placement")
                     .selected_text(match placement {
                         SequencePlacementDto::Prefix => locale.text("Before name", "이름 앞"),
@@ -1755,6 +2108,7 @@ fn rule_editor(
                 operation, value, ..
             } => {
                 let before = *operation;
+                ui.label(locale.text("Action", "처리 방법"));
                 egui::ComboBox::from_id_salt("extension-operation")
                     .selected_text(match operation {
                         ExtensionOperationDto::Remove => locale.text("Remove", "제거"),
@@ -1774,11 +2128,14 @@ fn rule_editor(
                     });
                 changed |= before != *operation;
                 if *operation == ExtensionOperationDto::Replace {
-                    let response = ui.add(
-                        egui::TextEdit::singleline(value)
-                            .desired_width(140.0)
-                            .hint_text("txt"),
-                    );
+                    let label = ui.label(locale.text("New extension", "새 확장자"));
+                    let response = ui
+                        .add(
+                            egui::TextEdit::singleline(value)
+                                .desired_width(140.0)
+                                .hint_text("txt"),
+                        )
+                        .labelled_by(label.id);
                     focus_once(&response, &mut request_focus);
                     changed |= response.changed();
                 }
@@ -1786,6 +2143,7 @@ fn rule_editor(
             RuleRequestDto::Case { target, mode, .. } => {
                 changed |= filename_part_control(ui, target, locale, &mut request_focus);
                 let before = *mode;
+                ui.label(locale.text("Letter case", "바꿀 형태"));
                 egui::ComboBox::from_id_salt("case-mode")
                     .selected_text(match mode {
                         CaseModeDto::Lowercase => locale.text("Lowercase", "소문자"),
@@ -1811,12 +2169,13 @@ fn rule_editor(
                 ..
             } => {
                 changed |= filename_part_control(ui, target, locale, &mut request_focus);
-                ui.label(locale.text("Replacement", "바꿀 내용"));
+                ui.label(locale.text("Replace whitespace with", "공백을 바꿀 문자"));
                 changed |= ui.text_edit_singleline(replacement).changed();
             }
             RuleRequestDto::UnicodeNormalization { target, form, .. } => {
                 changed |= filename_part_control(ui, target, locale, &mut request_focus);
                 let before = *form;
+                ui.label(locale.text("Unicode form", "유니코드 형식"));
                 egui::ComboBox::from_id_salt("normalization-form")
                     .selected_text(match form {
                         UnicodeNormalizationFormDto::Nfc => "NFC",
@@ -1841,6 +2200,10 @@ fn rule_editor(
                         }
                     });
                 changed |= before != *form;
+                ui.label(locale.text(
+                    "NFC is the common choice for Windows filenames.",
+                    "Windows 파일 이름에는 일반적으로 NFC를 사용합니다.",
+                ));
             }
             RuleRequestDto::Range {
                 target,
@@ -1852,45 +2215,51 @@ fn rule_editor(
             } => {
                 changed |= filename_part_control(ui, target, locale, &mut request_focus);
                 let before = *operation;
+                ui.label(locale.text("Result", "처리 방법"));
                 egui::ComboBox::from_id_salt("range-operation")
                     .selected_text(match operation {
-                        RangeOperationDto::Keep => locale.text("Keep", "유지"),
-                        RangeOperationDto::Remove => locale.text("Remove", "제거"),
+                        RangeOperationDto::Keep => {
+                            locale.text("Keep selected range", "선택 구간만 남기기")
+                        }
+                        RangeOperationDto::Remove => {
+                            locale.text("Remove selected range", "선택 구간 지우기")
+                        }
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             operation,
                             RangeOperationDto::Keep,
-                            locale.text("Keep", "유지"),
+                            locale.text("Keep selected range", "선택 구간만 남기기"),
                         );
                         ui.selectable_value(
                             operation,
                             RangeOperationDto::Remove,
-                            locale.text("Remove", "제거"),
+                            locale.text("Remove selected range", "선택 구간 지우기"),
                         );
                     });
                 changed |= before != *operation;
                 let before = *origin;
+                ui.label(locale.text("Measure from", "위치 기준"));
                 egui::ComboBox::from_id_salt("range-origin")
                     .selected_text(match origin {
-                        RangeOriginDto::Start => locale.text("From start", "앞에서"),
-                        RangeOriginDto::End => locale.text("From end", "뒤에서"),
+                        RangeOriginDto::Start => locale.text("Start of name", "이름 앞에서"),
+                        RangeOriginDto::End => locale.text("End of name", "이름 뒤에서"),
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             origin,
                             RangeOriginDto::Start,
-                            locale.text("From start", "앞에서"),
+                            locale.text("Start of name", "이름 앞에서"),
                         );
                         ui.selectable_value(
                             origin,
                             RangeOriginDto::End,
-                            locale.text("From end", "뒤에서"),
+                            locale.text("End of name", "이름 뒤에서"),
                         );
                     });
                 changed |= before != *origin;
                 ui.horizontal(|ui| {
-                    ui.label(locale.text("Offset", "오프셋"));
+                    ui.label(locale.text("Start position", "시작 위치"));
                     let response = ui.add(egui::DragValue::new(offset));
                     focus_once(&response, &mut request_focus);
                     changed |= response.changed();
@@ -1904,7 +2273,7 @@ fn rule_editor(
                     changed = true;
                 }
                 if let Some(length) = length {
-                    ui.label(locale.text("Length", "길이"));
+                    ui.label(locale.text("Number of characters", "문자 수"));
                     changed |= ui
                         .add(egui::DragValue::new(length).range(1..=u64::MAX))
                         .changed();
@@ -1918,21 +2287,26 @@ fn rule_editor(
             } => {
                 changed |= filename_part_control(ui, target, locale, &mut request_focus);
                 let before = *operation;
+                ui.label(locale.text("Result", "처리 방법"));
                 egui::ComboBox::from_id_salt("class-operation")
                     .selected_text(match operation {
-                        CharacterClassOperationDto::Keep => locale.text("Keep", "유지"),
-                        CharacterClassOperationDto::Remove => locale.text("Remove", "제거"),
+                        CharacterClassOperationDto::Keep => {
+                            locale.text("Keep this type", "이 종류만 남기기")
+                        }
+                        CharacterClassOperationDto::Remove => {
+                            locale.text("Remove this type", "이 종류 지우기")
+                        }
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             operation,
                             CharacterClassOperationDto::Keep,
-                            locale.text("Keep", "유지"),
+                            locale.text("Keep this type", "이 종류만 남기기"),
                         );
                         ui.selectable_value(
                             operation,
                             CharacterClassOperationDto::Remove,
-                            locale.text("Remove", "제거"),
+                            locale.text("Remove this type", "이 종류 지우기"),
                         );
                     });
                 changed |= before != *operation;
@@ -1944,6 +2318,7 @@ fn rule_editor(
                     CharacterClassDto::Punctuation => locale.text("Punctuation", "문장 부호"),
                     CharacterClassDto::Symbol => locale.text("Symbols", "기호"),
                 };
+                ui.label(locale.text("Character type", "문자 종류"));
                 egui::ComboBox::from_id_salt("character-class")
                     .selected_text(class_label(*class))
                     .show_ui(ui, |ui| {
@@ -1978,9 +2353,9 @@ impl PlanFilter {
     const fn label(self, locale: Locale) -> &'static str {
         match self {
             Self::All => locale.text(semantics::FILTER_ALL, "전체"),
-            Self::Changed => locale.text(semantics::FILTER_CHANGED, "변경됨"),
+            Self::Changed => locale.text(semantics::FILTER_CHANGED, "변경 예정"),
             Self::Unchanged => locale.text("Unchanged", "변경 없음"),
-            Self::Blocked => locale.text(semantics::FILTER_BLOCKED, "차단됨"),
+            Self::Blocked => locale.text(semantics::FILTER_BLOCKED, "적용 불가"),
         }
     }
 }
@@ -2130,7 +2505,7 @@ impl RenamewrightApp {
                 Ok(document) => (document, None),
                 Err(error) => (
                     PresetDocumentDto::default(),
-                    Some(format!("Presets unavailable ({})", error.code())),
+                    Some(preset_error_message(error.code(), Locale::English).to_owned()),
                 ),
             },
         );
@@ -2143,7 +2518,7 @@ impl RenamewrightApp {
                 let result = application
                     .initialize(&root)
                     .and_then(|()| application.ledger_snapshot())
-                    .map_err(|error| error.to_string());
+                    .map_err(|error| error.kind());
                 let _ = sender.send(LedgerMessage::Snapshot {
                     result,
                     announce: false,
@@ -2458,7 +2833,7 @@ impl RenamewrightApp {
                     .locale
                     .text(
                         "Source admission ended unexpectedly",
-                        "원본 추가가 예기치 않게 종료되었습니다",
+                        "항목 추가가 예기치 않게 종료되었습니다",
                     )
                     .to_owned();
             }
@@ -2495,12 +2870,7 @@ impl RenamewrightApp {
 
     fn apply_admission_error(&mut self, error: &PlanningCommandErrorDto) {
         self.plan_is_current = false;
-        self.status = format!(
-            "{} ({})",
-            self.locale
-                .text("Sources were not admitted", "원본을 추가하지 못했습니다"),
-            error.code()
-        );
+        self.status = planning_error_message(error.code(), self.locale).to_owned();
     }
 
     fn refresh_plan(&mut self) {
@@ -2643,26 +3013,22 @@ impl RenamewrightApp {
     }
 
     fn apply_planning_error(&mut self, error: &PlanningCommandErrorDto) {
-        let code = error.code().to_owned();
-        self.rule_error = Some(code.clone());
+        let message = planning_error_message(error.code(), self.locale).to_owned();
+        self.rule_error = Some(message.clone());
         self.plan_is_current = false;
-        self.status = format!(
-            "{} ({code})",
-            self.locale
-                .text("Preview unavailable", "미리보기를 만들 수 없습니다")
-        );
+        self.status = message;
     }
 
     fn plan_status(&self, plan: &PlanDto) -> String {
         match self.locale {
             Locale::English => format!(
-                "{} sources · {} changed · {} blocked",
+                "{} entries · {} will change · {} cannot apply",
                 plan.rows().len(),
                 plan.changed_count(),
                 plan.blocked_count()
             ),
             Locale::Korean => format!(
-                "원본 {}개 · 변경 {}개 · 차단 {}개",
+                "전체 {}개 · 변경 예정 {}개 · 적용 불가 {}개",
                 plan.rows().len(),
                 plan.changed_count(),
                 plan.blocked_count()
@@ -2872,14 +3238,7 @@ impl RenamewrightApp {
                     self.overrides.insert(source_id, previous_override);
                 }
                 self.plan_is_current = false;
-                self.status = format!(
-                    "{} ({})",
-                    self.locale.text(
-                        "The entry could not be removed from the plan",
-                        "계획에서 항목을 제거하지 못했습니다",
-                    ),
-                    error.code()
-                );
+                self.status = planning_error_message(error.code(), self.locale).to_owned();
             }
         }
     }
@@ -2913,7 +3272,7 @@ impl RenamewrightApp {
         if let Some(path) = &self.preset_path
             && let Err(error) = next.save(path)
         {
-            self.status = format!("Presets unavailable ({})", error.code());
+            self.status = preset_error_message(error.code(), self.locale).to_owned();
             return;
         }
         self.presets = next;
@@ -2932,7 +3291,7 @@ impl RenamewrightApp {
                         .to_owned(),
                 );
             }
-            Err(error) => self.status = format!("Preset not saved ({})", error.code()),
+            Err(error) => self.status = preset_error_message(error.code(), self.locale).to_owned(),
         }
     }
 
@@ -2964,7 +3323,7 @@ impl RenamewrightApp {
         self.refresh_plan();
         self.status = format!(
             "{}: {name}",
-            self.locale.text("Preset applied", "프리셋 적용")
+            self.locale.text("Preset loaded", "프리셋을 불러왔습니다")
         );
     }
 
@@ -2987,8 +3346,8 @@ impl RenamewrightApp {
             self.status = self
                 .locale
                 .text(
-                    "The journal location is unavailable",
-                    "저널 위치를 사용할 수 없습니다",
+                    "Rename history storage is unavailable",
+                    "이름 변경 기록을 저장할 수 없습니다",
                 )
                 .to_owned();
             return;
@@ -3005,7 +3364,7 @@ impl RenamewrightApp {
                 )
                 .to_owned(),
             |application| LedgerMessage::Snapshot {
-                result: application.list_ledger().map_err(|error| error.to_string()),
+                result: application.list_ledger().map_err(|error| error.kind()),
                 announce: true,
             },
         );
@@ -3029,7 +3388,7 @@ impl RenamewrightApp {
                 LedgerMessage::Recovery(
                     application
                         .inspect_recovery(ledger_id, &NativeExecutionFileSystem::new())
-                        .map_err(|error| error.to_string()),
+                        .map_err(|error| error.kind()),
                 )
             },
         );
@@ -3047,13 +3406,16 @@ impl RenamewrightApp {
         }
         self.start_ledger_task(
             self.locale
-                .text("Inspecting undo state", "실행 취소 상태를 검사 중입니다")
+                .text(
+                    "Checking Undo availability",
+                    "되돌리기 가능 여부를 확인 중입니다",
+                )
                 .to_owned(),
             move |application| {
                 LedgerMessage::Undo(
                     application
                         .inspect_undo(ledger_id, &NativeExecutionFileSystem::new())
-                        .map_err(|error| error.code().to_owned()),
+                        .map_err(|error| error.code()),
                 )
             },
         );
@@ -3117,14 +3479,17 @@ impl RenamewrightApp {
                         result: Err(error), ..
                     } => {
                         self.ledger_ready = false;
-                        self.status = error;
+                        self.status = application_error_message(error, self.locale).to_owned();
                     }
                     LedgerMessage::Recovery(Ok(inspection)) => {
                         self.recovery_inspection = Some(inspection);
                         self.undo_inspection = None;
                     }
-                    LedgerMessage::Recovery(Err(error)) | LedgerMessage::Undo(Err(error)) => {
-                        self.status = error
+                    LedgerMessage::Recovery(Err(error)) => {
+                        self.status = application_error_message(error, self.locale).to_owned();
+                    }
+                    LedgerMessage::Undo(Err(error)) => {
+                        self.status = undo_error_message(error, self.locale).to_owned();
                     }
                     LedgerMessage::Undo(Ok(inspection)) => {
                         self.undo_inspection = Some(inspection);
@@ -3194,7 +3559,7 @@ impl RenamewrightApp {
                 });
                 self.status = self
                     .locale
-                    .text("Applying the current plan", "현재 계획을 적용 중입니다")
+                    .text("Renaming entries", "항목 이름을 바꾸는 중입니다")
                     .to_owned();
             }
             PendingConfirmation::Recovery { action, inspection } => {
@@ -3234,7 +3599,7 @@ impl RenamewrightApp {
                 });
                 self.status = self
                     .locale
-                    .text("Undo operation running", "실행 취소 작업을 실행 중입니다")
+                    .text("Undoing the name change", "이름 변경을 되돌리는 중입니다")
                     .to_owned();
             }
             PendingConfirmation::Cancel => {
@@ -3251,7 +3616,9 @@ impl RenamewrightApp {
                             .text("No cancellable operation", "취소 가능한 작업이 없습니다")
                             .to_owned();
                     }
-                    Err(error) => self.status = error.code().to_owned(),
+                    Err(error) => {
+                        self.status = recovery_error_message(error.code(), self.locale).to_owned()
+                    }
                 }
             }
         }
@@ -3272,11 +3639,11 @@ impl RenamewrightApp {
                         self.overrides.clear();
                         format!(
                             "{}: {}",
-                            self.locale.text("Apply finished", "적용 완료"),
-                            result.outcome()
+                            self.locale.text("Rename finished", "이름 변경 완료"),
+                            outcome_label(result.outcome(), self.locale)
                         )
                     }
-                    Err(error) => format!("Apply failed ({})", error.code()),
+                    Err(error) => apply_error_message(error.code(), self.locale).to_owned(),
                 };
                 self.refresh_ledger();
             }
@@ -3288,9 +3655,9 @@ impl RenamewrightApp {
                     Ok(result) => format!(
                         "{}: {}",
                         self.locale.text("Recovery finished", "복구 완료"),
-                        result.outcome()
+                        outcome_label(result.outcome(), self.locale)
                     ),
-                    Err(error) => format!("Recovery failed ({})", error.code()),
+                    Err(error) => recovery_error_message(error.code(), self.locale).to_owned(),
                 };
                 self.refresh_ledger();
             }
@@ -3301,10 +3668,10 @@ impl RenamewrightApp {
                 self.status = match result {
                     Ok(result) => format!(
                         "{}: {}",
-                        self.locale.text("Undo finished", "실행 취소 완료"),
-                        result.outcome()
+                        self.locale.text("Undo finished", "되돌리기 완료"),
+                        outcome_label(result.outcome(), self.locale)
                     ),
-                    Err(error) => format!("Undo failed ({})", error.code()),
+                    Err(error) => undo_error_message(error.code(), self.locale).to_owned(),
                 };
                 self.refresh_ledger();
             }
@@ -3327,13 +3694,13 @@ impl RenamewrightApp {
     fn show_ledger(&mut self, ui: &mut egui::Ui) {
         let filesystem_authority = self.filesystem_authority_enabled();
         ui.horizontal(|ui| {
-            ui.heading(self.locale.text(semantics::LEDGER, "원장"));
+            ui.heading(self.locale.text(semantics::LEDGER, "이름 변경 기록"));
             if ui
                 .add_enabled(
                     filesystem_authority && self.ledger_task.is_none(),
                     egui::Button::new(
                         self.locale
-                            .text(semantics::REFRESH_LEDGER, "원장 새로 고침"),
+                            .text(semantics::REFRESH_LEDGER, "이름 변경 기록 새로 고침"),
                     ),
                 )
                 .clicked()
@@ -3352,7 +3719,10 @@ impl RenamewrightApp {
         }
         if self.ledger.is_empty() {
             if self.ledger_task.is_none() {
-                ui.label(self.locale.text("No transactions", "트랜잭션이 없습니다"));
+                ui.label(self.locale.text(
+                    "No name changes have been recorded yet.",
+                    "아직 이름 변경 기록이 없습니다.",
+                ));
             }
             return;
         }
@@ -3399,12 +3769,20 @@ impl RenamewrightApp {
             |ui, row_range| {
                 for index in row_range {
                     let entry = &self.ledger[index];
-                    let label = format!(
-                        "#{} · {} · {}",
-                        entry.ledger_id(),
-                        entry.status(),
-                        entry.source_count()
-                    );
+                    let label = match self.locale {
+                        Locale::English => format!(
+                            "Name change #{} · {} · {}",
+                            entry.ledger_id(),
+                            ledger_status_label(entry.status(), self.locale),
+                            entry_count_label(entry.source_count(), self.locale)
+                        ),
+                        Locale::Korean => format!(
+                            "이름 변경 #{} · {} · {}",
+                            entry.ledger_id(),
+                            ledger_status_label(entry.status(), self.locale),
+                            entry_count_label(entry.source_count(), self.locale)
+                        ),
+                    };
                     ui.selectable_value(&mut selected, Some(entry.ledger_id()), label);
                 }
             },
@@ -3433,7 +3811,10 @@ impl RenamewrightApp {
             if ui
                 .add_enabled(
                     recovery_available && mutation_idle,
-                    egui::Button::new(self.locale.text(semantics::INSPECT_RECOVERY, "복구 검사")),
+                    egui::Button::new(
+                        self.locale
+                            .text(semantics::INSPECT_RECOVERY, "복구 방법 확인"),
+                    ),
                 )
                 .clicked()
             {
@@ -3442,7 +3823,7 @@ impl RenamewrightApp {
             if ui
                 .add_enabled(
                     undo_available && mutation_idle,
-                    egui::Button::new(self.locale.text(semantics::INSPECT_UNDO, "실행 취소 검사")),
+                    egui::Button::new(self.locale.text(semantics::INSPECT_UNDO, "되돌리기 확인")),
                 )
                 .clicked()
             {
@@ -3460,29 +3841,34 @@ impl RenamewrightApp {
         if let Some(inspection) = &self.recovery_inspection {
             ui.separator();
             ui.label(format!(
-                "{} · {} · {}",
-                inspection.direction(),
-                inspection.readiness(),
-                inspection
-                    .step_index()
-                    .map_or_else(|| "-".to_owned(), |step| step.to_string())
+                "{} · {}",
+                recovery_direction_label(inspection.direction(), self.locale),
+                recovery_readiness_label(inspection.readiness(), self.locale),
             ));
+            if let Some(step) = inspection.step_index() {
+                ui.label(match self.locale {
+                    Locale::English => {
+                        format!("Interrupted at step {}", step.saturating_add(1))
+                    }
+                    Locale::Korean => format!("{}단계에서 중단됨", step.saturating_add(1)),
+                });
+            }
             let mut requested_action = None;
             ui.horizontal(|ui| {
                 for (action, label, enabled) in [
                     (
                         RecoveryCommandAction::Resume,
-                        self.locale.text(semantics::RESUME, "계속"),
+                        recovery_action_label(RecoveryCommandAction::Resume, self.locale),
                         inspection.resume_available(),
                     ),
                     (
                         RecoveryCommandAction::Rollback,
-                        self.locale.text(semantics::ROLLBACK, "롤백"),
+                        recovery_action_label(RecoveryCommandAction::Rollback, self.locale),
                         inspection.rollback_available(),
                     ),
                     (
                         RecoveryCommandAction::Reconcile,
-                        self.locale.text(semantics::RECONCILE, "조정"),
+                        recovery_action_label(RecoveryCommandAction::Reconcile, self.locale),
                         inspection.reconcile_available(),
                     ),
                 ] {
@@ -3505,18 +3891,17 @@ impl RenamewrightApp {
         if let Some(inspection) = &self.undo_inspection {
             ui.separator();
             ui.label(format!(
-                "Plan #{} · {} · {}",
-                inspection.original_plan_id(),
-                inspection.readiness(),
-                inspection.source_count()
+                "{} · {}",
+                undo_readiness_label(inspection.readiness(), self.locale),
+                entry_count_label(inspection.source_count(), self.locale)
             ));
             if let Some(reason) = inspection.block_reason() {
-                ui.label(reason);
+                ui.label(undo_block_reason_label(reason, self.locale));
             }
             if ui
                 .add_enabled(
                     inspection.undo_available() && mutation_idle,
-                    egui::Button::new(self.locale.text(semantics::UNDO, "실행 취소")),
+                    egui::Button::new(self.locale.text(semantics::UNDO, "이 이름 변경 되돌리기")),
                 )
                 .clicked()
             {
@@ -3540,7 +3925,10 @@ impl RenamewrightApp {
             return;
         }
         match rfd::FileDialog::new()
-            .set_title("Add files to Renamewright")
+            .set_title(
+                self.locale
+                    .text("Add files to Renamewright", "이름을 바꿀 파일 추가"),
+            )
             .pick_files()
         {
             Some(paths) => self.start_source_admission(paths, context),
@@ -3558,7 +3946,10 @@ impl RenamewrightApp {
             return;
         }
         match rfd::FileDialog::new()
-            .set_title("Add one directory entry to Renamewright")
+            .set_title(
+                self.locale
+                    .text("Add a folder name to Renamewright", "이름을 바꿀 폴더 추가"),
+            )
             .pick_folder()
         {
             Some(path) => self.start_source_admission(vec![path], context),
@@ -3657,47 +4048,50 @@ impl RenamewrightApp {
 
     fn show_appearance_menu(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
-        ui.menu_button(self.locale.text(semantics::APPEARANCE, "모양"), |ui| {
-            ui.set_min_width(180.0);
-            ui.label(
-                RichText::new(self.locale.text("Theme", "테마"))
-                    .strong()
-                    .color(self.palette.ink),
-            );
-            ui.add_enabled_ui(!self.native_palette.high_contrast, |ui| {
-                for theme in AppearanceTheme::ALL {
-                    changed |= ui
-                        .selectable_value(
-                            &mut self.appearance.theme,
-                            theme,
-                            theme.label(self.locale),
-                        )
-                        .changed();
-                }
-            });
-            if self.native_palette.high_contrast {
-                ui.separator();
+        ui.menu_button(
+            self.locale.text(semantics::APPEARANCE, "화면 설정"),
+            |ui| {
+                ui.set_min_width(180.0);
                 ui.label(
-                    RichText::new(self.locale.text(
-                        semantics::HIGH_CONTRAST_OVERRIDES_APPEARANCE,
-                        "Windows 고대비가 모양 색상을 우선합니다",
-                    ))
-                    .color(self.palette.ink),
+                    RichText::new(self.locale.text("Theme", "테마"))
+                        .strong()
+                        .color(self.palette.ink),
                 );
-            }
-            ui.separator();
-            if ui
-                .button(
-                    self.locale
-                        .text(semantics::ADVANCED_APPEARANCE, "고급 모양 설정"),
-                )
-                .clicked()
-            {
-                self.appearance_advanced_open = true;
-                self.ledger_open = false;
-                ui.close();
-            }
-        });
+                ui.add_enabled_ui(!self.native_palette.high_contrast, |ui| {
+                    for theme in AppearanceTheme::ALL {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.appearance.theme,
+                                theme,
+                                theme.label(self.locale),
+                            )
+                            .changed();
+                    }
+                });
+                if self.native_palette.high_contrast {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(self.locale.text(
+                            semantics::HIGH_CONTRAST_OVERRIDES_APPEARANCE,
+                            "Windows 고대비 설정이 화면 색상보다 우선합니다",
+                        ))
+                        .color(self.palette.ink),
+                    );
+                }
+                ui.separator();
+                if ui
+                    .button(
+                        self.locale
+                            .text(semantics::ADVANCED_APPEARANCE, "고급 화면 설정"),
+                    )
+                    .clicked()
+                {
+                    self.appearance_advanced_open = true;
+                    self.ledger_open = false;
+                    ui.close();
+                }
+            },
+        );
         changed
     }
 
@@ -3706,7 +4100,7 @@ impl RenamewrightApp {
             ui.heading(
                 RichText::new(
                     self.locale
-                        .text(semantics::ADVANCED_APPEARANCE, "고급 모양 설정"),
+                        .text(semantics::ADVANCED_APPEARANCE, "고급 화면 설정"),
                 )
                 .color(self.palette.ink),
             );
@@ -3714,7 +4108,7 @@ impl RenamewrightApp {
                 if ui
                     .button(
                         self.locale
-                            .text(semantics::CLOSE_APPEARANCE, "모양 설정 닫기"),
+                            .text(semantics::CLOSE_APPEARANCE, "화면 설정 닫기"),
                     )
                     .clicked()
                 {
@@ -3725,7 +4119,7 @@ impl RenamewrightApp {
         ui.label(
             RichText::new(self.locale.text(
                 "These settings change the workbench view, never the rename plan.",
-                "이 설정은 작업대 표시만 바꾸며 이름 변경 계획에는 영향을 주지 않습니다.",
+                "화면 표시 방식만 바뀌며 이름 변경 내용에는 영향을 주지 않습니다.",
             ))
             .color(self.palette.ink_soft),
         );
@@ -3763,7 +4157,7 @@ impl RenamewrightApp {
             ui.label(
                 RichText::new(self.locale.text(
                     semantics::HIGH_CONTRAST_OVERRIDES_APPEARANCE,
-                    "Windows 고대비가 모양 색상을 우선합니다",
+                    "Windows 고대비 설정이 화면 색상보다 우선합니다",
                 ))
                 .color(self.palette.ink),
             );
@@ -3771,7 +4165,7 @@ impl RenamewrightApp {
 
         ui.add_space(8.0);
         ui.label(
-            RichText::new(self.locale.text(semantics::DENSITY, "밀도"))
+            RichText::new(self.locale.text(semantics::DENSITY, "간격"))
                 .strong()
                 .color(self.palette.ink),
         );
@@ -3809,7 +4203,7 @@ impl RenamewrightApp {
         ui.label(
             RichText::new(self.locale.text(
                 "Source, proposed name, status, and blocker reasons always remain visible.",
-                "원본, 변경안, 상태, 차단 사유는 항상 표시됩니다.",
+                "현재 이름, 바뀔 이름, 결과와 적용할 수 없는 이유는 항상 표시됩니다.",
             ))
             .color(self.palette.ink_soft),
         );
@@ -3830,12 +4224,12 @@ impl RenamewrightApp {
                     ui.label(RichText::new("->").color(self.palette.ink_soft));
                     ui.label(RichText::new("Trip_0001.jpg").color(self.palette.accent));
                     ui.label(
-                        RichText::new(self.locale.text("Changed", "변경됨"))
+                        RichText::new(self.locale.text("Will change", "변경 예정"))
                             .color(self.palette.accent)
                             .strong(),
                     );
                     ui.label(
-                        RichText::new(self.locale.text("Blocked", "차단됨"))
+                        RichText::new(self.locale.text("Cannot apply", "적용 불가"))
                             .color(self.palette.blocked)
                             .strong(),
                     );
@@ -3846,7 +4240,7 @@ impl RenamewrightApp {
         if ui
             .button(
                 self.locale
-                    .text(semantics::RESET_APPEARANCE, "고급 모양 초기화"),
+                    .text(semantics::RESET_APPEARANCE, "고급 화면 설정 초기화"),
             )
             .clicked()
         {
@@ -3885,11 +4279,8 @@ impl RenamewrightApp {
                     |plan| plan.rows().len(),
                 );
                 ui.label(
-                    RichText::new(match self.locale {
-                        Locale::English => format!("{source_count} entries"),
-                        Locale::Korean => format!("항목 {source_count}개"),
-                    })
-                    .color(self.palette.ink_soft),
+                    RichText::new(entry_count_label(source_count, self.locale))
+                        .color(self.palette.ink_soft),
                 );
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -3908,7 +4299,9 @@ impl RenamewrightApp {
                         }
                     });
                 let language_menu_open = language_menu.inner.is_some();
-                language_menu.response.on_hover_text(semantics::LANGUAGE);
+                language_menu
+                    .response
+                    .on_hover_text(self.locale.text(semantics::LANGUAGE, "언어"));
                 if language_menu_open {
                     self.ensure_korean_font(ui.ctx());
                 }
@@ -3932,12 +4325,10 @@ impl RenamewrightApp {
                     KoreanFontState::Idle | KoreanFontState::Ready => {}
                 }
                 appearance_changed |= self.show_appearance_menu(ui);
-                let history = ui.selectable_label(
-                    self.ledger_open,
-                    self.locale.text(semantics::HISTORY, "기록"),
-                );
+                let history_label = self.locale.text(semantics::HISTORY, "이름 변경 기록");
+                let history = ui.selectable_label(self.ledger_open, history_label);
                 history.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, semantics::HISTORY)
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, history_label)
                 });
                 if history.clicked() {
                     self.ledger_open = !self.ledger_open;
@@ -3945,15 +4336,18 @@ impl RenamewrightApp {
                         self.appearance_advanced_open = false;
                     }
                 }
-                if ui
+                let add_folder = ui
                     .add_enabled(
                         self.filesystem_authority_enabled(),
                         egui::Button::new(
-                            self.locale.text(semantics::ADD_FOLDER, "폴더 자체 추가"),
+                            self.locale.text(semantics::ADD_FOLDER, "폴더 이름 추가"),
                         ),
                     )
-                    .clicked()
-                {
+                    .on_hover_text(self.locale.text(
+                        "Adds only the folder itself, not the items inside it",
+                        "폴더 자체만 추가하며 안의 항목은 포함하지 않습니다",
+                    ));
+                if add_folder.clicked() {
                     self.choose_folder_entry(ui.ctx());
                 }
                 if ui
@@ -4001,10 +4395,12 @@ impl RenamewrightApp {
                     .show(ui, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.heading(
-                                RichText::new(self.locale.text(
-                                    "Add files or folder entries",
-                                    "파일 또는 폴더 항목 추가",
-                                ))
+                                RichText::new(
+                                    self.locale.text(
+                                        "Add files or folder names",
+                                        "파일 또는 폴더 이름 추가",
+                                    ),
+                                )
                                 .color(self.palette.accent_text),
                             );
                             ui.label(RichText::new(detail).color(self.palette.accent_text));
@@ -4016,13 +4412,16 @@ impl RenamewrightApp {
     fn show_rule_command_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading(
-                RichText::new(self.locale.text(semantics::RULES_HEADING, "이름 규칙"))
-                    .color(self.palette.ink),
+                RichText::new(
+                    self.locale
+                        .text(semantics::RULES_HEADING, "이름 바꾸기 규칙"),
+                )
+                .color(self.palette.ink),
             );
             ui.label(
                 RichText::new(
                     self.locale
-                        .text(semantics::RULES_ORDER_HELP, "왼쪽부터 순서대로 적용"),
+                        .text(semantics::RULES_ORDER_HELP, "앞의 규칙부터 차례로 반영"),
                 )
                 .color(self.palette.ink_soft),
             );
@@ -4030,7 +4429,7 @@ impl RenamewrightApp {
                 if ui
                     .selectable_label(
                         self.tools_open,
-                        self.locale.text(semantics::TOOLS, "프리셋 및 검토"),
+                        self.locale.text(semantics::TOOLS, "고급 도구"),
                     )
                     .clicked()
                 {
@@ -4064,7 +4463,7 @@ impl RenamewrightApp {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(self.locale.text(semantics::ACTIVE_RULES, "적용 중인 규칙"))
+                RichText::new(self.locale.text(semantics::ACTIVE_RULES, "규칙 순서"))
                     .strong()
                     .color(self.palette.ink),
             );
@@ -4072,7 +4471,7 @@ impl RenamewrightApp {
                 ui.label(
                     RichText::new(self.locale.text(
                         "Choose a button above to add a rule",
-                        "위 버튼을 눌러 규칙을 추가하세요",
+                        "위에서 원하는 규칙을 선택하세요",
                     ))
                     .color(self.palette.ink_soft),
                 );
@@ -4248,6 +4647,7 @@ impl RenamewrightApp {
             let mut changed = false;
             let mut done = false;
             let mut cancel = false;
+            let discard_new_rule = self.draft_rule_id.is_some() && !self.draft_rule_changed;
             if let Some(rule) = self.rules.get_mut(self.selected_rule) {
                 let rule_id = rule.rule_id();
                 let focus_first = self.focused_rule_id == Some(rule_id);
@@ -4263,16 +4663,21 @@ impl RenamewrightApp {
                                     .color(self.palette.ink),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui
-                                    .button(
-                                        self.locale.text(semantics::CANCEL_EDITING, "편집 취소"),
-                                    )
-                                    .clicked()
+                                if discard_new_rule
+                                    && ui
+                                        .button(self.locale.text(
+                                            semantics::CANCEL_EDITING,
+                                            "새 규칙 버리기",
+                                        ))
+                                        .clicked()
                                 {
                                     cancel = true;
                                 }
                                 if ui
-                                    .button(self.locale.text(semantics::DONE_EDITING, "완료"))
+                                    .button(
+                                        self.locale
+                                            .text(semantics::DONE_EDITING, "편집기 닫기"),
+                                    )
                                     .clicked()
                                 {
                                     done = true;
@@ -4294,14 +4699,18 @@ impl RenamewrightApp {
                             );
                         }
                         ui.label(
-                            RichText::new(self.locale.text(
-                                "Enter: done · Escape: close · preview updates while typing",
-                                "Enter: 완료 · Esc: 닫기 · 입력 중 미리보기 갱신",
-                            ))
+                            RichText::new(if discard_new_rule {
+                                self.locale.text(
+                                    "Enter: close editor · Escape: discard new rule · preview updates while typing",
+                                    "Enter: 편집기 닫기 · Esc: 새 규칙 버리기 · 입력 중 미리보기 갱신",
+                                )
+                            } else {
+                                self.locale.text(
+                                    "Enter or Escape: close editor · preview updates while typing",
+                                    "Enter 또는 Esc: 편집기 닫기 · 입력 중 미리보기 갱신",
+                                )
+                            })
                             .color(self.palette.ink_soft),
-                        );
-                        ui.label(
-                            RichText::new(semantics::HANGUL_IME_HELP).color(self.palette.ink_soft),
                         );
                     });
                 if focus_first {
@@ -4335,7 +4744,7 @@ impl RenamewrightApp {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(self.locale.text(semantics::PRESETS, "로컬 프리셋"))
+                RichText::new(self.locale.text(semantics::PRESETS, "저장한 프리셋"))
                     .strong()
                     .color(self.palette.ink),
             );
@@ -4360,7 +4769,7 @@ impl RenamewrightApp {
             if ui
                 .add_enabled(
                     self.plan.is_some() && self.document_task.is_none(),
-                    egui::Button::new(self.locale.text(semantics::INSPECT_JSON, "JSON 검토")),
+                    egui::Button::new(self.locale.text(semantics::INSPECT_JSON, "계획 JSON 보기")),
                 )
                 .clicked()
             {
@@ -4369,7 +4778,7 @@ impl RenamewrightApp {
             if ui
                 .add_enabled(
                     self.plan.is_some() && self.document_task.is_none(),
-                    egui::Button::new(self.locale.text(semantics::INSPECT_CSV, "CSV 검토")),
+                    egui::Button::new(self.locale.text(semantics::INSPECT_CSV, "계획 CSV 보기")),
                 )
                 .clicked()
             {
@@ -4408,7 +4817,8 @@ impl RenamewrightApp {
                                 .add_enabled(
                                     filesystem_authority,
                                     egui::Button::new(
-                                        self.locale.text(semantics::APPLY_PRESET, "프리셋 적용"),
+                                        self.locale
+                                            .text(semantics::APPLY_PRESET, "프리셋 불러오기"),
                                     ),
                                 )
                                 .clicked()
@@ -4516,7 +4926,7 @@ impl RenamewrightApp {
                     }
                 })
                 .response
-                .on_hover_text(semantics::DIAGNOSTIC_FILTER);
+                .on_hover_text(self.locale.text(semantics::DIAGNOSTIC_FILTER, "문제 필터"));
             ui.separator();
             let source_query_label =
                 ui.label(self.locale.text(semantics::SOURCE_QUERY_LABEL, "이름 필터"));
@@ -4556,7 +4966,7 @@ impl RenamewrightApp {
                     preview_column_label(
                         ui,
                         source_column_width,
-                        RichText::new(self.locale.text("Source", "원본"))
+                        RichText::new(self.locale.text("Current name", "현재 이름"))
                             .strong()
                             .color(self.palette.ink),
                     );
@@ -4570,7 +4980,10 @@ impl RenamewrightApp {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Other,
                             true,
-                            "Resize source and proposed columns",
+                            self.locale.text(
+                                "Resize current-name and new-name columns",
+                                "현재 이름과 바뀔 이름 열 너비 조절",
+                            ),
                         )
                     });
                     ui.painter().vline(
@@ -4590,28 +5003,57 @@ impl RenamewrightApp {
                     preview_column_label(
                         ui,
                         proposed_column_width,
-                        RichText::new(self.locale.text("Proposed", "변경안"))
+                        RichText::new(self.locale.text("New name", "바뀔 이름"))
                             .strong()
                             .color(self.palette.ink),
                     );
                     preview_column_label(
                         ui,
                         PREVIEW_STATUS_COLUMN_WIDTH,
-                        RichText::new(self.locale.text("Status", "상태"))
+                        RichText::new(self.locale.text("Result", "결과"))
                             .strong()
                             .color(self.palette.ink),
                     );
                     ui.label(
                         RichText::new(if self.appearance.show_diagnostics {
-                            self.locale.text("Diagnostics", "진단")
+                            self.locale.text("Problems and notes", "문제 및 안내")
                         } else {
-                            self.locale.text("Blocker reasons", "차단 사유")
+                            self.locale.text("Why it cannot apply", "적용할 수 없는 이유")
                         })
                         .strong()
                         .color(self.palette.ink),
                     );
                 });
                 ui.separator();
+                if visible.is_empty() {
+                    let no_entries = self
+                        .plan
+                        .as_ref()
+                        .is_none_or(|plan| plan.rows().is_empty());
+                    ui.add_space((ui.available_height() * 0.2).clamp(8.0, 72.0));
+                    ui.vertical_centered(|ui| {
+                        if no_entries {
+                            ui.heading(self.locale.text(
+                                "Add files or a folder name to start",
+                                "이름을 바꿀 파일이나 폴더를 추가하세요",
+                            ));
+                            ui.label(self.locale.text(
+                                "Drag files here or use Add files above. Add folder name includes only the folder itself, not the items inside it.",
+                                "파일을 여기에 놓거나 위의 파일 추가를 누르세요. 폴더 이름 추가는 폴더 자체만 포함하며 안의 항목은 추가하지 않습니다.",
+                            ));
+                        } else {
+                            ui.heading(self.locale.text(
+                                "No entries match these filters",
+                                "조건에 맞는 항목이 없습니다",
+                            ));
+                            ui.label(self.locale.text(
+                                "Change the result, problem, or name filters to show more entries.",
+                                "결과, 문제 또는 이름 필터를 바꿔 다른 항목을 표시하세요.",
+                            ));
+                        }
+                    });
+                    return;
+                }
                 let mut requested_override_row = None;
                 let mut requested_exclude_row = None;
                 let mut requested_rule = None;
@@ -4644,9 +5086,9 @@ impl RenamewrightApp {
                                             format!("{}{source}", self.synthetic_prefix());
                                         let blocked = Self::row_is_blocked(index);
                                         let status = if blocked {
-                                            self.locale.text("Blocked", "차단됨")
+                                            self.locale.text("Cannot apply", "적용 불가")
                                         } else {
-                                            self.locale.text("Changed", "변경됨")
+                                            self.locale.text("Will change", "변경 예정")
                                         };
                                         (
                                             None,
@@ -4655,7 +5097,10 @@ impl RenamewrightApp {
                                             Cow::Owned(proposed),
                                             status,
                                             if blocked {
-                                                self.locale.text("Sample conflict", "샘플 충돌")
+                                                self.locale.text(
+                                                    "Example name conflict",
+                                                    "예시 이름 충돌",
+                                                )
                                             } else {
                                                 ""
                                             }
@@ -4672,11 +5117,11 @@ impl RenamewrightApp {
                                             Cow::Borrowed(row.original_name()),
                                             Cow::Borrowed(row.proposed_name()),
                                             if row.status() == "blocked" {
-                                                self.locale.text("Blocked", "차단됨")
+                                                self.locale.text("Cannot apply", "적용 불가")
                                             } else if row.status() == "unchanged" {
                                                 self.locale.text("Unchanged", "변경 없음")
                                             } else {
-                                                self.locale.text("Changed", "변경됨")
+                                                self.locale.text("Will change", "변경 예정")
                                             },
                                             row.diagnostics()
                                                 .iter()
@@ -4765,10 +5210,10 @@ impl RenamewrightApp {
                                                     && ui
                                                         .small_button(match self.locale {
                                                             Locale::English => {
-                                                                format!("Related rule {position}")
+                                                                format!("Open rule {position}")
                                                             }
                                                             Locale::Korean => {
-                                                                format!("관련 규칙 {position}")
+                                                                format!("{position}번 규칙 열기")
                                                             }
                                                         })
                                                         .clicked()
@@ -4783,12 +5228,14 @@ impl RenamewrightApp {
                                                                 .contains_key(&source_id)
                                                             {
                                                                 self.locale.text(
-                                                                    "Edit override",
-                                                                    "재정의 편집",
+                                                                    "Edit assigned name",
+                                                                    "직접 지정한 이름 편집",
                                                                 )
                                                             } else {
-                                                                self.locale
-                                                                    .text("Override", "재정의")
+                                                                self.locale.text(
+                                                                    "Assign name",
+                                                                    "직접 이름 지정",
+                                                                )
                                                             },
                                                         )
                                                         .clicked()
@@ -4799,11 +5246,11 @@ impl RenamewrightApp {
                                                     && ui
                                                         .small_button(self.locale.text(
                                                             semantics::EXCLUDE_SOURCE,
-                                                            "계획에서 제거",
+                                                            "계획에서 빼기",
                                                         ))
                                                         .on_hover_text(self.locale.text(
-                                                            "Keeps the file or folder unchanged",
-                                                            "파일 또는 폴더는 변경하지 않습니다",
+                                                            "Leave this file or folder unchanged",
+                                                            "이 파일 또는 폴더의 이름은 바꾸지 않습니다",
                                                         ))
                                                         .clicked()
                                                 {
@@ -4812,11 +5259,19 @@ impl RenamewrightApp {
                                             });
                                         });
                                     row_response.widget_info(|| {
+                                        let label = match self.locale {
+                                            Locale::English => {
+                                                format!("{}, preview row", source.as_ref())
+                                            }
+                                            Locale::Korean => {
+                                                format!("{}, 미리보기 행", source.as_ref())
+                                            }
+                                        };
                                         egui::WidgetInfo::selected(
                                             egui::WidgetType::SelectableLabel,
                                             true,
                                             selected,
-                                            format!("Preview row {}", source.as_ref()),
+                                            label,
                                         )
                                     });
                                     if row_response.clicked() {
@@ -4892,54 +5347,58 @@ impl RenamewrightApp {
             && self.pending_admission_paths.is_empty()
             && self.ledger_ready
             && self.ledger_task.is_none();
-        let lock_reason = if self.synthetic_fixture && self.plan.is_none() {
-            self.locale.text(
+        let lock_reason: Cow<'static, str> = if self.synthetic_fixture && self.plan.is_none() {
+            Cow::Borrowed(self.locale.text(
                 "Sample preview cannot be applied",
                 "샘플 미리보기는 적용할 수 없습니다",
-            )
+            ))
         } else if self.plan.is_none() {
-            self.locale.text(
-                "Add entries to create a plan",
-                "항목을 추가해 계획을 만드세요",
-            )
+            Cow::Borrowed(self.locale.text(
+                "Add files or a folder name to create a rename plan",
+                "파일이나 폴더를 추가해 이름 변경 계획을 만드세요",
+            ))
         } else if self.admission_task.is_some() || !self.pending_admission_paths.is_empty() {
-            self.locale.text(
+            Cow::Borrowed(self.locale.text(
                 "Wait for selected entries to finish loading",
                 "선택한 항목을 모두 불러올 때까지 기다리세요",
-            )
+            ))
         } else if !self.plan_is_current
             || self.planning_due.is_some()
             || self.planning_task.is_some()
         {
-            self.locale.text(
-                "Wait for the latest preview before applying",
+            Cow::Borrowed(self.locale.text(
+                "Wait for the latest preview before renaming",
                 "최신 미리보기가 준비될 때까지 기다리세요",
-            )
+            ))
         } else if blocked_count > 0 {
-            self.locale.text(
-                "Resolve every blocked entry before applying",
-                "적용 전에 차단된 항목을 모두 해결하세요",
-            )
+            Cow::Owned(match self.locale {
+                Locale::English => format!(
+                    "Resolve {blocked_count} entries that cannot be applied before renaming"
+                ),
+                Locale::Korean => {
+                    format!("이름을 바꾸기 전에 적용 불가 항목 {blocked_count}개를 해결하세요")
+                }
+            })
         } else if self.journal_root.is_none() {
-            self.locale.text(
-                "Journal storage is unavailable",
-                "저널 저장소를 사용할 수 없습니다",
-            )
+            Cow::Borrowed(self.locale.text(
+                "Rename history storage is unavailable, so names cannot be changed",
+                "이름 변경 기록을 저장할 수 없어 이름을 바꿀 수 없습니다",
+            ))
         } else if !self.ledger_ready || self.ledger_task.is_some() {
-            self.locale.text(
+            Cow::Borrowed(self.locale.text(
                 "Wait for rename history checks to finish",
                 "이름 변경 기록 검사가 끝날 때까지 기다리세요",
-            )
+            ))
         } else if self.mutation_task.is_some() {
-            self.locale.text(
+            Cow::Borrowed(self.locale.text(
                 "Another filesystem operation is running",
                 "다른 파일 작업이 실행 중입니다",
-            )
+            ))
         } else {
-            self.locale.text(
+            Cow::Borrowed(self.locale.text(
                 "The current plan has no changes",
                 "현재 계획에 변경 사항이 없습니다",
-            )
+            ))
         };
 
         ui.horizontal(|ui| {
@@ -4962,12 +5421,16 @@ impl RenamewrightApp {
             }
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new(&self.status).color(self.palette.ink_soft));
+            let status = if self.status == semantics::NO_SOURCES {
+                self.locale
+                    .text(semantics::NO_SOURCES, "아직 추가한 항목이 없습니다")
+            } else {
+                &self.status
+            };
+            ui.label(RichText::new(status).color(self.palette.ink_soft));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let apply_label = match self.locale {
-                    Locale::English => format!("Apply {changed_count} changes"),
-                    Locale::Korean => format!("{changed_count}개 변경 적용"),
-                };
+                let apply_label = rename_entries_label(changed_count, self.locale);
+                let accessible_apply_label = apply_label.clone();
                 let apply_text = if self.palette.high_contrast && !can_apply {
                     RichText::new(apply_label).color(self.palette.disabled)
                 } else {
@@ -4975,7 +5438,11 @@ impl RenamewrightApp {
                 };
                 let apply = ui.add_enabled(can_apply, egui::Button::new(apply_text));
                 apply.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, can_apply, semantics::APPLY)
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        can_apply,
+                        accessible_apply_label.clone(),
+                    )
                 });
                 if apply.clicked()
                     && let Some(plan) = &self.plan
@@ -4984,13 +5451,6 @@ impl RenamewrightApp {
                         plan_id: plan.plan_id(),
                         changed_count: plan.changed_count(),
                     });
-                }
-                if !can_apply {
-                    ui.label(
-                        RichText::new(self.locale.text(semantics::APPLY_LOCKED, "적용 잠김"))
-                            .color(self.palette.blocked)
-                            .strong(),
-                    );
                 }
             });
         });
@@ -5016,7 +5476,7 @@ impl RenamewrightApp {
             } else {
                 application.inspect_plan_csv(plan_id)
             }
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.kind());
             let _ = sender.send(DocumentMessage::Inspection { json, result });
         });
         self.document_task = Some(DocumentTask {
@@ -5025,10 +5485,7 @@ impl RenamewrightApp {
         });
         self.status = self
             .locale
-            .text(
-                "Preparing plan inspection",
-                "계획 검토 문서를 준비 중입니다",
-            )
+            .text("Preparing the plan document", "계획 문서를 준비 중입니다")
             .to_owned();
     }
 
@@ -5041,7 +5498,10 @@ impl RenamewrightApp {
         };
         let extension = if json { "json" } else { "csv" };
         let Some(path) = rfd::FileDialog::new()
-            .set_title("Export the path-free Renamewright plan")
+            .set_title(
+                self.locale
+                    .text("Export the Renamewright plan", "이름 변경 계획 내보내기"),
+            )
             .add_filter(extension.to_uppercase(), &[extension])
             .set_file_name(format!("renamewright-plan.{extension}"))
             .save_file()
@@ -5060,7 +5520,7 @@ impl RenamewrightApp {
             } else {
                 application.export_plan_csv(plan_id, &path)
             }
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.kind());
             let _ = sender.send(DocumentMessage::Export { extension, result });
         });
         self.document_task = Some(DocumentTask {
@@ -5105,7 +5565,7 @@ impl RenamewrightApp {
                     }
                     | DocumentMessage::Export {
                         result: Err(error), ..
-                    } => self.status = error,
+                    } => self.status = application_error_message(error, self.locale).to_owned(),
                     DocumentMessage::Export {
                         extension,
                         result: Ok(()),
@@ -5141,36 +5601,47 @@ impl RenamewrightApp {
         let mut remove_override = false;
         let mut close_override = false;
         if let Some(editor) = self.override_editor.as_mut() {
-            egui::Window::new(self.locale.text("Filename override", "파일 이름 재정의"))
-                .collapsible(false)
-                .resizable(false)
-                .show(context, |ui| {
-                    ui.label(&editor.original_name);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut editor.value)
-                            .hint_text(self.locale.text("Proposed filename", "변경할 파일 이름")),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button(self.locale.text(semantics::SAVE_OVERRIDE, "재정의 저장"))
-                            .clicked()
-                        {
-                            save_override = true;
-                        }
-                        if ui
-                            .button(self.locale.text("Reset override", "재정의 초기화"))
-                            .clicked()
-                        {
-                            remove_override = true;
-                        }
-                        if ui
-                            .button(self.locale.text(semantics::CANCEL_OVERRIDE, "취소"))
-                            .clicked()
-                        {
-                            close_override = true;
-                        }
-                    });
+            egui::Window::new(
+                self.locale
+                    .text("Assign a name to this entry", "이 항목의 이름 직접 지정"),
+            )
+            .collapsible(false)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.label(match self.locale {
+                    Locale::English => format!("Current name: {}", editor.original_name),
+                    Locale::Korean => format!("현재 이름: {}", editor.original_name),
                 });
+                let name_label = ui.label(self.locale.text("New name", "직접 지정할 이름"));
+                ui.add(egui::TextEdit::singleline(&mut editor.value))
+                    .labelled_by(name_label.id);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(
+                            self.locale
+                                .text(semantics::SAVE_OVERRIDE, "직접 지정한 이름 저장"),
+                        )
+                        .clicked()
+                    {
+                        save_override = true;
+                    }
+                    if ui
+                        .button(
+                            self.locale
+                                .text("Use rule result", "규칙으로 만든 이름 사용"),
+                        )
+                        .clicked()
+                    {
+                        remove_override = true;
+                    }
+                    if ui
+                        .button(self.locale.text(semantics::CANCEL_OVERRIDE, "취소"))
+                        .clicked()
+                    {
+                        close_override = true;
+                    }
+                });
+            });
         }
         if save_override {
             if let Some(editor) = self.override_editor.take() {
@@ -5201,7 +5672,10 @@ impl RenamewrightApp {
                         );
                     });
                     if ui
-                        .button(self.locale.text(semantics::CLOSE_INSPECTOR, "검토 창 닫기"))
+                        .button(
+                            self.locale
+                                .text(semantics::CLOSE_INSPECTOR, "계획 문서 닫기"),
+                        )
                         .clicked()
                     {
                         close_inspection = true;
@@ -5217,47 +5691,72 @@ impl RenamewrightApp {
         if let Some(pending) = &self.pending_confirmation {
             let (title, detail, confirm_label) = match pending {
                 PendingConfirmation::Apply {
-                    plan_id,
+                    plan_id: _,
                     changed_count,
                 } => (
-                    self.locale.text(semantics::CONFIRM_ACTION, "작업 확인"),
+                    self.locale.text("Apply name changes", "이름 변경 적용"),
                     match self.locale {
-                        Locale::English => {
-                            format!("Plan #{plan_id} will rename {changed_count} entries")
-                        }
-                        Locale::Korean => {
-                            format!("계획 #{plan_id}에서 {changed_count}개 이름을 변경합니다")
-                        }
+                        Locale::English => format!(
+                            "Use the names shown in the preview to rename {}.",
+                            entry_count_label(*changed_count, self.locale)
+                        ),
+                        Locale::Korean => format!(
+                            "미리보기에 표시된 이름으로 {changed_count}개 항목의 이름을 바꿉니다."
+                        ),
                     },
-                    match self.locale {
-                        Locale::English => format!("Apply {changed_count} changes"),
-                        Locale::Korean => format!("{changed_count}개 변경"),
-                    },
+                    rename_entries_label(*changed_count, self.locale),
                 ),
-                PendingConfirmation::Recovery { action, inspection } => (
-                    self.locale.text(semantics::CONFIRM_ACTION, "작업 확인"),
-                    format!(
-                        "{:?} · transaction #{} · {} sources",
-                        action,
-                        inspection.ledger_id(),
-                        self.ledger
-                            .iter()
-                            .find(|entry| entry.ledger_id() == inspection.ledger_id())
-                            .map_or(0, LedgerEntryDto::source_count)
-                    ),
-                    self.locale.text("Confirm", "확인").to_owned(),
-                ),
+                PendingConfirmation::Recovery { action, inspection } => {
+                    let source_count = self
+                        .ledger
+                        .iter()
+                        .find(|entry| entry.ledger_id() == inspection.ledger_id())
+                        .map_or(0, LedgerEntryDto::source_count);
+                    let detail = match (action, self.locale) {
+                        (RecoveryCommandAction::Resume, Locale::English) => format!(
+                            "Continue the interrupted rename for {}.",
+                            entry_count_label(source_count, self.locale)
+                        ),
+                        (RecoveryCommandAction::Resume, Locale::Korean) => {
+                            format!("중단된 {source_count}개 항목의 이름 변경을 이어서 진행합니다.")
+                        }
+                        (RecoveryCommandAction::Rollback, Locale::English) => format!(
+                            "Restore the names that {} had before this operation.",
+                            entry_count_label(source_count, self.locale)
+                        ),
+                        (RecoveryCommandAction::Rollback, Locale::Korean) => {
+                            format!("{source_count}개 항목을 이 작업 전의 이름으로 되돌립니다.")
+                        }
+                        (RecoveryCommandAction::Reconcile, Locale::English) => format!(
+                            "Check the current locations of {} and refresh the recovery options.",
+                            entry_count_label(source_count, self.locale)
+                        ),
+                        (RecoveryCommandAction::Reconcile, Locale::Korean) => format!(
+                            "{source_count}개 항목의 현재 위치를 확인하고 가능한 복구 방법을 갱신합니다."
+                        ),
+                    };
+                    (
+                        recovery_action_label(*action, self.locale),
+                        detail,
+                        recovery_action_label(*action, self.locale).to_owned(),
+                    )
+                }
                 PendingConfirmation::Undo { inspection } => (
-                    self.locale.text(semantics::CONFIRM_ACTION, "작업 확인"),
-                    format!(
-                        "Undo plan #{} · {} sources",
-                        inspection.original_plan_id(),
-                        inspection.source_count()
-                    ),
-                    self.locale.text("Confirm", "확인").to_owned(),
+                    self.locale.text("Undo name change", "이름 변경 되돌리기"),
+                    match self.locale {
+                        Locale::English => format!(
+                            "Restore the previous names of {}.",
+                            entry_count_label(inspection.source_count(), self.locale)
+                        ),
+                        Locale::Korean => format!(
+                            "{}개 항목을 이전 이름으로 되돌립니다.",
+                            inspection.source_count()
+                        ),
+                    },
+                    undo_entries_label(inspection.source_count(), self.locale),
                 ),
                 PendingConfirmation::Cancel => (
-                    self.locale.text(semantics::CONFIRM_ACTION, "작업 확인"),
+                    self.locale.text("Cancel operation", "작업 취소"),
                     self.locale
                         .text("Request cancellation?", "작업 취소를 요청할까요?")
                         .to_owned(),
@@ -5272,15 +5771,15 @@ impl RenamewrightApp {
                 .show(context, |ui| {
                     ui.label(detail);
                     ui.label(self.locale.text(
-                        "The filesystem will be revalidated before mutation.",
-                        "변경 전에 파일 시스템을 다시 검증합니다.",
+                        "Files and folders will be checked again immediately before any names change.",
+                        "이름을 바꾸기 직전에 파일과 폴더 상태를 다시 확인합니다.",
                     ));
                     ui.horizontal(|ui| {
-                        if ui.button(confirm_label).clicked() {
-                            confirm_action = true;
-                        }
                         if ui.button(self.locale.text("Cancel", "취소")).clicked() {
                             cancel_confirmation = true;
+                        }
+                        if ui.button(confirm_label).clicked() {
+                            confirm_action = true;
                         }
                     });
                 });
@@ -5424,9 +5923,12 @@ impl RenamewrightApp {
                 .show(ui, |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            RichText::new(semantics::HIGH_CONTRAST_ACTIVE)
-                                .color(self.palette.ink)
-                                .strong(),
+                            RichText::new(self.locale.text(
+                                semantics::HIGH_CONTRAST_ACTIVE,
+                                "Windows 고대비 색상 사용 중",
+                            ))
+                            .color(self.palette.ink)
+                            .strong(),
                         );
                     });
                 });
@@ -5663,7 +6165,9 @@ mod tests {
         LedgerTask, Locale, MutationTask, NativePalette, PLANNING_DEBOUNCE,
         PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH, PendingConfirmation, PlanDto,
         PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto, adjacent_selection_index,
-        install_theme, install_theme_with_density, preview_column_label, semantics,
+        apply_error_message, install_theme, install_theme_with_density, ledger_status_label,
+        planning_error_message, preset_error_message, preview_column_label, recovery_error_message,
+        semantics, undo_error_message,
     };
 
     #[derive(Default)]
@@ -5841,12 +6345,11 @@ mod tests {
         let replace = harness.get_by_label(RuleKind::LiteralReplace.label(Locale::English));
         let prefix = harness
             .get_by_role_and_label(egui::accesskit::Role::TextInput, semantics::PREFIX_LABEL);
-        harness.get_by_label(semantics::HANGUL_IME_HELP);
         let source_query = harness.get_by_role_and_label(
             egui::accesskit::Role::TextInput,
             semantics::SOURCE_QUERY_LABEL,
         );
-        let apply = harness.get_by_label(semantics::APPLY);
+        let apply = harness.get_by_label("Rename 9990 entries");
         let move_up = harness.get_by_label(semantics::MOVE_RULE_UP);
         let drag_rule = harness.get_by_label("Drag rule 1");
         let remove_rule = harness.get_by_label(semantics::REMOVE_RULE);
@@ -5978,7 +6481,7 @@ mod tests {
             .extend([egui::HoveredFile::default(), egui::HoveredFile::default()]);
         harness.run_steps(1);
 
-        harness.get_by_label("Add files or folder entries");
+        harness.get_by_label("Add files or folder names");
         harness.get_by_label("Release to add 2 entries");
     }
 
@@ -5994,13 +6497,13 @@ mod tests {
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
-        harness.get_by_label("Preview row report.txt").click();
+        harness.get_by_label("report.txt, preview row").click();
         harness.run_ok();
         assert_eq!(harness.state().selected_preview_row, Some(0));
         harness.key_press(egui::Key::Enter);
         harness.run_ok();
 
-        harness.get_by_label("Filename override");
+        harness.get_by_label("Assign a name to this entry");
         assert_eq!(
             harness
                 .state()
@@ -6024,7 +6527,7 @@ mod tests {
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
-        let row = harness.get_by_label("Preview row report.txt");
+        let row = harness.get_by_label("report.txt, preview row");
         row.click();
         row.click();
         harness.run_ok();
@@ -6039,13 +6542,13 @@ mod tests {
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), ascii_synthetic_app());
 
-        harness.get_by_label("Blocked 10").click();
+        harness.get_by_label("Cannot apply 10").click();
         harness.run_ok();
 
         assert_eq!(harness.state().filter, PlanFilter::Blocked);
         assert_eq!(harness.state().selected_preview_row, Some(997));
         harness.get_by_label("10 shown");
-        harness.get_by_label("Preview row IMG_00997.jpg");
+        harness.get_by_label("IMG_00997.jpg, preview row");
     }
 
     #[test]
@@ -6072,7 +6575,7 @@ mod tests {
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
-        harness.get_by_label("Related rule 1").click();
+        harness.get_by_label("Open rule 1").click();
         harness.run_ok();
 
         assert!(harness.state().rule_editor_open);
@@ -6086,7 +6589,7 @@ mod tests {
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), ascii_synthetic_app());
         let divider = harness
-            .get_by_label("Resize source and proposed columns")
+            .get_by_label("Resize current-name and new-name columns")
             .rect()
             .center();
 
@@ -6319,9 +6822,9 @@ mod tests {
             .with_size(egui::vec2(1_100.0, 720.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
-        harness.get_by_label("Blocker reasons");
-        assert!(harness.query_all_by_label("Sample conflict").count() > 0);
-        harness.get_by_label(semantics::APPLY_LOCKED);
+        harness.get_by_label("Why it cannot apply");
+        assert!(harness.query_all_by_label("Example name conflict").count() > 0);
+        harness.get_by_label("Sample preview cannot be applied");
     }
 
     #[test]
@@ -6343,7 +6846,7 @@ mod tests {
 
         harness.get_by_label(semantics::RULES_HEADING);
         harness.get_by_label(semantics::PREVIEW_HEADING);
-        harness.get_by_label(semantics::APPLY_LOCKED);
+        harness.get_by_label("Add files or a folder name to create a rename plan");
         assert!(!harness.state().appearance_advanced_open);
 
         harness.get_by_label(semantics::APPEARANCE).click();
@@ -6355,7 +6858,7 @@ mod tests {
             .scroll_to_me();
         harness.run_ok();
         harness.get_by_label(semantics::RESET_APPEARANCE);
-        harness.get_by_label(semantics::APPLY_LOCKED);
+        harness.get_by_label("Add files or a folder name to create a rename plan");
         assert!(harness.state().appearance_advanced_open);
     }
 
@@ -6461,11 +6964,11 @@ mod tests {
 
         assert!(
             harness
-                .get_by_label(semantics::APPLY)
+                .get_by_label("Rename 1 entry")
                 .accesskit_node()
                 .is_disabled()
         );
-        harness.get_by_label("Wait for the latest preview before applying");
+        harness.get_by_label("Wait for the latest preview before renaming");
         Ok(())
     }
 
@@ -6487,7 +6990,7 @@ mod tests {
 
         assert!(palette.is_high_contrast());
         harness.get_by_label(semantics::HIGH_CONTRAST_ACTIVE);
-        let apply = harness.get_by_label(semantics::APPLY);
+        let apply = harness.get_by_label("Rename 9990 entries");
         assert!(apply.accesskit_node().is_disabled());
     }
 
@@ -6579,7 +7082,8 @@ mod tests {
 
         harness.get_by_label(semantics::AUTOMATION_BANNER);
         harness.get_by_label("0 shown");
-        harness.get_by_label("Add entries to create a plan");
+        harness.get_by_label("Add files or a folder name to create a rename plan");
+        harness.get_by_label("Add files or a folder name to start");
         assert!(harness.query_by_label(semantics::PREFIX_LABEL).is_none());
         assert!(harness.query_by_label("IMG_00000.jpg").is_none());
         Ok(())
@@ -6607,7 +7111,8 @@ mod tests {
 
         harness.get_by_label(semantics::NO_SOURCES);
         harness.get_by_label("0 shown");
-        harness.get_by_label("Add entries to create a plan");
+        harness.get_by_label("Add files or a folder name to create a rename plan");
+        harness.get_by_label("Add files or a folder name to start");
         harness.get_by_role_and_label(
             egui::accesskit::Role::Button,
             RuleKind::LiteralReplace.label(Locale::English),
@@ -6628,8 +7133,8 @@ mod tests {
             RuleKind::LiteralReplace.label(Locale::English),
         );
         harness.get_by_label(semantics::PREVIEW_HEADING);
-        harness.get_by_label(semantics::APPLY_LOCKED);
-        harness.get_by_label(semantics::APPLY);
+        harness.get_by_label("Sample preview cannot be applied");
+        harness.get_by_label("Rename 9990 entries");
     }
 
     #[test]
@@ -6672,7 +7177,7 @@ mod tests {
 
         assert!(
             harness
-                .get_by_label(semantics::APPLY)
+                .get_by_label("Rename 1 entry")
                 .accesskit_node()
                 .is_disabled()
         );
@@ -6735,14 +7240,50 @@ mod tests {
             .with_size(egui::vec2(1_200.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
-        let apply = harness.get_by_label(semantics::APPLY);
+        let apply = harness.get_by_label("Rename 1 entry");
         assert!(!apply.accesskit_node().is_disabled());
         apply.click();
         harness.run_ok();
-        harness.get_by_label(semantics::CONFIRM_ACTION);
-        harness.get_by_label("Apply 1 changes");
+        harness.get_by_label("Apply name changes");
+        assert_eq!(harness.query_all_by_label("Rename 1 entry").count(), 2);
         assert!(harness.state().pending_confirmation.is_some());
         Ok(())
+    }
+
+    #[test]
+    fn user_messages_hide_internal_status_and_error_codes() {
+        for code in [
+            "emptyLiteralSearch",
+            "invalidRegex",
+            "sourceAdmissionFailed",
+            "stalePlanningSnapshot",
+            "unknownOverrideSource",
+        ] {
+            assert_ne!(planning_error_message(code, Locale::English), code);
+            assert!(!planning_error_message(code, Locale::Korean).is_ascii());
+        }
+        for code in ["invalidPresetName", "duplicatePresetName"] {
+            assert_ne!(preset_error_message(code, Locale::English), code);
+            assert!(!preset_error_message(code, Locale::Korean).is_ascii());
+        }
+        for code in ["planChanged", "executionFailed"] {
+            assert_ne!(apply_error_message(code, Locale::English), code);
+            assert!(!apply_error_message(code, Locale::Korean).is_ascii());
+        }
+        for code in ["inspectionChanged", "actionUnavailable"] {
+            assert_ne!(recovery_error_message(code, Locale::English), code);
+            assert_ne!(undo_error_message(code, Locale::English), code);
+        }
+        for status in [
+            "completed",
+            "rolledBack",
+            "reconciliationRequired",
+            "recoveryRequired",
+            "damaged",
+        ] {
+            assert_ne!(ledger_status_label(status, Locale::English), status);
+            assert!(!ledger_status_label(status, Locale::Korean).is_ascii());
+        }
     }
 
     #[test]
@@ -6905,13 +7446,109 @@ mod tests {
             .build_ui_state(|ui, app| app.show(ui), app);
 
         harness.get_by_label("파일 추가");
-        harness.get_by_label("폴더 자체 추가");
-        harness.get_by_label("이름 규칙");
+        harness.get_by_label("폴더 이름 추가");
+        harness.get_by_label("이름 바꾸기 규칙");
+        harness.get_by_label("규칙 순서");
         harness.get_by_role_and_label(egui::accesskit::Role::Button, "앞에 붙이기");
         harness.get_by_label("접두사 텍스트");
+        harness.get_by_label("편집기 닫기");
         harness.get_by_label("미리보기");
         harness.get_by_label("전체");
-        harness.get_by_label("적용 잠김");
+        harness.get_by_label("현재 이름");
+        harness.get_by_label("바뀔 이름");
+        harness.get_by_label("결과");
+        harness.get_by_label("문제 및 안내");
+        harness.get_by_label("이름 변경 기록");
+        harness.get_by_label("화면 설정");
+        harness.get_by_label("고급 도구");
+        harness.get_by_label("규칙 앞으로 이동");
+        harness.get_by_label("규칙 1 드래그");
+        harness.get_by_label("규칙 제거");
+        harness.get_by_label("IMG_00000.jpg, 미리보기 행");
+        harness.get_by_label("9990개 이름 바꾸기");
+        harness.get_by_label("샘플 미리보기는 적용할 수 없습니다");
+    }
+
+    #[test]
+    fn korean_apply_confirmation_uses_task_language_and_exact_count() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product_with_data(
+            NativePalette::default(),
+            Some(directory.path().join("presets.json")),
+            Some(directory.path().join("journals")),
+        );
+        settle_ledger(&mut app);
+        app.locale = Locale::Korean;
+        app.set_prefix("완료-");
+        app.admit_sources_immediately(vec![source]);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_200.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        harness.get_by_label("1개 이름 바꾸기").click();
+        harness.run_ok();
+
+        harness.get_by_label("이름 변경 적용");
+        assert_eq!(harness.query_all_by_label("1개 이름 바꾸기").count(), 2);
+        harness.get_by_label("취소");
+        Ok(())
+    }
+
+    #[test]
+    fn korean_rule_editors_use_explanatory_field_labels() {
+        let cases: &[(RuleKind, &[&str])] = &[
+            (RuleKind::Prefix, &["접두사 텍스트"]),
+            (RuleKind::Suffix, &["접미사 텍스트"]),
+            (RuleKind::LiteralReplace, &["찾기", "바꿀 내용"]),
+            (RuleKind::RegexReplace, &["패턴", "바꿀 내용"]),
+            (
+                RuleKind::Sequence,
+                &[
+                    "번호 매기기 단위",
+                    "번호 순서 기준",
+                    "시작 번호",
+                    "증가값",
+                    "자릿수",
+                    "번호와 이름 사이",
+                    "번호 위치",
+                ],
+            ),
+            (RuleKind::Extension, &["처리 방법", "새 확장자"]),
+            (RuleKind::Case, &["바꿀 부분", "바꿀 형태"]),
+            (
+                RuleKind::WhitespaceCleanup,
+                &["바꿀 부분", "공백을 바꿀 문자"],
+            ),
+            (
+                RuleKind::UnicodeNormalization,
+                &["바꿀 부분", "유니코드 형식"],
+            ),
+            (
+                RuleKind::Range,
+                &["바꿀 부분", "처리 방법", "위치 기준", "시작 위치", "끝까지"],
+            ),
+            (
+                RuleKind::CharacterClass,
+                &["바꿀 부분", "처리 방법", "문자 종류"],
+            ),
+        ];
+
+        for (kind, labels) in cases {
+            let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+            app.locale = Locale::Korean;
+            app.rules = vec![kind.create(1)];
+            app.rule_editor_open = true;
+            let harness = Harness::builder()
+                .with_size(egui::vec2(1_180.0, 760.0))
+                .build_ui_state(|ui, app| app.show(ui), app);
+            for label in *labels {
+                harness.get_by_label(label);
+            }
+            assert!(harness.query_by_label("한글 IME 입력 확인").is_none());
+        }
     }
 
     #[test]
@@ -7205,7 +7842,7 @@ mod tests {
         );
         assert!(
             harness
-                .get_by_label(semantics::APPLY)
+                .get_by_label("Rename 9990 entries")
                 .accesskit_node()
                 .is_disabled()
         );

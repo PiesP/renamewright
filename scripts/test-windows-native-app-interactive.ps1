@@ -518,9 +518,9 @@ try {
   }
 
   foreach ($requiredName in @(
-    'AUTOMATION TEST MODE', 'Renamewright', 'Add files', 'Add folder entry',
+    'AUTOMATION TEST MODE', 'Renamewright', 'Add files', 'Add folder name',
     'Replace', 'Prefix', 'Suffix', 'Number', 'Move rule up', 'Move rule down', 'Remove rule',
-    '한글 IME 입력 확인', 'Apply'
+    'Prefix text', 'Rename 9990 entries'
   )) {
     $found = $false
     foreach ($element in $elements) {
@@ -531,7 +531,7 @@ try {
 
   $applyButton = Find-Element `
     -Elements $elements `
-    -Name 'Apply' `
+    -Name 'Rename 9990 entries' `
     -ControlType ([System.Windows.Automation.ControlType]::Button)
   if ($applyButton.Current.IsEnabled) {
     throw 'The native app exposed an enabled Apply button.'
@@ -620,7 +620,7 @@ try {
   $elements = Get-Descendants -Root $applicationRoot
   $addFolderButton = Find-Element `
     -Elements $elements `
-    -Name 'Add folder entry' `
+    -Name 'Add folder name' `
     -ControlType ([System.Windows.Automation.ControlType]::Button)
   if (-not $addFolderButton.Current.IsEnabled) {
     throw 'The native workbench did not expose explicit directory admission.'
@@ -628,7 +628,7 @@ try {
   Invoke-And-CloseDialog `
     -Button $addFolderButton `
     -OwnerProcessId $application.Id `
-    -Title 'Add one directory entry to Renamewright'
+    -Title 'Add a folder name to Renamewright'
 
   $dpi = [RenamewrightAcceptanceNativeMethods]::GetDpiForWindow($windowHandle)
   if (@(96, 120, 144, 192, 240) -notcontains $dpi) {
