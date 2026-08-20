@@ -126,9 +126,6 @@ pub mod semantics {
     pub const HISTORY: &str = "Rename history";
     pub const DONE_EDITING: &str = "Close editor";
     pub const CANCEL_EDITING: &str = "Discard new rule";
-    pub const RULE_PREFIX: &str = "Prefix";
-    pub const RULE_SEQUENCE: &str = "Sequence";
-    pub const RULE_EXTENSION: &str = "Extension";
     pub const PREFIX_LABEL: &str = "Prefix text";
     pub const PREVIEW_HEADING: &str = "Preview";
     pub const FILTER_ALL: &str = "All";
@@ -136,7 +133,6 @@ pub mod semantics {
     pub const FILTER_BLOCKED: &str = "Cannot apply";
     pub const SOURCE_QUERY_LABEL: &str = "Filter names";
     pub const APPLY: &str = "Rename entries";
-    pub const APPLY_LOCKED: &str = "Apply locked";
     pub const MOVE_RULE_UP: &str = "Move rule up";
     pub const MOVE_RULE_DOWN: &str = "Move rule down";
     pub const DRAG_RULE: &str = "Drag rule";
@@ -185,7 +181,6 @@ pub mod semantics {
     pub const RECONCILE: &str = "Check current file state";
     pub const UNDO: &str = "Undo name change";
     pub const CANCEL_MUTATION: &str = "Cancel operation";
-    pub const CONFIRM_ACTION: &str = "Confirm action";
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4301,7 +4296,9 @@ impl RenamewrightApp {
                         }
                     });
                 let language_menu_open = language_menu.inner.is_some();
-                language_menu.response.on_hover_text(semantics::LANGUAGE);
+                language_menu
+                    .response
+                    .on_hover_text(self.locale.text(semantics::LANGUAGE, "언어"));
                 if language_menu_open {
                     self.ensure_korean_font(ui.ctx());
                 }
@@ -4325,12 +4322,10 @@ impl RenamewrightApp {
                     KoreanFontState::Idle | KoreanFontState::Ready => {}
                 }
                 appearance_changed |= self.show_appearance_menu(ui);
-                let history = ui.selectable_label(
-                    self.ledger_open,
-                    self.locale.text(semantics::HISTORY, "이름 변경 기록"),
-                );
+                let history_label = self.locale.text(semantics::HISTORY, "이름 변경 기록");
+                let history = ui.selectable_label(self.ledger_open, history_label);
                 history.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, semantics::HISTORY)
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, history_label)
                 });
                 if history.clicked() {
                     self.ledger_open = !self.ledger_open;
@@ -4927,7 +4922,7 @@ impl RenamewrightApp {
                     }
                 })
                 .response
-                .on_hover_text(semantics::DIAGNOSTIC_FILTER);
+                .on_hover_text(self.locale.text(semantics::DIAGNOSTIC_FILTER, "문제 필터"));
             ui.separator();
             let source_query_label =
                 ui.label(self.locale.text(semantics::SOURCE_QUERY_LABEL, "이름 필터"));
@@ -5260,11 +5255,19 @@ impl RenamewrightApp {
                                             });
                                         });
                                     row_response.widget_info(|| {
+                                        let label = match self.locale {
+                                            Locale::English => {
+                                                format!("{}, preview row", source.as_ref())
+                                            }
+                                            Locale::Korean => {
+                                                format!("{}, 미리보기 행", source.as_ref())
+                                            }
+                                        };
                                         egui::WidgetInfo::selected(
                                             egui::WidgetType::SelectableLabel,
                                             true,
                                             selected,
-                                            format!("Preview row {}", source.as_ref()),
+                                            label,
                                         )
                                     });
                                     if row_response.clicked() {
@@ -5494,7 +5497,10 @@ impl RenamewrightApp {
         };
         let extension = if json { "json" } else { "csv" };
         let Some(path) = rfd::FileDialog::new()
-            .set_title("Export the path-free Renamewright plan")
+            .set_title(
+                self.locale
+                    .text("Export the Renamewright plan", "이름 변경 계획 내보내기"),
+            )
             .add_filter(extension.to_uppercase(), &[extension])
             .set_file_name(format!("renamewright-plan.{extension}"))
             .save_file()
@@ -5913,9 +5919,12 @@ impl RenamewrightApp {
                 .show(ui, |ui| {
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            RichText::new(semantics::HIGH_CONTRAST_ACTIVE)
-                                .color(self.palette.ink)
-                                .strong(),
+                            RichText::new(self.locale.text(
+                                semantics::HIGH_CONTRAST_ACTIVE,
+                                "Windows 고대비 색상 사용 중",
+                            ))
+                            .color(self.palette.ink)
+                            .strong(),
                         );
                     });
                 });
@@ -6484,7 +6493,7 @@ mod tests {
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
-        harness.get_by_label("Preview row report.txt").click();
+        harness.get_by_label("report.txt, preview row").click();
         harness.run_ok();
         assert_eq!(harness.state().selected_preview_row, Some(0));
         harness.key_press(egui::Key::Enter);
@@ -6514,7 +6523,7 @@ mod tests {
             .with_size(egui::vec2(1_180.0, 760.0))
             .build_ui_state(|ui, app| app.show(ui), app);
 
-        let row = harness.get_by_label("Preview row report.txt");
+        let row = harness.get_by_label("report.txt, preview row");
         row.click();
         row.click();
         harness.run_ok();
@@ -6535,7 +6544,7 @@ mod tests {
         assert_eq!(harness.state().filter, PlanFilter::Blocked);
         assert_eq!(harness.state().selected_preview_row, Some(997));
         harness.get_by_label("10 shown");
-        harness.get_by_label("Preview row IMG_00997.jpg");
+        harness.get_by_label("IMG_00997.jpg, preview row");
     }
 
     #[test]
@@ -7435,11 +7444,107 @@ mod tests {
         harness.get_by_label("파일 추가");
         harness.get_by_label("폴더 이름 추가");
         harness.get_by_label("이름 바꾸기 규칙");
+        harness.get_by_label("규칙 순서");
         harness.get_by_role_and_label(egui::accesskit::Role::Button, "앞에 붙이기");
         harness.get_by_label("접두사 텍스트");
+        harness.get_by_label("편집기 닫기");
         harness.get_by_label("미리보기");
         harness.get_by_label("전체");
+        harness.get_by_label("현재 이름");
+        harness.get_by_label("바뀔 이름");
+        harness.get_by_label("결과");
+        harness.get_by_label("문제 및 안내");
+        harness.get_by_label("이름 변경 기록");
+        harness.get_by_label("화면 설정");
+        harness.get_by_label("고급 도구");
+        harness.get_by_label("규칙 앞으로 이동");
+        harness.get_by_label("규칙 1 드래그");
+        harness.get_by_label("규칙 제거");
+        harness.get_by_label("IMG_00000.jpg, 미리보기 행");
+        harness.get_by_label("9990개 이름 바꾸기");
         harness.get_by_label("샘플 미리보기는 적용할 수 없습니다");
+    }
+
+    #[test]
+    fn korean_apply_confirmation_uses_task_language_and_exact_count() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product_with_data(
+            NativePalette::default(),
+            Some(directory.path().join("presets.json")),
+            Some(directory.path().join("journals")),
+        );
+        settle_ledger(&mut app);
+        app.locale = Locale::Korean;
+        app.set_prefix("완료-");
+        app.admit_sources_immediately(vec![source]);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1_200.0, 760.0))
+            .build_ui_state(|ui, app| app.show(ui), app);
+
+        harness.get_by_label("1개 이름 바꾸기").click();
+        harness.run_ok();
+
+        harness.get_by_label("이름 변경 적용");
+        assert_eq!(harness.query_all_by_label("1개 이름 바꾸기").count(), 2);
+        harness.get_by_label("취소");
+        Ok(())
+    }
+
+    #[test]
+    fn korean_rule_editors_use_explanatory_field_labels() {
+        let cases: &[(RuleKind, &[&str])] = &[
+            (RuleKind::Prefix, &["접두사 텍스트"]),
+            (RuleKind::Suffix, &["접미사 텍스트"]),
+            (RuleKind::LiteralReplace, &["찾기", "바꿀 내용"]),
+            (RuleKind::RegexReplace, &["패턴", "바꿀 내용"]),
+            (
+                RuleKind::Sequence,
+                &[
+                    "번호 매기기 단위",
+                    "번호 순서 기준",
+                    "시작 번호",
+                    "증가값",
+                    "자릿수",
+                    "번호와 이름 사이",
+                    "번호 위치",
+                ],
+            ),
+            (RuleKind::Extension, &["처리 방법", "새 확장자"]),
+            (RuleKind::Case, &["바꿀 부분", "바꿀 형태"]),
+            (
+                RuleKind::WhitespaceCleanup,
+                &["바꿀 부분", "공백을 바꿀 문자"],
+            ),
+            (
+                RuleKind::UnicodeNormalization,
+                &["바꿀 부분", "유니코드 형식"],
+            ),
+            (
+                RuleKind::Range,
+                &["바꿀 부분", "처리 방법", "위치 기준", "시작 위치", "끝까지"],
+            ),
+            (
+                RuleKind::CharacterClass,
+                &["바꿀 부분", "처리 방법", "문자 종류"],
+            ),
+        ];
+
+        for (kind, labels) in cases {
+            let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+            app.locale = Locale::Korean;
+            app.rules = vec![kind.create(1)];
+            app.rule_editor_open = true;
+            let harness = Harness::builder()
+                .with_size(egui::vec2(1_180.0, 760.0))
+                .build_ui_state(|ui, app| app.show(ui), app);
+            for label in *labels {
+                harness.get_by_label(label);
+            }
+            assert!(harness.query_by_label("한글 IME 입력 확인").is_none());
+        }
     }
 
     #[test]

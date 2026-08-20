@@ -500,3 +500,28 @@ fn windows_performance_acceptance_requests_the_synthetic_sample_explicitly() {
         assert!(!script.contains("syntheticSample"));
     }
 }
+
+#[test]
+fn windows_interactive_acceptance_tracks_user_facing_command_names() {
+    for required in [
+        "Add folder name",
+        "Rename 9990 entries",
+        "Add a folder name to Renamewright",
+    ] {
+        assert!(
+            INTERACTIVE_ACCEPTANCE.contains(required),
+            "interactive acceptance omitted current command name {required}"
+        );
+    }
+    for obsolete in [
+        "Add folder entry",
+        "Add one directory entry to Renamewright",
+        "한글 IME 입력 확인",
+        "-Name 'Apply'",
+    ] {
+        assert!(
+            !INTERACTIVE_ACCEPTANCE.contains(obsolete),
+            "interactive acceptance retained obsolete command name {obsolete}"
+        );
+    }
+}
