@@ -161,13 +161,13 @@ pub mod semantics {
     pub const INSPECT_CSV: &str = "View plan CSV";
     pub const EXPORT_JSON: &str = "Export JSON";
     pub const EXPORT_CSV: &str = "Export CSV";
-    pub const CLOSE_INSPECTOR: &str = "Close inspector";
+    pub const CLOSE_INSPECTOR: &str = "Close plan document";
     pub const SAVE_OVERRIDE: &str = "Save assigned name";
     pub const CANCEL_OVERRIDE: &str = "Cancel";
     pub const PRESETS: &str = "Saved presets";
     pub const PRESET_NAME: &str = "Preset name";
     pub const SAVE_PRESET: &str = "Save preset";
-    pub const APPLY_PRESET: &str = "Apply preset";
+    pub const APPLY_PRESET: &str = "Load preset";
     pub const DELETE_PRESET: &str = "Delete preset";
     pub const NO_SOURCES: &str = "No entries added yet";
     pub const AUTOMATION_BANNER: &str = "AUTOMATION TEST MODE";
@@ -3323,7 +3323,7 @@ impl RenamewrightApp {
         self.refresh_plan();
         self.status = format!(
             "{}: {name}",
-            self.locale.text("Preset applied", "프리셋 적용")
+            self.locale.text("Preset loaded", "프리셋을 불러왔습니다")
         );
     }
 
@@ -3346,8 +3346,8 @@ impl RenamewrightApp {
             self.status = self
                 .locale
                 .text(
-                    "The journal location is unavailable",
-                    "저널 위치를 사용할 수 없습니다",
+                    "Rename history storage is unavailable",
+                    "이름 변경 기록을 저장할 수 없습니다",
                 )
                 .to_owned();
             return;
@@ -3406,7 +3406,10 @@ impl RenamewrightApp {
         }
         self.start_ledger_task(
             self.locale
-                .text("Inspecting undo state", "실행 취소 상태를 검사 중입니다")
+                .text(
+                    "Checking Undo availability",
+                    "되돌리기 가능 여부를 확인 중입니다",
+                )
                 .to_owned(),
             move |application| {
                 LedgerMessage::Undo(
@@ -3556,7 +3559,7 @@ impl RenamewrightApp {
                 });
                 self.status = self
                     .locale
-                    .text("Applying the current plan", "현재 계획을 적용 중입니다")
+                    .text("Renaming entries", "항목 이름을 바꾸는 중입니다")
                     .to_owned();
             }
             PendingConfirmation::Recovery { action, inspection } => {
@@ -3596,7 +3599,7 @@ impl RenamewrightApp {
                 });
                 self.status = self
                     .locale
-                    .text("Undo operation running", "실행 취소 작업을 실행 중입니다")
+                    .text("Undoing the name change", "이름 변경을 되돌리는 중입니다")
                     .to_owned();
             }
             PendingConfirmation::Cancel => {
@@ -3665,7 +3668,7 @@ impl RenamewrightApp {
                 self.status = match result {
                     Ok(result) => format!(
                         "{}: {}",
-                        self.locale.text("Undo finished", "실행 취소 완료"),
+                        self.locale.text("Undo finished", "되돌리기 완료"),
                         outcome_label(result.outcome(), self.locale)
                     ),
                     Err(error) => undo_error_message(error.code(), self.locale).to_owned(),
@@ -4814,7 +4817,8 @@ impl RenamewrightApp {
                                 .add_enabled(
                                     filesystem_authority,
                                     egui::Button::new(
-                                        self.locale.text(semantics::APPLY_PRESET, "프리셋 적용"),
+                                        self.locale
+                                            .text(semantics::APPLY_PRESET, "프리셋 불러오기"),
                                     ),
                                 )
                                 .clicked()
@@ -5481,10 +5485,7 @@ impl RenamewrightApp {
         });
         self.status = self
             .locale
-            .text(
-                "Preparing plan inspection",
-                "계획 검토 문서를 준비 중입니다",
-            )
+            .text("Preparing the plan document", "계획 문서를 준비 중입니다")
             .to_owned();
     }
 
@@ -5671,7 +5672,10 @@ impl RenamewrightApp {
                         );
                     });
                     if ui
-                        .button(self.locale.text(semantics::CLOSE_INSPECTOR, "검토 창 닫기"))
+                        .button(
+                            self.locale
+                                .text(semantics::CLOSE_INSPECTOR, "계획 문서 닫기"),
+                        )
                         .clicked()
                     {
                         close_inspection = true;
