@@ -307,6 +307,13 @@ impl RenameLedger {
         Some((item.native_path.clone(), inspect_journal(&bytes)))
     }
 
+    pub(crate) fn journal_path(&self, ledger_id: LedgerId) -> Option<&Path> {
+        self.items
+            .iter()
+            .find(|item| item.projection.ledger_id == ledger_id && item.inspectable)
+            .map(|item| item.native_path.as_path())
+    }
+
     pub(crate) fn entry(&self, ledger_id: LedgerId) -> Option<LedgerEntry> {
         self.items
             .iter()

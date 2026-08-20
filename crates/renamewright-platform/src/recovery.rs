@@ -45,6 +45,19 @@ pub struct RecoveryTransactionInspection {
     reconcile_available: bool,
 }
 
+#[derive(Debug)]
+pub struct RecoveryTransactionSnapshot {
+    inspection: RecoveryTransactionInspection,
+    records: Vec<JournalRecord>,
+}
+
+impl RecoveryTransactionSnapshot {
+    #[must_use]
+    pub const fn inspection(&self) -> RecoveryTransactionInspection {
+        self.inspection
+    }
+}
+
 impl RecoveryTransactionInspection {
     #[must_use]
     pub const fn ledger_id(self) -> LedgerId {
@@ -201,6 +214,7 @@ pub enum RecoveryActionErrorKind {
     DispositionNotDeterministic,
     RequiresReconciliation,
     ActionUnavailable,
+    JournalChanged,
     IdentityStateChanged,
     InvalidProtocol,
 }
@@ -300,6 +314,15 @@ pub fn inspect_recovery_transaction<F: ExecutionFileSystem + ?Sized>(
     ledger_id: LedgerId,
     filesystem: &F,
 ) -> Result<RecoveryTransactionInspection, RecoveryInspectionError> {
+    inspect_recovery_transaction_snapshot(ledger, ledger_id, filesystem)
+        .map(|snapshot| snapshot.inspection)
+}
+
+pub fn inspect_recovery_transaction_snapshot<F: ExecutionFileSystem + ?Sized>(
+    ledger: &RenameLedger,
+    ledger_id: LedgerId,
+    filesystem: &F,
+) -> Result<RecoveryTransactionSnapshot, RecoveryInspectionError> {
     let ledger_entry = ledger.entry(ledger_id).ok_or_else(|| {
         RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::JournalUnavailable)
     })?;
@@ -323,7 +346,22 @@ pub fn inspect_recovery_transaction<F: ExecutionFileSystem + ?Sized>(
         .iter()
         .map(|frame| frame.record().clone())
         .collect::<Vec<_>>();
-    let status = replay_journal(&records).map_err(|_| {
+    let inspection =
+        inspect_recovery_records(ledger_id, plan_id, source_generation, &records, filesystem)?;
+    Ok(RecoveryTransactionSnapshot {
+        inspection,
+        records,
+    })
+}
+
+fn inspect_recovery_records<F: ExecutionFileSystem + ?Sized>(
+    ledger_id: LedgerId,
+    plan_id: PlanId,
+    source_generation: u64,
+    records: &[JournalRecord],
+    filesystem: &F,
+) -> Result<RecoveryTransactionInspection, RecoveryInspectionError> {
+    let status = replay_journal(records).map_err(|_| {
         RecoveryInspectionError::new(None, RecoveryInspectionErrorKind::InvalidProtocol)
     })?;
 
@@ -332,7 +370,7 @@ pub fn inspect_recovery_transaction<F: ExecutionFileSystem + ?Sized>(
         step_index,
     } = status
     {
-        let prepared = inspect_prepared_records(ledger_id, &records, filesystem)?;
+        let prepared = inspect_prepared_records(ledger_id, records, filesystem)?;
         let disposition = prepared.disposition();
         let reconcile_available = matches!(
             disposition,
@@ -378,8 +416,8 @@ pub fn inspect_recovery_transaction<F: ExecutionFileSystem + ?Sized>(
             ));
         }
     };
-    let plan = RecoveryPlan::from_records(&records).map_err(action_to_inspection_error)?;
-    let readiness = match validate_recorded_state(&records, &plan, filesystem) {
+    let plan = RecoveryPlan::from_records(records).map_err(action_to_inspection_error)?;
+    let readiness = match validate_recorded_state(records, &plan, filesystem) {
         Ok(()) => RecoveryReadiness::Ready,
         Err(error) if error.kind() == RecoveryActionErrorKind::IdentityStateChanged => {
             RecoveryReadiness::Blocked
@@ -420,22 +458,47 @@ pub fn reconcile_prepared_step<F: ExecutionFileSystem + ?Sized>(
     ledger_id: LedgerId,
     filesystem: &F,
 ) -> Result<JournalStatus, RecoveryActionError> {
-    let (journal_path, _) = ledger.item(ledger_id).ok_or_else(|| {
-        RecoveryActionError::new(None, RecoveryActionErrorKind::JournalUnavailable)
-    })?;
-    let (mut writer, mut records) = JournalWriter::resume(&journal_path).map_err(|error| {
-        RecoveryActionError::new(
-            None,
-            RecoveryActionErrorKind::Journal { kind: error.kind() },
-        )
-    })?;
-    let inspection =
-        inspect_prepared_records(ledger_id, &records, filesystem).map_err(|error| {
+    let snapshot =
+        inspect_recovery_transaction_snapshot(ledger, ledger_id, filesystem).map_err(|error| {
             RecoveryActionError::new(
                 error.source_id(),
                 RecoveryActionErrorKind::Inspection { kind: error.kind() },
             )
         })?;
+    reconcile_prepared_step_from_snapshot(ledger, &snapshot, filesystem)
+}
+
+pub fn reconcile_prepared_step_from_snapshot<F: ExecutionFileSystem + ?Sized>(
+    ledger: &RenameLedger,
+    snapshot: &RecoveryTransactionSnapshot,
+    filesystem: &F,
+) -> Result<JournalStatus, RecoveryActionError> {
+    let journal_path = ledger
+        .journal_path(snapshot.inspection.ledger_id())
+        .ok_or_else(|| {
+            RecoveryActionError::new(None, RecoveryActionErrorKind::JournalUnavailable)
+        })?;
+    let (mut writer, mut records) = JournalWriter::resume(journal_path).map_err(|error| {
+        RecoveryActionError::new(
+            None,
+            RecoveryActionErrorKind::Journal { kind: error.kind() },
+        )
+    })?;
+    if records != snapshot.records {
+        return Err(RecoveryActionError::new(
+            None,
+            RecoveryActionErrorKind::JournalChanged,
+        ));
+    }
+    let inspection =
+        inspect_prepared_records(snapshot.inspection.ledger_id(), &records, filesystem).map_err(
+            |error| {
+                RecoveryActionError::new(
+                    error.source_id(),
+                    RecoveryActionErrorKind::Inspection { kind: error.kind() },
+                )
+            },
+        )?;
     let entry = header_entries(&records)?
         .iter()
         .find(|entry| entry.source_id() == inspection.source_id())
@@ -501,15 +564,44 @@ where
     F: ExecutionFileSystem + ?Sized,
     C: Fn() -> bool,
 {
-    let (journal_path, _) = ledger.item(ledger_id).ok_or_else(|| {
-        RecoveryActionError::new(None, RecoveryActionErrorKind::JournalUnavailable)
-    })?;
-    let (mut writer, records) = JournalWriter::resume(&journal_path).map_err(|error| {
+    let snapshot =
+        inspect_recovery_transaction_snapshot(ledger, ledger_id, filesystem).map_err(|error| {
+            RecoveryActionError::new(
+                error.source_id(),
+                RecoveryActionErrorKind::Inspection { kind: error.kind() },
+            )
+        })?;
+    recover_transaction_from_snapshot(ledger, &snapshot, filesystem, action, should_cancel)
+}
+
+pub fn recover_transaction_from_snapshot<F, C>(
+    ledger: &RenameLedger,
+    snapshot: &RecoveryTransactionSnapshot,
+    filesystem: &F,
+    action: RecoveryAction,
+    should_cancel: C,
+) -> Result<ExecutionOutcome, RecoveryActionError>
+where
+    F: ExecutionFileSystem + ?Sized,
+    C: Fn() -> bool,
+{
+    let journal_path = ledger
+        .journal_path(snapshot.inspection.ledger_id())
+        .ok_or_else(|| {
+            RecoveryActionError::new(None, RecoveryActionErrorKind::JournalUnavailable)
+        })?;
+    let (mut writer, records) = JournalWriter::resume(journal_path).map_err(|error| {
         RecoveryActionError::new(
             None,
             RecoveryActionErrorKind::Journal { kind: error.kind() },
         )
     })?;
+    if records != snapshot.records {
+        return Err(RecoveryActionError::new(
+            None,
+            RecoveryActionErrorKind::JournalChanged,
+        ));
+    }
     let status = replay_journal(&records)
         .map_err(|_| RecoveryActionError::new(None, RecoveryActionErrorKind::InvalidProtocol))?;
     if matches!(status, JournalStatus::ReconciliationRequired { .. }) {

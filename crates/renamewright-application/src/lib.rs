@@ -19,10 +19,12 @@ use renamewright_platform::{
     ExecutionFileSystem, ExecutionOutcome, ExecutionStartError, FreezeExecutionErrorKind,
     FrozenExecutionPlan, LedgerEntry, LedgerId, LedgerStatus, MAX_ADMITTED_SOURCES,
     PlanningSnapshot, PreparedStepDisposition, RecoveryAction, RecoveryReadiness,
-    RecoveryTransactionInspection, RenameLedger, SourceRegistry, UndoBlockReason, UndoReadiness,
-    UndoTransactionInspection, execute_frozen_plan, execute_prepared_undo, freeze_execution_plan,
-    inspect_recovery_transaction, inspect_undo_transaction, inspect_undo_transaction_snapshot,
-    prepare_undo_transaction_from_snapshot, reconcile_prepared_step, recover_transaction,
+    RecoveryTransactionInspection, RecoveryTransactionSnapshot, RenameLedger, SourceRegistry,
+    UndoBlockReason, UndoReadiness, UndoTransactionInspection, execute_frozen_plan,
+    execute_prepared_undo, freeze_execution_plan, inspect_recovery_transaction,
+    inspect_recovery_transaction_snapshot, inspect_undo_transaction,
+    inspect_undo_transaction_snapshot, prepare_undo_transaction_from_snapshot,
+    reconcile_prepared_step_from_snapshot, recover_transaction_from_snapshot,
 };
 use serde::ser::{SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
@@ -2503,7 +2505,7 @@ where
             .ledger
             .lock()
             .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
-        validate_recovery_expectation(&mut ledger, request, ledger_id, filesystem)?
+        validate_recovery_expectation(&mut ledger, request, ledger_id, filesystem)?.inspection()
     };
     if !confirm(request.action, inspection) {
         let mut ledger = state
@@ -2524,31 +2526,32 @@ where
         .ledger
         .lock()
         .map_err(|_| RecoveryCommandErrorKind::StateUnavailable)?;
-    validate_recovery_expectation(&mut ledger, request, ledger_id, filesystem)?;
+    let snapshot = validate_recovery_expectation(&mut ledger, request, ledger_id, filesystem)?;
     let recovery_session = RecoverySession::begin(
         &state.recovery_control,
         request.action == RecoveryCommandAction::Resume
             && inspection.direction() == ExecutionDirection::Forward,
     )?;
     let action_result = match request.action {
-        RecoveryCommandAction::Resume => recover_transaction(
+        RecoveryCommandAction::Resume => recover_transaction_from_snapshot(
             &ledger,
-            ledger_id,
+            &snapshot,
             filesystem,
             RecoveryAction::Resume,
             || recovery_session.cancel_requested(),
         )
         .map(recovery_outcome_name),
-        RecoveryCommandAction::Rollback => recover_transaction(
+        RecoveryCommandAction::Rollback => recover_transaction_from_snapshot(
             &ledger,
-            ledger_id,
+            &snapshot,
             filesystem,
             RecoveryAction::Rollback,
             || false,
         )
         .map(recovery_outcome_name),
         RecoveryCommandAction::Reconcile => {
-            reconcile_prepared_step(&ledger, ledger_id, filesystem).map(|_| "reconciled")
+            reconcile_prepared_step_from_snapshot(&ledger, &snapshot, filesystem)
+                .map(|_| "reconciled")
         }
     };
     let refresh_result = ledger.refresh();
@@ -2725,22 +2728,23 @@ fn validate_recovery_expectation<F>(
     request: &RecoveryRequestDto,
     ledger_id: LedgerId,
     filesystem: &F,
-) -> Result<RecoveryTransactionInspection, RecoveryCommandErrorKind>
+) -> Result<RecoveryTransactionSnapshot, RecoveryCommandErrorKind>
 where
     F: ExecutionFileSystem + ?Sized,
 {
     ledger
         .refresh()
         .map_err(|_| RecoveryCommandErrorKind::LedgerRefreshFailed)?;
-    let inspection = inspect_recovery_transaction(ledger, ledger_id, filesystem)
+    let snapshot = inspect_recovery_transaction_snapshot(ledger, ledger_id, filesystem)
         .map_err(|_| RecoveryCommandErrorKind::InspectionChanged)?;
+    let inspection = snapshot.inspection();
     if RecoveryExpectationDto::from(inspection) != request.inspection {
         return Err(RecoveryCommandErrorKind::InspectionChanged);
     }
     if !recovery_action_is_available(request.action, inspection) {
         return Err(RecoveryCommandErrorKind::ActionUnavailable);
     }
-    Ok(inspection)
+    Ok(snapshot)
 }
 
 fn request_recovery_cancellation(
@@ -3202,16 +3206,21 @@ mod tests {
     use std::error::Error;
     use std::ffi::OsString;
     use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::path::{Path, PathBuf};
+    #[cfg(target_os = "linux")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(target_os = "linux")]
+    use renamewright_core::{ExecutionIdentity, RenameRule, build_plan_with_environment};
     use renamewright_core::{
         ParentId, PlanId, SourceId, SourceSnapshot, TargetPolicy, ValidationEnvironment,
         build_plan_with_rule_pipeline_overrides_and_environment,
     };
     #[cfg(target_os = "linux")]
-    use renamewright_core::{RenameRule, build_plan_with_environment};
-    #[cfg(target_os = "linux")]
     use renamewright_platform::{
-        ExecutionOutcome, LinuxExecutionFileSystem, execute_frozen_plan, freeze_execution_plan,
+        ExecutionFileSystem, ExecutionFsError, ExecutionFsErrorKind, ExecutionOutcome,
+        LinuxExecutionFileSystem, execute_frozen_plan, freeze_execution_plan,
         inspect_recovery_transaction, inspect_undo_transaction,
     };
 
@@ -3226,6 +3235,42 @@ mod tests {
         admit_dropped_sources, compile_rule_request, csv_cell, plan_document_csv,
         plan_document_json, plan_from_snapshot,
     };
+
+    #[cfg(target_os = "linux")]
+    struct JournalSwappingFileSystem {
+        inner: LinuxExecutionFileSystem,
+        journal_path: PathBuf,
+        replacement: Vec<u8>,
+        identity_calls: AtomicUsize,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl ExecutionFileSystem for JournalSwappingFileSystem {
+        fn identity(
+            &self,
+            parent: &Path,
+            native_name: &std::ffi::OsStr,
+        ) -> Result<ExecutionIdentity, ExecutionFsError> {
+            let identity = self.inner.identity(parent, native_name);
+            if self.identity_calls.fetch_add(1, Ordering::SeqCst) == 3
+                && fs::write(&self.journal_path, &self.replacement).is_err()
+            {
+                return Err(ExecutionFsError::from_kind(ExecutionFsErrorKind::IoFailure));
+            }
+            identity
+        }
+
+        fn rename_no_replace(
+            &self,
+            parent: &Path,
+            source_name: &std::ffi::OsStr,
+            target_name: &std::ffi::OsStr,
+            expected_identity: ExecutionIdentity,
+        ) -> Result<ExecutionIdentity, ExecutionFsError> {
+            self.inner
+                .rename_no_replace(parent, source_name, target_name, expected_identity)
+        }
+    }
     #[cfg(target_os = "linux")]
     use super::{
         PrepareExecutionError, RecoveryCommandAction, RecoveryCommandErrorKind,
@@ -4442,6 +4487,95 @@ mod tests {
         assert!(!serialized.contains("private-final"));
         assert!(!serialized.contains("private-journal"));
         assert!(!serialized.contains(&directory.path().display().to_string()));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_command_binds_execution_to_the_post_confirmation_journal()
+    -> Result<(), Box<dyn Error>> {
+        let authorized_directory = tempfile::tempdir()?;
+        let authorized_source = authorized_directory.path().join("source.txt");
+        fs::write(&authorized_source, b"authorized")?;
+        let mut authorized_registry = renamewright_platform::SourceRegistry::new();
+        authorized_registry.admit_paths([authorized_source.clone()])?;
+        let authorized_plan = build_plan_with_environment(
+            PlanId::new(169),
+            authorized_registry.generation(),
+            &authorized_registry.snapshots(),
+            &[RenameRule::prefix("final-")],
+            TargetPolicy::windows(),
+            &authorized_registry.validation_environment(),
+        );
+        let plain_filesystem = LinuxExecutionFileSystem::new();
+        let authorized_frozen =
+            freeze_execution_plan(&authorized_registry, &authorized_plan, &plain_filesystem)?;
+        let journal_path = authorized_directory.path().join("authorized.rwj");
+        fs::write(
+            &journal_path,
+            renamewright_platform::encode_journal(&[authorized_frozen.initial_record()])?,
+        )?;
+
+        let replacement_directory = tempfile::tempdir()?;
+        let replacement_source = replacement_directory.path().join("source.txt");
+        fs::write(&replacement_source, b"replacement")?;
+        let mut replacement_registry = renamewright_platform::SourceRegistry::new();
+        replacement_registry.admit_paths([replacement_source.clone()])?;
+        let replacement_plan = build_plan_with_environment(
+            PlanId::new(169),
+            replacement_registry.generation(),
+            &replacement_registry.snapshots(),
+            &[RenameRule::prefix("final-")],
+            TargetPolicy::windows(),
+            &replacement_registry.validation_environment(),
+        );
+        let replacement_frozen =
+            freeze_execution_plan(&replacement_registry, &replacement_plan, &plain_filesystem)?;
+        let replacement =
+            renamewright_platform::encode_journal(&[replacement_frozen.initial_record()])?;
+
+        let state = ApplicationService::default();
+        *state.ledger.lock().map_err(|_| "ledger lock failed")? =
+            renamewright_platform::RenameLedger::discover(authorized_directory.path())?;
+        let inspection = {
+            let ledger = state.ledger.lock().map_err(|_| "ledger lock failed")?;
+            let ledger_id = ledger
+                .entries()
+                .next()
+                .ok_or("ledger was empty")?
+                .ledger_id();
+            inspect_recovery_transaction(&ledger, ledger_id, &plain_filesystem)?
+        };
+        let request = RecoveryRequestDto {
+            action: RecoveryCommandAction::Resume,
+            inspection: RecoveryExpectationDto::from(inspection),
+        };
+        let swapping_filesystem = JournalSwappingFileSystem {
+            inner: LinuxExecutionFileSystem::new(),
+            journal_path,
+            replacement,
+            identity_calls: AtomicUsize::new(0),
+        };
+
+        let error = perform_recovery_request(&state, &request, &swapping_filesystem, |_, _| true)
+            .err()
+            .ok_or("a post-confirmation journal substitution reached mutation")?;
+
+        assert_eq!(error, RecoveryCommandErrorKind::RecoveryFailed);
+        assert_eq!(fs::read(authorized_source)?, b"authorized");
+        assert_eq!(fs::read(replacement_source)?, b"replacement");
+        assert!(
+            !authorized_directory
+                .path()
+                .join("final-source.txt")
+                .exists()
+        );
+        assert!(
+            !replacement_directory
+                .path()
+                .join("final-source.txt")
+                .exists()
+        );
         Ok(())
     }
 

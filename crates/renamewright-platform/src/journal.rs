@@ -38,6 +38,7 @@ pub enum JournalCodecErrorKind {
     UnknownRecordKind { kind: u8 },
     InvalidPayload,
     InvalidNativeNameEncoding,
+    TooManyEntries { entry_count: u32 },
     IntegerOutOfRange,
     SequenceMismatch { expected: u64, actual: u64 },
 }
@@ -770,6 +771,20 @@ fn encode_record(
             step_count,
             entries,
         } => {
+            let entry_count = u32::try_from(entries.len()).map_err(|_| {
+                JournalCodecError::new(
+                    frame_index,
+                    JournalCodecErrorKind::TooManyEntries {
+                        entry_count: u32::MAX,
+                    },
+                )
+            })?;
+            if entries.len() > crate::MAX_ADMITTED_SOURCES {
+                return Err(JournalCodecError::new(
+                    frame_index,
+                    JournalCodecErrorKind::TooManyEntries { entry_count },
+                ));
+            }
             put_u64(payload, plan_id.value());
             put_u64(payload, *source_generation);
             put_usize(payload, *step_count, frame_index)?;
@@ -840,7 +855,13 @@ fn decode_record(
             let plan_id = PlanId::new(cursor.read_u64()?);
             let source_generation = cursor.read_u64()?;
             let step_count = cursor.read_usize()?;
-            let entry_count = cursor.read_u32()? as usize;
+            let encoded_entry_count = cursor.read_u32()?;
+            let entry_count = encoded_entry_count as usize;
+            if entry_count > crate::MAX_ADMITTED_SOURCES {
+                return Err(cursor.error(JournalCodecErrorKind::TooManyEntries {
+                    entry_count: encoded_entry_count,
+                }));
+            }
             let mut entries = Vec::with_capacity(entry_count.min(1024));
             for _ in 0..entry_count {
                 entries.push(decode_entry(&mut cursor, schema_version)?);
@@ -1380,6 +1401,61 @@ mod tests {
             error.map(|value| value.kind()),
             Some(JournalCodecErrorKind::InvalidPayload)
         );
+    }
+
+    #[test]
+    fn decoder_rejects_oversized_entry_count_before_decoding_entries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let record = JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(1),
+            source_generation: 1,
+            step_count: 0,
+            entries: Vec::new(),
+        };
+        let mut bytes = encode_frame_for_version(0, &record, 0, super::JOURNAL_SCHEMA_VERSION)?;
+        let entry_count_offset = super::FRAME_HEADER_BYTES + 24;
+        let hostile_count = u32::try_from(crate::MAX_ADMITTED_SOURCES + 1)?;
+        bytes[entry_count_offset..entry_count_offset + 4]
+            .copy_from_slice(&hostile_count.to_le_bytes());
+        let checksum = crc32_parts(&[&bytes[4..20], &bytes[super::FRAME_HEADER_BYTES..]]);
+        bytes[20..24].copy_from_slice(&checksum.to_le_bytes());
+
+        let error = decode_journal(&bytes)
+            .err()
+            .ok_or("an oversized entry count was accepted")?;
+
+        assert_eq!(
+            error.kind(),
+            JournalCodecErrorKind::TooManyEntries {
+                entry_count: hostile_count,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codec_round_trips_the_admission_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let JournalRecord::TransactionStarted { entries, .. } =
+            transaction_started_with_native_parent(None)
+        else {
+            return Err("fixture changed record kind".into());
+        };
+        let entry = entries.into_iter().next().ok_or("fixture had no entry")?;
+        let record = JournalRecord::TransactionStarted {
+            plan_id: PlanId::new(1),
+            source_generation: 1,
+            step_count: crate::MAX_ADMITTED_SOURCES.saturating_mul(2),
+            entries: std::iter::repeat_n(entry, crate::MAX_ADMITTED_SOURCES).collect(),
+        };
+
+        let bytes = super::encode_journal(&[record])?;
+        let frames = decode_journal(&bytes)?;
+        let JournalRecord::TransactionStarted { entries, .. } = frames[0].record() else {
+            return Err("decoded journal changed record kind".into());
+        };
+
+        assert_eq!(entries.len(), crate::MAX_ADMITTED_SOURCES);
+        Ok(())
     }
 
     #[test]

@@ -45,8 +45,9 @@ pub use recovery::{
     PreparedStepDisposition, PreparedStepInspection, RecoveryAction, RecoveryActionError,
     RecoveryActionErrorKind, RecoveryInspectionError, RecoveryInspectionErrorKind,
     RecoveryLocation, RecoveryLocationState, RecoveryObservation, RecoveryReadiness,
-    RecoveryTransactionInspection, inspect_prepared_step, inspect_recovery_transaction,
-    reconcile_prepared_step, recover_transaction,
+    RecoveryTransactionInspection, RecoveryTransactionSnapshot, inspect_prepared_step,
+    inspect_recovery_transaction, inspect_recovery_transaction_snapshot, reconcile_prepared_step,
+    reconcile_prepared_step_from_snapshot, recover_transaction, recover_transaction_from_snapshot,
 };
 pub use undo::{
     PreparedUndo, UndoBlockReason, UndoError, UndoErrorKind, UndoReadiness,
