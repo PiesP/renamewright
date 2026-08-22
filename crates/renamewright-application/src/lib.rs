@@ -4937,6 +4937,45 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn apply_preserves_decomposed_korean_and_japanese_native_names() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_root = directory.path().join("journals");
+        let decomposed_korean = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.txt";
+        let decomposed_japanese = "\u{304b}\u{3099}.txt";
+        let korean_source = directory.path().join(decomposed_korean);
+        let japanese_source = directory.path().join(decomposed_japanese);
+        fs::write(&korean_source, b"korean")?;
+        fs::write(&japanese_source, b"japanese")?;
+        let state = ApplicationService::default();
+        state.initialize(&journal_root)?;
+        let plan = state.admit_sources_with_rules(
+            [korean_source.clone(), japanese_source.clone()],
+            ApplicationService::prefix_rule_request("copy-"),
+        )?;
+
+        let result = state
+            .apply_latest_plan(plan.plan_id(), &LinuxExecutionFileSystem::new(), || false)
+            .map_err(|error| error.code())?;
+
+        assert_eq!(result.outcome(), "completed");
+        assert!(!korean_source.exists());
+        assert!(!japanese_source.exists());
+        assert_eq!(
+            fs::read(directory.path().join(format!("copy-{decomposed_korean}")))?,
+            b"korean"
+        );
+        assert_eq!(
+            fs::read(directory.path().join(format!("copy-{decomposed_japanese}")))?,
+            b"japanese"
+        );
+        assert!(!directory.path().join("copy-한글.txt").exists());
+        assert!(!directory.path().join("copy-が.txt").exists());
+        assert_eq!(state.list_ledger()?.len(), 1);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn directory_apply_and_undo_preserve_children_and_identity() -> Result<(), Box<dyn Error>> {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source-directory");
