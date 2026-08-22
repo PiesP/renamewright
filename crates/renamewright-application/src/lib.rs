@@ -2057,6 +2057,8 @@ pub struct PlanDto {
     changed_count: usize,
     blocked_count: usize,
     can_apply: bool,
+    #[serde(skip)]
+    contains_non_ascii: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2102,6 +2104,11 @@ impl PlanDto {
     #[must_use]
     pub const fn can_apply(&self) -> bool {
         self.can_apply
+    }
+
+    #[must_use]
+    pub const fn contains_non_ascii(&self) -> bool {
+        self.contains_non_ascii
     }
 }
 
@@ -2482,19 +2489,15 @@ impl From<&RenamePlan> for PlanDto {
 
 impl PlanDto {
     fn from_plan(plan: &RenamePlan, active_rule_ids: &[u64]) -> Self {
-        Self {
-            plan_id: plan.id().value(),
-            generation: plan.generation(),
-            rows: plan
-                .rows()
-                .iter()
-                .map(|row| {
-                    let trace_reached_last_rule = row.trace().last().is_some_and(|step| {
-                        step.rule_index().checked_add(1) == Some(active_rule_ids.len())
-                    });
-                    let last_changed_rule_id = (!row.override_applied()
-                        && !row.trace_truncated()
-                        && trace_reached_last_rule)
+        let rows = plan
+            .rows()
+            .iter()
+            .map(|row| {
+                let trace_reached_last_rule = row.trace().last().is_some_and(|step| {
+                    step.rule_index().checked_add(1) == Some(active_rule_ids.len())
+                });
+                let last_changed_rule_id =
+                    (!row.override_applied() && !row.trace_truncated() && trace_reached_last_rule)
                         .then(|| {
                             row.trace()
                                 .iter()
@@ -2503,25 +2506,33 @@ impl PlanDto {
                                 .and_then(|step| active_rule_ids.get(step.rule_index()).copied())
                         })
                         .flatten();
-                    PlanRowDto {
-                        source_id: row.source_id().value(),
-                        entry_kind: entry_kind_name(row.entry_kind()),
-                        original_name: row.original_display_shared(),
-                        proposed_name: row.proposed_display_shared(),
-                        status: status_name(row.status()),
-                        diagnostics: row
-                            .diagnostics()
-                            .iter()
-                            .map(|diagnostic| diagnostic_name(diagnostic.code()))
-                            .collect(),
-                        override_applied: row.override_applied(),
-                        last_changed_rule_id,
-                    }
-                })
-                .collect(),
+                PlanRowDto {
+                    source_id: row.source_id().value(),
+                    entry_kind: entry_kind_name(row.entry_kind()),
+                    original_name: row.original_display_shared(),
+                    proposed_name: row.proposed_display_shared(),
+                    status: status_name(row.status()),
+                    diagnostics: row
+                        .diagnostics()
+                        .iter()
+                        .map(|diagnostic| diagnostic_name(diagnostic.code()))
+                        .collect(),
+                    override_applied: row.override_applied(),
+                    last_changed_rule_id,
+                }
+            })
+            .collect::<Vec<_>>();
+        let contains_non_ascii = rows
+            .iter()
+            .any(|row| !row.original_name.is_ascii() || !row.proposed_name.is_ascii());
+        Self {
+            plan_id: plan.id().value(),
+            generation: plan.generation(),
+            rows,
             changed_count: plan.changed_count(),
             blocked_count: plan.blocked_count(),
             can_apply: plan.can_apply(),
+            contains_non_ascii,
         }
     }
 }
@@ -4195,6 +4206,37 @@ mod tests {
         assert_eq!(dto.rows[0].diagnostics, vec!["nameTooLong"]);
         assert_eq!(dto.rows[0].last_changed_rule_id, None);
         Ok(())
+    }
+
+    #[test]
+    fn plan_dto_caches_whether_display_names_need_a_fallback_font() {
+        let ascii_sources = [SourceSnapshot::new(
+            SourceId::new(1),
+            ParentId::new(1),
+            OsString::from("report.txt"),
+        )];
+        let ascii_plan = renamewright_core::build_plan(
+            PlanId::new(24),
+            1,
+            &ascii_sources,
+            &[renamewright_core::RenameRule::prefix("final-")],
+            TargetPolicy::windows(),
+        );
+        assert!(!PlanDto::from(&ascii_plan).contains_non_ascii());
+
+        let unicode_sources = [SourceSnapshot::new(
+            SourceId::new(2),
+            ParentId::new(1),
+            OsString::from("보고서.txt"),
+        )];
+        let unicode_plan = renamewright_core::build_plan(
+            PlanId::new(25),
+            1,
+            &unicode_sources,
+            &[renamewright_core::RenameRule::prefix("final-")],
+            TargetPolicy::windows(),
+        );
+        assert!(PlanDto::from(&unicode_plan).contains_non_ascii());
     }
 
     #[test]

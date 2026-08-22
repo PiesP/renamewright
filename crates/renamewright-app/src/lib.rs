@@ -2730,7 +2730,11 @@ impl RenamewrightApp {
             return Arc::clone(&self.visible_rows.indices);
         }
 
-        if self.visible_rows.search_plan_id != plan_id {
+        let query = self.source_query.trim().to_lowercase();
+        if query.is_empty() {
+            self.visible_rows.search_text = Vec::new();
+            self.visible_rows.search_plan_id = None;
+        } else if self.visible_rows.search_plan_id != plan_id {
             self.visible_rows.search_text.clear();
             if let Some(plan) = &self.plan {
                 self.visible_rows.search_text.reserve(plan.rows().len());
@@ -2756,7 +2760,6 @@ impl RenamewrightApp {
             },
             |plan| plan.rows().len(),
         );
-        let query = self.source_query.trim().to_lowercase();
         let indices = (0..row_count)
             .filter(|index| {
                 if let Some(plan) = &self.plan {
@@ -5921,11 +5924,7 @@ impl RenamewrightApp {
                 || self.presets.presets().iter().any(|preset| {
                     !preset.name().is_ascii() || preset.rules().iter().any(rule_has_non_ascii_text)
                 })
-                || self.plan.as_ref().is_some_and(|plan| {
-                    plan.rows().iter().any(|row| {
-                        !row.original_name().is_ascii() || !row.proposed_name().is_ascii()
-                    })
-                }))
+                || self.plan.as_ref().is_some_and(PlanDto::contains_non_ascii))
         {
             self.ensure_korean_font(ui.ctx());
         }
@@ -7088,6 +7087,30 @@ mod tests {
         let filtered = app.visible_indices();
         assert!(!Arc::ptr_eq(&second, &filtered));
         assert_eq!(&*filtered, &[9_999]);
+    }
+
+    #[test]
+    fn empty_name_query_releases_the_search_projection() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("Quarterly report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.admit_sources_immediately(vec![source]);
+
+        let visible = app.visible_indices();
+        assert_eq!(&*visible, &[0]);
+        assert!(app.visible_rows.search_text.is_empty());
+        assert_eq!(app.visible_rows.search_text.capacity(), 0);
+
+        app.source_query = "quarterly".to_owned();
+        assert_eq!(&*app.visible_indices(), &[0]);
+        assert_eq!(app.visible_rows.search_text.len(), 1);
+
+        app.source_query.clear();
+        assert_eq!(&*app.visible_indices(), &[0]);
+        assert!(app.visible_rows.search_text.is_empty());
+        assert_eq!(app.visible_rows.search_text.capacity(), 0);
+        Ok(())
     }
 
     #[test]
