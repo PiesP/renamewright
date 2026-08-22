@@ -570,9 +570,15 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
         .filter_map(|row| {
             registry
                 .execution_identity_for(row.source_id())
-                .map(|identity| (row.parent_id(), identity))
+                .map(|identity| {
+                    (
+                        row.parent_id(),
+                        identity.volume_serial_number(),
+                        identity.file_id(),
+                    )
+                })
         })
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
     let mut source_ids = BTreeSet::new();
     let mut entries = Vec::with_capacity(plan.changed_count());
     for row in plan
@@ -643,11 +649,11 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
         match filesystem.identity_in_parent(parent, row.proposed_name(), admitted_parent_identity) {
             Err(error) if error.kind() == ExecutionFsErrorKind::SourceUnavailable => {}
             Ok(identity)
-                if planned_source_identities
-                    .iter()
-                    .any(|(parent_id, planned_identity)| {
-                        *parent_id == row.parent_id() && *planned_identity == identity
-                    }) => {}
+                if planned_source_identities.contains(&(
+                    row.parent_id(),
+                    identity.volume_serial_number(),
+                    identity.file_id(),
+                )) => {}
             Ok(_) => {
                 return Err(FreezeExecutionError::new(
                     Some(source_id),
