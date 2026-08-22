@@ -28,6 +28,7 @@ pub enum FreezeExecutionErrorKind {
     MissingExecutionIdentity,
     MissingParentExecutionIdentity,
     StaleSource,
+    DestinationOccupied,
     TemporaryNameExhausted,
     Schedule { kind: ScheduleError },
     Filesystem { kind: ExecutionFsErrorKind },
@@ -562,6 +563,16 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
         ));
     }
 
+    let planned_source_identities = plan
+        .rows()
+        .iter()
+        .filter(|row| row.status() == NameStatus::Changed)
+        .filter_map(|row| {
+            registry
+                .execution_identity_for(row.source_id())
+                .map(|identity| (row.parent_id(), identity))
+        })
+        .collect::<Vec<_>>();
     let mut source_ids = BTreeSet::new();
     let mut entries = Vec::with_capacity(plan.changed_count());
     for row in plan
@@ -628,6 +639,33 @@ pub fn freeze_execution_plan<F: ExecutionFileSystem + ?Sized>(
                 Some(source_id),
                 FreezeExecutionErrorKind::StaleSource,
             ));
+        }
+        match filesystem.identity_in_parent(parent, row.proposed_name(), admitted_parent_identity) {
+            Err(error) if error.kind() == ExecutionFsErrorKind::SourceUnavailable => {}
+            Ok(identity)
+                if planned_source_identities
+                    .iter()
+                    .any(|(parent_id, planned_identity)| {
+                        *parent_id == row.parent_id() && *planned_identity == identity
+                    }) => {}
+            Ok(_) => {
+                return Err(FreezeExecutionError::new(
+                    Some(source_id),
+                    FreezeExecutionErrorKind::DestinationOccupied,
+                ));
+            }
+            Err(error) if error.kind() == ExecutionFsErrorKind::UnsupportedEntry => {
+                return Err(FreezeExecutionError::new(
+                    Some(source_id),
+                    FreezeExecutionErrorKind::DestinationOccupied,
+                ));
+            }
+            Err(error) => {
+                return Err(FreezeExecutionError::new(
+                    Some(source_id),
+                    FreezeExecutionErrorKind::Filesystem { kind: error.kind() },
+                ));
+            }
         }
         let temporary = available_temporary_name(filesystem, parent, plan.id(), source_id)?;
 

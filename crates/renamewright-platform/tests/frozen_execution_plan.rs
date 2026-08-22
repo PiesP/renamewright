@@ -4,8 +4,9 @@ use std::ffi::OsString;
 use std::fs;
 
 use renamewright_core::{
-    ExecutionPhase, JournalRecord, ParentId, PlanId, RenameRule, SourceId, SourceSnapshot,
-    TargetPolicy, build_plan, build_plan_with_environment,
+    ExecutionPhase, JournalRecord, NameOverride, ParentId, PlanId, RenameRule, RulePipeline,
+    SourceId, SourceSnapshot, TargetPolicy, build_plan, build_plan_with_environment,
+    build_plan_with_rule_pipeline_overrides_and_environment,
 };
 use renamewright_platform::{
     ExecutionFileSystem, FreezeExecutionErrorKind, LinuxExecutionFileSystem, SourceRegistry,
@@ -177,6 +178,82 @@ fn rejects_a_source_replaced_after_admission() -> Result<(), Box<dyn std::error:
     assert_eq!(error.kind(), FreezeExecutionErrorKind::StaleSource);
     assert_eq!(fs::read(source)?, b"replacement");
     assert_eq!(fs::read(retained_original)?, b"original");
+    Ok(())
+}
+
+#[test]
+fn rejects_a_source_removed_after_planning() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("source.txt");
+    fs::write(&source, b"source")?;
+    let mut registry = SourceRegistry::new();
+    registry.admit_paths([source.clone()])?;
+    let plan = current_plan(&registry, 25, "final-");
+    fs::remove_file(&source)?;
+
+    let error = freeze_execution_plan(&registry, &plan, &LinuxExecutionFileSystem::new())
+        .err()
+        .ok_or("a missing source was frozen for execution")?;
+
+    assert_eq!(error.source_id(), Some(SourceId::new(1)));
+    assert_eq!(
+        error.kind(),
+        FreezeExecutionErrorKind::Filesystem {
+            kind: renamewright_platform::ExecutionFsErrorKind::SourceUnavailable,
+        }
+    );
+    assert!(!directory.path().join("final-source.txt").exists());
+    Ok(())
+}
+
+#[test]
+fn rejects_a_destination_occupied_after_planning() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("source.txt");
+    let destination = directory.path().join("final-source.txt");
+    fs::write(&source, b"source")?;
+    let mut registry = SourceRegistry::new();
+    registry.admit_paths([source.clone()])?;
+    let plan = current_plan(&registry, 26, "final-");
+    fs::write(&destination, b"late occupant")?;
+
+    let error = freeze_execution_plan(&registry, &plan, &LinuxExecutionFileSystem::new())
+        .err()
+        .ok_or("a newly occupied destination was frozen for execution")?;
+
+    assert_eq!(error.source_id(), Some(SourceId::new(1)));
+    assert_eq!(error.kind(), FreezeExecutionErrorKind::DestinationOccupied);
+    assert_eq!(fs::read(source)?, b"source");
+    assert_eq!(fs::read(destination)?, b"late occupant");
+    Ok(())
+}
+
+#[test]
+fn permits_destinations_owned_by_the_same_swap_plan() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    fs::write(directory.path().join("a.txt"), b"a")?;
+    fs::write(directory.path().join("b.txt"), b"b")?;
+    let mut registry = SourceRegistry::new();
+    registry.admit_paths([
+        directory.path().join("a.txt"),
+        directory.path().join("b.txt"),
+    ])?;
+    let plan = build_plan_with_rule_pipeline_overrides_and_environment(
+        PlanId::new(27),
+        registry.generation(),
+        &registry.snapshots(),
+        &RulePipeline::compile(Vec::new())?,
+        &[
+            NameOverride::new(SourceId::new(1), "b.txt"),
+            NameOverride::new(SourceId::new(2), "a.txt"),
+        ],
+        TargetPolicy::windows(),
+        &registry.validation_environment(),
+    );
+
+    let frozen = freeze_execution_plan(&registry, &plan, &LinuxExecutionFileSystem::new())?;
+
+    assert_eq!(frozen.schedule().len(), 4);
     Ok(())
 }
 
