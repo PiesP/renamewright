@@ -1,15 +1,18 @@
 name: Portable Release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag in vX.Y.Z form
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: portable-release-${{ github.ref }}
+  group: portable-release-${{ inputs.tag }}
   cancel-in-progress: false
 
 env:
@@ -17,18 +20,100 @@ env:
   SYFT_WINDOWS_AMD64_SHA256: "fc5ffaeffb993576ece9c791da5a688fb2c8969a1479bbfe58583672c64da336"
 
 jobs:
+  provenance:
+    name: release/provenance
+    if: ${{ github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      release-sha: ${{ steps.release.outputs.release-sha }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Checkout trusted release workflow source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Resolve release provenance
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "::error::Portable releases must be dispatched from protected master."
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use vX.Y.Z form."
+            exit 1
+          fi
+
+          git fetch --force --no-tags origin \
+            "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          release_sha="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          if [[ ! "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Release tag did not resolve to a commit."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$release_sha" "$GITHUB_SHA"; then
+            echo "::error::Release tag is not reachable from the trusted master revision."
+            exit 1
+          fi
+
+          version="${RELEASE_TAG#v}"
+          {
+            echo "release-sha=$release_sha"
+            echo "tag=$RELEASE_TAG"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
   portable:
     name: release/windows-portable
+    needs: provenance
     runs-on: windows-2025
     timeout-minutes: 35
     steps:
-      - name: Checkout source
+      - name: Checkout trusted release workflow source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+
+      - name: Detach the verified release source
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.provenance.outputs.release-sha }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "$RELEASE_SHA"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Verify the Cargo release version
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.provenance.outputs.version }}
+        run: |
+          $metadataText = & cargo metadata --format-version 1 --locked --no-deps
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata was unavailable.' }
+          $metadata = $metadataText | ConvertFrom-Json
+          $applicationPackage = @($metadata.packages | Where-Object name -ceq 'renamewright-app')
+          if ($applicationPackage.Count -ne 1) {
+            throw 'Cargo metadata did not contain exactly one Renamewright application package.'
+          }
+          if ([string]$applicationPackage[0].version -cne $env:RELEASE_VERSION) {
+            throw "Release tag version does not match the Renamewright Cargo version."
+          }
 
       - name: Test the production feature set
         run: cargo test --workspace --all-targets --locked
@@ -51,19 +136,21 @@ jobs:
 
       - name: Verify and package the portable release
         shell: pwsh
+        env:
+          RELEASE_SHA: ${{ needs.provenance.outputs.release-sha }}
         run: >-
           ./scripts/prepare-windows-portable-release.ps1
           -RepositoryRoot $PWD.Path
           -ExecutablePath 'target/release/renamewright.exe'
           -OutputDirectory 'release'
-          -SourceSha $env:GITHUB_SHA
+          -SourceSha $env:RELEASE_SHA
           -SyftPath $env:SYFT_PATH
 
       - name: Upload the unsigned portable release candidate
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: renamewright-windows-portable-${{ github.sha }}
+          name: renamewright-windows-portable-${{ needs.provenance.outputs.release-sha }}
           path: release/
           if-no-files-found: error
           retention-days: 14
@@ -73,21 +160,23 @@ jobs:
         shell: pwsh
         env:
           ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          RELEASE_SHA: ${{ needs.provenance.outputs.release-sha }}
+          RELEASE_TAG: ${{ needs.provenance.outputs.tag }}
         run: |
           @"
           ## Portable release candidate
 
-          - Source SHA: ``${env:GITHUB_SHA}``
+          - Source SHA: ``${env:RELEASE_SHA}``
+          - Release tag: ``${env:RELEASE_TAG}``
           - GitHub artifact digest: ``${env:ARTIFACT_DIGEST}``
           - Production automation feature: excluded and marker-checked
           - Signing: unsigned
-          - Publication: tag runs continue to the release/publish job; manual runs stop at this candidate
+          - Publication: this manually dispatched candidate continues to the release/publish job
           "@ | Add-Content $env:GITHUB_STEP_SUMMARY
 
   publish:
     name: release/publish
-    if: github.ref_type == 'tag'
-    needs: portable
+    needs: [provenance, portable]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -97,7 +186,7 @@ jobs:
       - name: Download the verified portable release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: renamewright-windows-portable-${{ github.sha }}
+          name: renamewright-windows-portable-${{ needs.provenance.outputs.release-sha }}
           path: release
 
       - name: Verify downloaded checksums
@@ -108,16 +197,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.provenance.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.provenance.outputs.version }}
           RELEASE_NOTES: |-
             Windows x86-64 portable release. The executable is unsigned and may
             trigger a Microsoft Defender SmartScreen warning. Verify the
             downloaded files with SHA256SUMS.txt before running the executable.
         run: >-
-          gh release create "${GITHUB_REF_NAME}"
+          gh release create "${RELEASE_TAG}"
           release/*
           --repo "${GH_REPO}"
           --verify-tag
-          --title "Renamewright ${GITHUB_REF_NAME#v}"
+          --title "Renamewright ${RELEASE_VERSION}"
           --generate-notes
           --notes "${RELEASE_NOTES}"
           --fail-on-no-commits
