@@ -179,6 +179,34 @@ fn windows_comparison_detects_case_insensitive_duplicates_per_parent() {
 }
 
 #[test]
+fn unicode_normalization_detects_composed_destination_collisions() {
+    let plan = build_plan(
+        PlanId::new(1),
+        1,
+        &[
+            source(1, 10, "한글.txt"),
+            source(
+                2,
+                10,
+                "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.txt",
+            ),
+        ],
+        &[RenameRule::normalize_unicode(
+            renamewright_core::FilenamePart::Stem,
+            renamewright_core::UnicodeNormalizationForm::Nfc,
+        )],
+        TargetPolicy::windows(),
+    );
+
+    assert!(plan.rows().iter().all(|row| {
+        row.diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::DuplicateDestination)
+    }));
+    assert!(!plan.can_apply());
+}
+
+#[test]
 fn rule_order_is_visible_in_the_trace() {
     let plan = build_plan(
         PlanId::new(1),
