@@ -612,6 +612,38 @@ fn unicode_normalization_is_explicit_and_targeted() -> Result<(), Box<dyn Error>
         .0,
         "file.txt"
     );
+    let decomposed_korean = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.txt";
+    let decomposed_japanese = "\u{304b}\u{3099}.txt";
+    assert_eq!(
+        proposal(decomposed_korean, vec![RenameRule::prefix("copy-")])?.0,
+        format!("copy-{decomposed_korean}")
+    );
+    assert_eq!(
+        proposal(
+            decomposed_korean,
+            vec![RenameRule::normalize_unicode(
+                FilenamePart::Stem,
+                UnicodeNormalizationForm::Nfc,
+            )],
+        )?
+        .0,
+        "한글.txt"
+    );
+    assert_eq!(
+        proposal(decomposed_japanese, vec![RenameRule::prefix("copy-")])?.0,
+        format!("copy-{decomposed_japanese}")
+    );
+    assert_eq!(
+        proposal(
+            decomposed_japanese,
+            vec![RenameRule::normalize_unicode(
+                FilenamePart::Stem,
+                UnicodeNormalizationForm::Nfc,
+            )],
+        )?
+        .0,
+        "が.txt"
+    );
     Ok(())
 }
 
