@@ -3718,18 +3718,7 @@ impl RenamewrightApp {
                 if let Some(task) = self.mutation_task.take() {
                     task.finish();
                 }
-                self.status = match result {
-                    Ok(result) => {
-                        self.plan = None;
-                        self.overrides.clear();
-                        format!(
-                            "{}: {}",
-                            self.locale.text("Rename finished", "이름 변경 완료"),
-                            outcome_label(result.outcome(), self.locale)
-                        )
-                    }
-                    Err(error) => apply_error_message(error.code(), self.locale).to_owned(),
-                };
+                self.apply_mutation_result(result);
                 self.refresh_ledger();
             }
             Ok(MutationMessage::Recovery(result)) => {
@@ -3772,6 +3761,30 @@ impl RenamewrightApp {
                         "작업이 예기치 않게 종료되었습니다",
                     )
                     .to_owned();
+            }
+        }
+    }
+
+    fn apply_mutation_result(
+        &mut self,
+        result: Result<ApplyCommandResultDto, ApplyCommandErrorDto>,
+    ) {
+        match result {
+            Ok(result) => {
+                self.plan = None;
+                self.overrides.clear();
+                self.status = format!(
+                    "{}: {}",
+                    self.locale.text("Rename finished", "이름 변경 완료"),
+                    outcome_label(result.outcome(), self.locale)
+                );
+            }
+            Err(error) => {
+                let status = apply_error_message(error.code(), self.locale).to_owned();
+                if error.code() == "planChanged" {
+                    self.refresh_plan();
+                }
+                self.status = status;
             }
         }
     }
@@ -7421,6 +7434,50 @@ mod tests {
             assert_ne!(ledger_status_label(status, Locale::English), status);
             assert!(!ledger_status_label(status, Locale::Korean).is_ascii());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_plan_change_refreshes_the_visible_blocker() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source.txt");
+        let journal_root = directory.path().join("journals");
+        fs::write(&source, b"source")?;
+        let mut app = RenamewrightApp::new(false);
+        app.application.initialize(&journal_root)?;
+        app.set_prefix("final-");
+        let plan = app
+            .application
+            .admit_sources_with_rules([source.clone()], app.rule_request())?;
+        let plan_id = plan.plan_id();
+        app.plan = Some(plan);
+        fs::write(directory.path().join("final-source.txt"), b"late occupant")?;
+        let result = app.application.apply_latest_plan(
+            plan_id,
+            &renamewright_platform::LinuxExecutionFileSystem::new(),
+            || false,
+        );
+
+        app.apply_mutation_result(result);
+
+        let refreshed = app.plan.as_ref().ok_or("the preview disappeared")?;
+        assert!(app.plan_is_current);
+        assert_eq!(refreshed.blocked_count(), 1);
+        assert!(
+            refreshed.rows()[0]
+                .diagnostics()
+                .contains(&"occupiedDestination")
+        );
+        assert_eq!(
+            app.status,
+            "The plan changed after the preview. Review the latest preview and try again."
+        );
+        assert_eq!(fs::read(source)?, b"source");
+        assert_eq!(
+            fs::read(directory.path().join("final-source.txt"))?,
+            b"late occupant"
+        );
+        Ok(())
     }
 
     #[test]
