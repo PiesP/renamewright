@@ -318,9 +318,9 @@ fn branch_protection_requires_native_ui_and_performance_gates() {
 
 #[test]
 fn codex_security_cli_is_locked_private_and_repository_specific() {
-    assert!(CODEX_SECURITY_PACKAGE.contains("\"@openai/codex-security\": \"0.1.14\""));
+    assert!(CODEX_SECURITY_PACKAGE.contains("\"@openai/codex-security\": \"0.1.15\""));
     assert!(CODEX_SECURITY_LOCK.contains("\"node_modules/@openai/codex-security\""));
-    assert!(CODEX_SECURITY_LOCK.contains("\"version\": \"0.1.14\""));
+    assert!(CODEX_SECURITY_LOCK.contains("\"version\": \"0.1.15\""));
     assert!(CODEX_SECURITY_LOCK.contains("\"integrity\": \"sha512-"));
     assert!(CODEX_SECURITY_OSV.contains("id = \"GHSA-jmr9-qjv8-65gv\""));
     assert!(CODEX_SECURITY_OSV.contains("ignoreUntil = 2026-09-13"));
