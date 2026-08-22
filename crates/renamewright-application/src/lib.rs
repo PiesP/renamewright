@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use renamewright_core::{
     CaseMode, CharacterClass, CharacterClassOperation, Diagnostic, DiagnosticCode,
     ExecutionDirection, FilenamePart, MAX_OVERRIDES, MAX_RULES, MAX_SEQUENCE_PADDING, NameOverride,
-    NameStatus, PROTOCOL_VERSION, PlanId, PlanRow, RangeOperation, RangeOrigin, RenamePlan,
-    RenameRule, RulePipeline, RuleValidationErrorKind, SequenceOrder, SequencePlacement,
-    SequenceScope, SourceId, TargetPolicy, TraceStep, UnicodeNormalizationForm,
-    build_plan_with_rule_pipeline_overrides_and_environment,
+    NameStatus, PROTOCOL_VERSION, PlanBuildContext, PlanId, PlanRow, RangeOperation, RangeOrigin,
+    RenamePlan, RenameRule, RulePipeline, RuleValidationErrorKind, SequenceOrder,
+    SequencePlacement, SequenceScope, SourceId, TargetPolicy, TraceStep, UnicodeNormalizationForm,
+    build_plan_with_rule_pipeline_overrides_and_environment_cancellable,
 };
 pub use renamewright_core::{MAX_OVERRIDE_TEXT_BYTES, MAX_RULE_TEXT_BYTES};
 use renamewright_platform::{
@@ -1401,13 +1401,24 @@ impl ApplicationService {
         &self,
         request: RulePipelineRequestDto,
     ) -> Result<PlanDto, PlanningCommandErrorDto> {
+        self.preview_rules_cancellable(request, || false)
+    }
+
+    pub fn preview_rules_cancellable(
+        &self,
+        request: RulePipelineRequestDto,
+        should_cancel: impl Fn() -> bool,
+    ) -> Result<PlanDto, PlanningCommandErrorDto> {
+        if should_cancel() {
+            return Err(PlanningCommandErrorDto::new("planningCancelled"));
+        }
         let compiled = compile_rule_request(&request).map_err(PlanningCommandErrorDto::from)?;
         let snapshot = self
             .registry
             .lock()
             .map_err(|_| PlanningCommandErrorDto::new("stateUnavailable"))?
             .planning_snapshot();
-        plan_from_snapshot(snapshot, request, compiled, self)
+        plan_from_snapshot_cancellable(snapshot, request, compiled, self, should_cancel)
     }
 
     pub fn poll_source_changes(
@@ -2058,7 +2069,7 @@ pub struct PlanDto {
     blocked_count: usize,
     can_apply: bool,
     #[serde(skip)]
-    contains_non_ascii: bool,
+    contains_non_ascii_source_name: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2107,8 +2118,8 @@ impl PlanDto {
     }
 
     #[must_use]
-    pub const fn contains_non_ascii(&self) -> bool {
-        self.contains_non_ascii
+    pub const fn contains_non_ascii_source_name(&self) -> bool {
+        self.contains_non_ascii_source_name
     }
 }
 
@@ -2246,6 +2257,19 @@ fn plan_from_snapshot(
     compiled: CompiledRuleRequest,
     state: &ApplicationService,
 ) -> Result<PlanDto, PlanningCommandErrorDto> {
+    plan_from_snapshot_cancellable(snapshot, request, compiled, state, || false)
+}
+
+fn plan_from_snapshot_cancellable(
+    snapshot: PlanningSnapshot,
+    request: RulePipelineRequestDto,
+    compiled: CompiledRuleRequest,
+    state: &ApplicationService,
+    should_cancel: impl Fn() -> bool,
+) -> Result<PlanDto, PlanningCommandErrorDto> {
+    if should_cancel() {
+        return Err(PlanningCommandErrorDto::new("planningCancelled"));
+    }
     let source_ids = snapshot
         .snapshots()
         .iter()
@@ -2274,16 +2298,26 @@ fn plan_from_snapshot(
     // Publishing the plan under the sequence lock lets initialization order itself
     // wholly before the allocation or invalidate the completed pre-initialization plan.
     let environment = snapshot.validation_environment();
-    let plan = build_plan_with_rule_pipeline_overrides_and_environment(
+    if should_cancel() {
+        return Err(PlanningCommandErrorDto::new("planningCancelled"));
+    }
+    let plan = build_plan_with_rule_pipeline_overrides_and_environment_cancellable(
         plan_id,
         snapshot.generation(),
         snapshot.snapshots(),
         &compiled.pipeline,
         &compiled.overrides,
-        TargetPolicy::windows(),
-        &environment,
-    );
+        PlanBuildContext::new(TargetPolicy::windows(), &environment),
+        &should_cancel,
+    )
+    .ok_or_else(|| PlanningCommandErrorDto::new("planningCancelled"))?;
+    if should_cancel() {
+        return Err(PlanningCommandErrorDto::new("planningCancelled"));
+    }
     let dto = PlanDto::from_plan(&plan, &compiled.active_rule_ids);
+    if should_cancel() {
+        return Err(PlanningCommandErrorDto::new("planningCancelled"));
+    }
     let registry = state
         .registry
         .lock()
@@ -2489,10 +2523,12 @@ impl From<&RenamePlan> for PlanDto {
 
 impl PlanDto {
     fn from_plan(plan: &RenamePlan, active_rule_ids: &[u64]) -> Self {
+        let mut contains_non_ascii_source_name = false;
         let rows = plan
             .rows()
             .iter()
             .map(|row| {
+                contains_non_ascii_source_name |= !row.original_display().is_ascii();
                 let trace_reached_last_rule = row.trace().last().is_some_and(|step| {
                     step.rule_index().checked_add(1) == Some(active_rule_ids.len())
                 });
@@ -2522,9 +2558,6 @@ impl PlanDto {
                 }
             })
             .collect::<Vec<_>>();
-        let contains_non_ascii = rows
-            .iter()
-            .any(|row| !row.original_name.is_ascii() || !row.proposed_name.is_ascii());
         Self {
             plan_id: plan.id().value(),
             generation: plan.generation(),
@@ -2532,7 +2565,7 @@ impl PlanDto {
             changed_count: plan.changed_count(),
             blocked_count: plan.blocked_count(),
             can_apply: plan.can_apply(),
-            contains_non_ascii,
+            contains_non_ascii_source_name,
         }
     }
 }
@@ -3318,8 +3351,9 @@ mod tests {
         ExecutionOutcome, LinuxExecutionFileSystem, execute_frozen_plan, freeze_execution_plan,
         inspect_recovery_transaction,
     };
+    use std::cell::Cell;
     #[cfg(target_os = "linux")]
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::error::Error;
     use std::ffi::OsString;
     use std::fs;
@@ -4222,7 +4256,7 @@ mod tests {
             &[renamewright_core::RenameRule::prefix("final-")],
             TargetPolicy::windows(),
         );
-        assert!(!PlanDto::from(&ascii_plan).contains_non_ascii());
+        assert!(!PlanDto::from(&ascii_plan).contains_non_ascii_source_name());
 
         let unicode_sources = [SourceSnapshot::new(
             SourceId::new(2),
@@ -4236,7 +4270,33 @@ mod tests {
             &[renamewright_core::RenameRule::prefix("final-")],
             TargetPolicy::windows(),
         );
-        assert!(PlanDto::from(&unicode_plan).contains_non_ascii());
+        assert!(PlanDto::from(&unicode_plan).contains_non_ascii_source_name());
+    }
+
+    #[test]
+    fn cancelled_preview_does_not_replace_the_current_plan() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("report.txt");
+        fs::write(&source, b"report")?;
+        let state = ApplicationService::default();
+        let current = state.admit_sources_with_rules(
+            [source],
+            ApplicationService::prefix_rule_request("current-"),
+        )?;
+        let cancellation_checks = Cell::new(0_usize);
+
+        let cancelled = state
+            .preview_rules_cancellable(ApplicationService::prefix_rule_request("obsolete-"), || {
+                cancellation_checks.set(cancellation_checks.get().saturating_add(1));
+                true
+            })
+            .err()
+            .ok_or("the obsolete preview completed")?;
+
+        assert_eq!(cancelled.code(), "planningCancelled");
+        assert_eq!(cancellation_checks.get(), 1);
+        assert!(state.inspect_plan_json(current.plan_id()).is_ok());
+        Ok(())
     }
 
     #[test]

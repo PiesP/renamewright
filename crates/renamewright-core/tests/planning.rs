@@ -1,12 +1,14 @@
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::ffi::OsString;
 
 use renamewright_core::{
     DiagnosticCode, EntryKind, ExtensionOperation, NameOverride, NameStatus, OccupiedName,
-    ParentId, PlanId, RenameRule, RulePipeline, SourceFingerprint, SourceId, SourceSnapshot,
-    TargetPolicy, ValidationEnvironment, build_plan, build_plan_with_environment,
+    ParentId, PlanBuildContext, PlanId, RenameRule, RulePipeline, SourceFingerprint, SourceId,
+    SourceSnapshot, TargetPolicy, ValidationEnvironment, build_plan, build_plan_with_environment,
     build_plan_with_rule_pipeline_overrides_and_environment,
+    build_plan_with_rule_pipeline_overrides_and_environment_cancellable,
 };
 
 fn source(id: u64, parent: u64, name: impl Into<OsString>) -> SourceSnapshot {
@@ -60,6 +62,32 @@ fn prefix_rule_builds_a_deterministic_trace() {
     assert_eq!(first.changed_count(), 2);
     assert_eq!(first.blocked_count(), 0);
     assert!(first.can_apply());
+}
+
+#[test]
+fn cancellable_planning_stops_before_building_every_row() -> Result<(), Box<dyn Error>> {
+    let sources = (1..=1_000)
+        .map(|id| source(id, 10, format!("source-{id:04}.txt")))
+        .collect::<Vec<_>>();
+    let pipeline = RulePipeline::compile(vec![RenameRule::prefix("final-")])?;
+    let checks = Cell::new(0_usize);
+
+    let plan = build_plan_with_rule_pipeline_overrides_and_environment_cancellable(
+        PlanId::new(3),
+        1,
+        &sources,
+        &pipeline,
+        &[],
+        PlanBuildContext::new(TargetPolicy::windows(), &ValidationEnvironment::default()),
+        || {
+            checks.set(checks.get().saturating_add(1));
+            checks.get() >= 8
+        },
+    );
+
+    assert!(plan.is_none());
+    assert_eq!(checks.get(), 8);
+    Ok(())
 }
 
 #[test]
