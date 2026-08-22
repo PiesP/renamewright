@@ -172,6 +172,70 @@ fn completed_forward_journal_replays_to_a_terminal_state() {
 }
 
 #[test]
+fn batched_forward_intent_replays_each_completed_prefix() {
+    let mut records = vec![
+        started(4),
+        JournalRecord::ForwardBatchPrepared {
+            first_step: 0,
+            step_count: 4,
+        },
+        forward_completed(0),
+        forward_completed(1),
+    ];
+
+    assert_eq!(
+        replay_journal(&records),
+        Ok(JournalStatus::ReconciliationRequired {
+            direction: ExecutionDirection::Forward,
+            step_index: 2,
+        })
+    );
+
+    records.extend([forward_completed(2), forward_completed(3)]);
+    assert_eq!(
+        replay_journal(&records),
+        Ok(JournalStatus::CompletionPending)
+    );
+    records.push(JournalRecord::TransactionCompleted);
+    assert_eq!(replay_journal(&records), Ok(JournalStatus::Completed));
+}
+
+#[test]
+fn a_not_applied_step_abandons_the_unattempted_batch_suffix() {
+    let records = vec![
+        started(4),
+        JournalRecord::ForwardBatchPrepared {
+            first_step: 0,
+            step_count: 4,
+        },
+        JournalRecord::ForwardStepNotApplied { step_index: 0 },
+    ];
+    assert_eq!(
+        replay_journal(&records),
+        Ok(JournalStatus::ForwardPending { next_step: 0 })
+    );
+}
+
+#[test]
+fn replay_rejects_empty_or_out_of_bounds_forward_batches() {
+    for record in [
+        JournalRecord::ForwardBatchPrepared {
+            first_step: 0,
+            step_count: 0,
+        },
+        JournalRecord::ForwardBatchPrepared {
+            first_step: 0,
+            step_count: 3,
+        },
+    ] {
+        let error = replay_journal(&[started(2), record])
+            .err()
+            .map(|error| error.kind());
+        assert_eq!(error, Some(JournalReplayErrorKind::InvalidPreparedBatch));
+    }
+}
+
+#[test]
 fn prepared_forward_step_without_an_outcome_requires_reconciliation() {
     let records = [
         started(2),

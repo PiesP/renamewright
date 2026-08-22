@@ -87,6 +87,20 @@ fn round_trips_records_and_preserves_replay_semantics() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn current_schema_round_trips_batched_forward_intent() -> Result<(), Box<dyn std::error::Error>> {
+    let record = JournalRecord::ForwardBatchPrepared {
+        first_step: 7,
+        step_count: 32,
+    };
+
+    let frames = decode_journal(&encode_journal(std::slice::from_ref(&record))?)?;
+
+    assert_eq!(frames[0].schema_version(), JOURNAL_SCHEMA_VERSION);
+    assert_eq!(frames[0].record(), &record);
+    Ok(())
+}
+
+#[test]
 fn round_trips_undo_lineage_in_the_current_schema() -> Result<(), Box<dyn std::error::Error>> {
     let undo_of = PlanId::new(41);
     let record = match transaction_started(OsString::from("original.txt")) {

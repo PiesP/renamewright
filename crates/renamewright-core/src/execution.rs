@@ -298,6 +298,10 @@ pub enum JournalRecord {
         step_count: usize,
         entries: Vec<JournalEntry>,
     },
+    ForwardBatchPrepared {
+        first_step: usize,
+        step_count: usize,
+    },
     ForwardStepPrepared {
         step_index: usize,
     },
@@ -363,6 +367,7 @@ pub enum JournalReplayErrorKind {
     EmptyJournal,
     MissingHeader,
     InvalidStepCount,
+    InvalidPreparedBatch,
     UnexpectedRecord,
     UnexpectedStep { expected: usize, actual: usize },
     RecordAfterTerminal,
@@ -407,7 +412,7 @@ enum ReplayMode {
     Forward {
         next_step: usize,
         completed_steps: Vec<usize>,
-        prepared_step: Option<usize>,
+        prepared_steps: VecDeque<usize>,
     },
     Rollback {
         cause: RollbackCause,
@@ -457,7 +462,7 @@ pub fn replay_journal<'a>(
     let mut mode = ReplayMode::Forward {
         next_step: 0,
         completed_steps: Vec::new(),
-        prepared_step: None,
+        prepared_steps: VecDeque::new(),
     };
     for (record_offset, record) in records.enumerate() {
         let record_index = record_offset.saturating_add(1);
@@ -476,11 +481,11 @@ fn apply_record(
         ReplayMode::Forward {
             next_step,
             completed_steps,
-            prepared_step,
+            prepared_steps,
         } => apply_forward_record(
             next_step,
             completed_steps,
-            prepared_step,
+            prepared_steps,
             step_count,
             record,
             record_index,
@@ -515,47 +520,67 @@ fn apply_record(
 fn apply_forward_record(
     next_step: usize,
     mut completed_steps: Vec<usize>,
-    prepared_step: Option<usize>,
+    mut prepared_steps: VecDeque<usize>,
     step_count: usize,
     record: &JournalRecord,
     record_index: usize,
 ) -> Result<ReplayMode, JournalReplayError> {
     match record {
-        JournalRecord::ForwardStepPrepared { step_index }
-            if prepared_step.is_none() && next_step < step_count =>
-        {
-            require_step(next_step, *step_index, record_index)?;
+        JournalRecord::ForwardBatchPrepared {
+            first_step,
+            step_count: prepared_count,
+        } if prepared_steps.is_empty() => {
+            prepared_steps = forward_batch_steps(
+                next_step,
+                *first_step,
+                *prepared_count,
+                step_count,
+                record_index,
+            )?;
             Ok(ReplayMode::Forward {
                 next_step,
                 completed_steps,
-                prepared_step: Some(*step_index),
+                prepared_steps,
+            })
+        }
+        JournalRecord::ForwardStepPrepared { step_index }
+            if prepared_steps.is_empty() && next_step < step_count =>
+        {
+            require_step(next_step, *step_index, record_index)?;
+            prepared_steps.push_back(*step_index);
+            Ok(ReplayMode::Forward {
+                next_step,
+                completed_steps,
+                prepared_steps,
             })
         }
         JournalRecord::ForwardStepCompleted { step_index, .. }
-            if prepared_step == Some(*step_index) =>
+            if prepared_steps.front() == Some(step_index) && next_step == *step_index =>
         {
+            prepared_steps.pop_front();
             completed_steps.push(*step_index);
             Ok(ReplayMode::Forward {
                 next_step: next_step + 1,
                 completed_steps,
-                prepared_step: None,
+                prepared_steps,
             })
         }
         JournalRecord::ForwardStepNotApplied { step_index }
-            if prepared_step == Some(*step_index) =>
+            if prepared_steps.front() == Some(step_index) =>
         {
+            prepared_steps.clear();
             Ok(ReplayMode::Forward {
                 next_step,
                 completed_steps,
-                prepared_step: None,
+                prepared_steps,
             })
         }
         JournalRecord::RollbackStarted { cause } => {
             match *cause {
-                RollbackCause::Cancelled if prepared_step.is_none() => {}
-                RollbackCause::RecoveryRequested if prepared_step.is_none() => {}
+                RollbackCause::Cancelled => {}
+                RollbackCause::RecoveryRequested if prepared_steps.is_empty() => {}
                 RollbackCause::ForwardStepFailed { step_index }
-                    if prepared_step == Some(step_index) =>
+                    if prepared_steps.front() == Some(&step_index) =>
                 {
                     require_step(next_step, step_index, record_index)?;
                 }
@@ -568,7 +593,7 @@ fn apply_forward_record(
             })
         }
         JournalRecord::TransactionCompleted
-            if prepared_step.is_none() && next_step == step_count =>
+            if prepared_steps.is_empty() && next_step == step_count =>
         {
             Ok(ReplayMode::Completed)
         }
@@ -576,8 +601,35 @@ fn apply_forward_record(
             require_step(next_step, *step_index, record_index)?;
             unexpected(record_index)
         }
+        JournalRecord::ForwardBatchPrepared { first_step, .. } => {
+            require_step(next_step, *first_step, record_index)?;
+            unexpected(record_index)
+        }
         _ => unexpected(record_index),
     }
+}
+
+fn forward_batch_steps(
+    next_step: usize,
+    first_step: usize,
+    prepared_count: usize,
+    step_count: usize,
+    record_index: usize,
+) -> Result<VecDeque<usize>, JournalReplayError> {
+    require_step(next_step, first_step, record_index)?;
+    let Some(end_step) = first_step.checked_add(prepared_count) else {
+        return Err(JournalReplayError::new(
+            record_index,
+            JournalReplayErrorKind::InvalidPreparedBatch,
+        ));
+    };
+    if prepared_count == 0 || end_step > step_count {
+        return Err(JournalReplayError::new(
+            record_index,
+            JournalReplayErrorKind::InvalidPreparedBatch,
+        ));
+    }
+    Ok((first_step..end_step).collect())
 }
 
 fn apply_rollback_record(
@@ -665,22 +717,20 @@ fn status_for(mode: ReplayMode, step_count: usize) -> JournalStatus {
     match mode {
         ReplayMode::Forward {
             next_step: _,
-            prepared_step: Some(step_index),
+            prepared_steps,
             ..
-        } => JournalStatus::ReconciliationRequired {
+        } if !prepared_steps.is_empty() => JournalStatus::ReconciliationRequired {
             direction: ExecutionDirection::Forward,
-            step_index,
+            step_index: prepared_steps.front().copied().unwrap_or(0),
         },
         ReplayMode::Forward {
             next_step,
-            prepared_step: None,
+            prepared_steps,
             ..
-        } if next_step == step_count => JournalStatus::CompletionPending,
-        ReplayMode::Forward {
-            next_step,
-            prepared_step: None,
-            ..
-        } => JournalStatus::ForwardPending { next_step },
+        } if prepared_steps.is_empty() && next_step == step_count => {
+            JournalStatus::CompletionPending
+        }
+        ReplayMode::Forward { next_step, .. } => JournalStatus::ForwardPending { next_step },
         ReplayMode::Rollback {
             prepared_step: Some(step_index),
             ..

@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use renamewright_core::{
-    JournalStatus, PlanId, RenameRule, TargetPolicy, build_plan, replay_journal,
+    JournalRecord, JournalStatus, PlanId, RenameRule, TargetPolicy, build_plan, replay_journal,
 };
 #[cfg(target_os = "linux")]
 use renamewright_platform::{
-    ExecutionOutcome, LinuxExecutionFileSystem, SourceRegistry, decode_journal,
-    execute_frozen_plan, freeze_execution_plan,
+    ExecutionOutcome, FORWARD_JOURNAL_BATCH_STEPS, LinuxExecutionFileSystem, SourceRegistry,
+    decode_journal, execute_frozen_plan, freeze_execution_plan,
 };
 
 #[cfg(target_os = "linux")]
@@ -78,6 +78,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|frame| frame.record().clone())
         .collect::<Vec<_>>();
+    let intent_batch_count = records
+        .iter()
+        .filter(|record| matches!(record, JournalRecord::ForwardBatchPrepared { .. }))
+        .count();
+    let expected_intent_batch_count = SOURCE_COUNT
+        .saturating_mul(2)
+        .div_ceil(FORWARD_JOURNAL_BATCH_STEPS);
+    if intent_batch_count != expected_intent_batch_count
+        || records
+            .iter()
+            .any(|record| matches!(record, JournalRecord::ForwardStepPrepared { .. }))
+    {
+        return Err(io::Error::other(
+            "the execution journal did not retain bounded intent batches",
+        )
+        .into());
+    }
     if replay_journal(&records) != Ok(JournalStatus::Completed) {
         return Err(io::Error::other("the execution journal was not complete").into());
     }
@@ -90,7 +107,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
     println!(
-        "{{\"sourceCount\":{SOURCE_COUNT},\"stepCount\":{},\"executionMs\":{},\"journalBytes\":{},\"peakRssBytes\":{},\"peakRssBudgetBytes\":{PEAK_RSS_BUDGET_BYTES}}}",
+        "{{\"sourceCount\":{SOURCE_COUNT},\"stepCount\":{},\"intentBatchCount\":{intent_batch_count},\"executionMs\":{},\"journalBytes\":{},\"peakRssBytes\":{},\"peakRssBudgetBytes\":{PEAK_RSS_BUDGET_BYTES}}}",
         SOURCE_COUNT.saturating_mul(2),
         elapsed.as_millis(),
         journal_bytes.len(),
