@@ -440,21 +440,96 @@ fn portable_release_excludes_automation_and_binds_evidence() {
 }
 
 #[test]
-fn tagged_portable_release_is_published_with_scoped_write_permission() {
+fn manually_dispatched_portable_release_verifies_provenance_before_publication()
+-> Result<(), Box<dyn std::error::Error>> {
     let release_workflow = RELEASE_WORKFLOW.replace("\r\n", "\n");
     assert!(release_workflow.contains("permissions:\n  contents: read"));
+    assert!(release_workflow.contains(
+        "on:\n  workflow_dispatch:\n    inputs:\n      tag:\n        description: Existing release tag in vX.Y.Z form\n        required: true\n        type: string"
+    ));
+    assert!(!release_workflow.contains("\n  push:\n"));
+
+    let provenance_job = release_workflow
+        .split_once("\n  provenance:\n")
+        .and_then(|(_, jobs)| jobs.split_once("\n  portable:\n"))
+        .map_or("", |(provenance, _)| provenance);
+    for required in [
+        "name: release/provenance",
+        "if: ${{ github.ref == 'refs/heads/master' }}",
+        "runs-on: ubuntu-24.04",
+        "release-sha: ${{ steps.release.outputs.release-sha }}",
+        "tag: ${{ steps.release.outputs.tag }}",
+        "version: ${{ steps.release.outputs.version }}",
+        "ref: ${{ github.sha }}",
+        "fetch-depth: 0",
+        "fetch-tags: true",
+        "persist-credentials: false",
+        "refs/heads/master",
+        "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+        "git fetch --force --no-tags origin",
+        "git rev-parse \"${RELEASE_TAG}^{commit}\"",
+        "git merge-base --is-ancestor \"$release_sha\" \"$GITHUB_SHA\"",
+        "release-sha=$release_sha",
+        "tag=$RELEASE_TAG",
+        "version=$version",
+    ] {
+        assert!(
+            provenance_job.contains(required),
+            "release provenance omitted {required}"
+        );
+    }
+
+    let portable_job = release_workflow
+        .split_once("\n  portable:\n")
+        .and_then(|(_, jobs)| jobs.split_once("\n  publish:\n"))
+        .map_or("", |(portable, _)| portable);
+    for required in [
+        "needs: provenance",
+        "ref: ${{ github.sha }}",
+        "fetch-depth: 0",
+        "fetch-tags: true",
+        "persist-credentials: false",
+        "git checkout --detach \"$RELEASE_SHA\"",
+        "RELEASE_VERSION: ${{ needs.provenance.outputs.version }}",
+        "[string]$applicationPackage[0].version -cne $env:RELEASE_VERSION",
+        "cargo test --workspace --all-targets --locked",
+        "cargo build --package renamewright-app --release --bin renamewright --locked",
+        "-SourceSha $env:RELEASE_SHA",
+        "name: renamewright-windows-portable-${{ needs.provenance.outputs.release-sha }}",
+    ] {
+        assert!(
+            portable_job.contains(required),
+            "portable release job omitted {required}"
+        );
+    }
+    let detach = portable_job
+        .find("git checkout --detach")
+        .ok_or("verified release checkout is required")?;
+    let first_cargo = portable_job
+        .find("cargo metadata")
+        .ok_or("Cargo version verification is required")?;
+    let packager = portable_job
+        .find("./scripts/prepare-windows-portable-release.ps1")
+        .ok_or("portable release packager is required")?;
+    assert!(detach < first_cargo);
+    assert!(detach < packager);
+    assert!(!portable_job.contains("-SourceSha $env:GITHUB_SHA"));
+    assert!(!portable_job.contains("name: renamewright-windows-portable-${{ github.sha }}"));
 
     let publish_job = release_workflow
         .split_once("\n  publish:\n")
         .map_or("", |(_, publish_job)| publish_job);
     for required in [
-        "if: github.ref_type == 'tag'",
-        "needs: portable",
+        "needs: [provenance, portable]",
         "actions: read",
         "contents: write",
         "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "name: renamewright-windows-portable-${{ needs.provenance.outputs.release-sha }}",
         "sha256sum --check SHA256SUMS.txt",
-        "gh release create",
+        "RELEASE_TAG: ${{ needs.provenance.outputs.tag }}",
+        "RELEASE_VERSION: ${{ needs.provenance.outputs.version }}",
+        "gh release create \"${RELEASE_TAG}\"",
+        "--title \"Renamewright ${RELEASE_VERSION}\"",
         "release/*",
         "--verify-tag",
         "--generate-notes",
@@ -469,6 +544,9 @@ fn tagged_portable_release_is_published_with_scoped_write_permission() {
         );
     }
     assert!(!release_workflow.contains("permissions:\n  contents: write"));
+    assert!(!release_workflow.contains("github.ref_type == 'tag'"));
+    assert!(!release_workflow.contains("GITHUB_REF_NAME"));
+    Ok(())
 }
 
 #[test]
