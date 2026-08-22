@@ -177,6 +177,15 @@ jobs:
           --package renamewright-application
           --example service_batch_budget
 
+      - name: Enforce the 1,000-entry journaled-execution budget
+        if: needs.changes.result != 'success' || needs.changes.outputs.performance == 'true'
+        run: >-
+          cargo run
+          --release
+          --locked
+          --package renamewright-platform
+          --example execution_batch_budget
+
   windows:
     name: pr-gate/windows
     needs: changes

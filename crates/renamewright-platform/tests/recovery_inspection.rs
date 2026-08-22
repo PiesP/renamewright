@@ -7,8 +7,9 @@ use renamewright_core::{
 };
 use renamewright_platform::{
     LinuxExecutionFileSystem, PreparedStepDisposition, RecoveryLocation, RecoveryLocationState,
-    RecoveryReadiness, RenameLedger, SourceRegistry, encode_journal, freeze_execution_plan,
-    inspect_prepared_step, inspect_recovery_transaction, reconcile_prepared_step,
+    RecoveryReadiness, RenameLedger, SourceRegistry, decode_journal, encode_journal,
+    freeze_execution_plan, inspect_prepared_step, inspect_recovery_transaction,
+    reconcile_prepared_step,
 };
 
 fn interrupted_fixture(
@@ -185,6 +186,52 @@ fn explicit_reconciliation_durably_records_applied_and_not_applied_results()
         .ok_or("ledger was empty")?
         .ledger_id();
 
+    assert_eq!(
+        reconcile_prepared_step(&ledger, ledger_id, &LinuxExecutionFileSystem::new())?,
+        renamewright_core::JournalStatus::ForwardPending { next_step: 1 }
+    );
+    Ok(())
+}
+
+#[test]
+fn batched_reconciliation_advances_through_applied_and_unattempted_steps()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let (_, _, temporary) = interrupted_fixture(&directory)?;
+    let journal_path = directory.path().join("interrupted.rwj");
+    let header = decode_journal(&fs::read(&journal_path)?)?
+        .into_iter()
+        .next()
+        .map(renamewright_platform::JournalFrame::into_record)
+        .ok_or("journal had no header")?;
+    fs::write(
+        &journal_path,
+        encode_journal(&[
+            header,
+            JournalRecord::ForwardBatchPrepared {
+                first_step: 0,
+                step_count: 2,
+            },
+        ])?,
+    )?;
+    fs::rename(
+        directory.path().join("source.txt"),
+        directory.path().join(temporary),
+    )?;
+    let ledger = RenameLedger::discover(directory.path())?;
+    let ledger_id = ledger
+        .entries()
+        .next()
+        .ok_or("ledger was empty")?
+        .ledger_id();
+
+    assert_eq!(
+        reconcile_prepared_step(&ledger, ledger_id, &LinuxExecutionFileSystem::new())?,
+        renamewright_core::JournalStatus::ReconciliationRequired {
+            direction: renamewright_core::ExecutionDirection::Forward,
+            step_index: 1,
+        }
+    );
     assert_eq!(
         reconcile_prepared_step(&ledger, ledger_id, &LinuxExecutionFileSystem::new())?,
         renamewright_core::JournalStatus::ForwardPending { next_step: 1 }

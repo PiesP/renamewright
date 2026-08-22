@@ -174,6 +174,7 @@ fn hosted_gates_are_cargo_only() {
     assert!(CI_WORKFLOW.contains("name: pr-gate/e2e"));
     assert!(CI_WORKFLOW.contains("--package renamewright-app"));
     assert!(CI_WORKFLOW.contains("--example large_batch_budget"));
+    assert!(CI_WORKFLOW.contains("--example execution_batch_budget"));
     assert!(SECURITY_WORKFLOW.contains("language: [actions, rust]"));
     assert!(SECURITY_WORKFLOW.contains("--config=/src/.github/codex-security/osv-scanner.toml"));
 }

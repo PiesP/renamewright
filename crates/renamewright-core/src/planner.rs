@@ -15,6 +15,22 @@ pub const MAX_OVERRIDES: usize = 100_000;
 pub const MAX_OVERRIDE_TEXT_BYTES: usize = 4_096;
 pub const MAX_PLAN_TRACE_BYTES: usize = 8 * 1_024 * 1_024;
 
+#[derive(Clone, Copy, Debug)]
+pub struct PlanBuildContext<'a> {
+    policy: TargetPolicy,
+    environment: &'a ValidationEnvironment,
+}
+
+impl<'a> PlanBuildContext<'a> {
+    #[must_use]
+    pub const fn new(policy: TargetPolicy, environment: &'a ValidationEnvironment) -> Self {
+        Self {
+            policy,
+            environment,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct TraceBudget {
     remaining_bytes: usize,
@@ -155,44 +171,94 @@ pub fn build_plan_with_rule_pipeline_overrides_and_environment(
     policy: TargetPolicy,
     environment: &ValidationEnvironment,
 ) -> RenamePlan {
+    match build_plan_with_rule_pipeline_overrides_and_environment_cancellable(
+        plan_id,
+        generation,
+        sources,
+        pipeline,
+        overrides,
+        PlanBuildContext::new(policy, environment),
+        || false,
+    ) {
+        Some(plan) => plan,
+        None => RenamePlan::new(plan_id, generation, Vec::new()),
+    }
+}
+
+#[must_use]
+pub fn build_plan_with_rule_pipeline_overrides_and_environment_cancellable(
+    plan_id: PlanId,
+    generation: u64,
+    sources: &[SourceSnapshot],
+    pipeline: &RulePipeline,
+    overrides: &[NameOverride],
+    context: PlanBuildContext<'_>,
+    should_cancel: impl Fn() -> bool,
+) -> Option<RenamePlan> {
+    if should_cancel() {
+        return None;
+    }
     let Some(overrides) = validate_overrides(sources, overrides) else {
-        return invalid_rule_plan(plan_id, generation, sources);
+        return Some(invalid_rule_plan(plan_id, generation, sources));
     };
     let mut source_order = None;
     let mut name_order = None;
-    let sequence_values = (0..pipeline.rules().len())
-        .map(|rule_index| {
-            pipeline.sequence_allocation(rule_index).map(|allocation| {
-                let ordered_indices = match allocation.order {
-                    SequenceOrder::Source => source_order
-                        .get_or_insert_with(|| ordered_source_indices(sources, allocation.order)),
-                    SequenceOrder::NameAscending => name_order
-                        .get_or_insert_with(|| ordered_source_indices(sources, allocation.order)),
-                };
-                allocate_sequence(sources, ordered_indices, allocation)
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut sequence_values = Vec::with_capacity(pipeline.rules().len());
+    for rule_index in 0..pipeline.rules().len() {
+        if should_cancel() {
+            return None;
+        }
+        sequence_values.push(pipeline.sequence_allocation(rule_index).map(|allocation| {
+            let ordered_indices = match allocation.order {
+                SequenceOrder::Source => source_order
+                    .get_or_insert_with(|| ordered_source_indices(sources, allocation.order)),
+                SequenceOrder::NameAscending => name_order
+                    .get_or_insert_with(|| ordered_source_indices(sources, allocation.order)),
+            };
+            allocate_sequence(sources, ordered_indices, allocation)
+        }));
+    }
     let mut trace_budget = TraceBudget::new();
     let mut rows = Vec::with_capacity(sources.len());
     for (source_index, source) in sources.iter().enumerate() {
+        if source_index.is_multiple_of(64) && should_cancel() {
+            return None;
+        }
         rows.push(build_row(
             source_index,
             source,
             pipeline,
             &sequence_values,
             overrides.get(&source.id()).copied(),
-            policy,
+            context.policy,
             &mut trace_budget,
         ));
     }
 
-    mark_stale_sources(&mut rows, environment);
-    mark_ancestor_conflicts(&mut rows, environment);
-    mark_unavailable_parents(&mut rows, environment);
-    mark_duplicates(&mut rows, policy);
-    mark_occupied_destinations(&mut rows, policy, environment);
-    RenamePlan::new(plan_id, generation, rows)
+    if should_cancel() {
+        return None;
+    }
+    mark_stale_sources(&mut rows, context.environment);
+    if should_cancel() {
+        return None;
+    }
+    mark_ancestor_conflicts(&mut rows, context.environment);
+    if should_cancel() {
+        return None;
+    }
+    mark_unavailable_parents(&mut rows, context.environment);
+    if should_cancel() {
+        return None;
+    }
+    mark_duplicates(&mut rows, context.policy);
+    if should_cancel() {
+        return None;
+    }
+    mark_occupied_destinations(&mut rows, context.policy, context.environment);
+    if should_cancel() {
+        return None;
+    }
+    Some(RenamePlan::new(plan_id, generation, rows))
 }
 
 fn build_row(

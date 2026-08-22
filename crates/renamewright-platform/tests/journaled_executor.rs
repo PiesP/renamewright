@@ -90,11 +90,17 @@ fn fixture(
 }
 
 fn journal_status(path: &Path) -> Result<JournalStatus, Box<dyn std::error::Error>> {
-    let records = decode_journal(&fs::read(path)?)?
+    let records = journal_records(path)?;
+    Ok(replay_journal(&records)?)
+}
+
+fn journal_records(
+    path: &Path,
+) -> Result<Vec<renamewright_core::JournalRecord>, Box<dyn std::error::Error>> {
+    Ok(decode_journal(&fs::read(path)?)?
         .into_iter()
         .map(renamewright_platform::JournalFrame::into_record)
-        .collect::<Vec<_>>();
-    Ok(replay_journal(&records)?)
+        .collect())
 }
 
 fn assert_originals_restored(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -131,6 +137,13 @@ fn completes_a_two_phase_transaction_and_terminal_journal() -> Result<(), Box<dy
     assert_eq!(fs::read(directory.path().join("final-b.txt"))?, b"b");
     assert!(!directory.path().join("a.txt").exists());
     assert!(!directory.path().join("b.txt").exists());
+    assert!(matches!(
+        journal_records(&journal)?.get(1),
+        Some(renamewright_core::JournalRecord::ForwardBatchPrepared {
+            first_step: 0,
+            step_count: 4,
+        })
+    ));
     Ok(())
 }
 

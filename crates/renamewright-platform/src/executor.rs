@@ -15,6 +15,8 @@ use crate::{
     SourceRegistry, temporary_name,
 };
 
+pub const FORWARD_JOURNAL_BATCH_STEPS: usize = 32;
+
 pub const MAX_TEMPORARY_NAME_ATTEMPTS: u32 = 1_024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,6 +267,27 @@ where
 pub(crate) trait ExecutionJournal {
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalStorageErrorKind>;
 
+    fn forward_batch_size(&self) -> usize {
+        1
+    }
+
+    fn append_forward_batch(
+        &mut self,
+        first_step: usize,
+        step_count: usize,
+    ) -> Result<(), JournalStorageErrorKind> {
+        if step_count == 1 {
+            self.append(&JournalRecord::ForwardStepPrepared {
+                step_index: first_step,
+            })
+        } else {
+            self.append(&JournalRecord::ForwardBatchPrepared {
+                first_step,
+                step_count,
+            })
+        }
+    }
+
     fn append_completion(&mut self, record: &JournalRecord) -> Result<(), JournalStorageErrorKind> {
         self.append(record)
     }
@@ -278,6 +301,14 @@ impl ExecutionJournal for JournalWriter {
     fn append_completion(&mut self, record: &JournalRecord) -> Result<(), JournalStorageErrorKind> {
         self.append_buffered_completion(record)
             .map_err(|error| error.kind())
+    }
+
+    fn forward_batch_size(&self) -> usize {
+        if self.schema_version() >= 6 {
+            FORWARD_JOURNAL_BATCH_STEPS
+        } else {
+            1
+        }
     }
 }
 
@@ -312,62 +343,71 @@ where
         return invalid_plan(ExecutionDirection::Forward, Some(next_step));
     }
     let mut completed_count = next_step;
-    for step in plan.schedule().iter().skip(next_step) {
-        if should_cancel() {
-            return start_rollback(
-                plan,
-                filesystem,
-                journal,
-                completed_count,
-                RollbackCause::Cancelled,
-            );
-        }
-        if let Err(kind) = journal.append(&JournalRecord::ForwardStepPrepared {
-            step_index: step.index(),
-        }) {
-            return journal_recovery(ExecutionDirection::Forward, Some(step.index()), kind);
-        }
-
-        let Some(entry) = plan.entry(step.source_id()) else {
-            return invalid_plan(ExecutionDirection::Forward, Some(step.index()));
+    let batch_size = journal.forward_batch_size().max(1);
+    for batch in plan.schedule()[next_step..].chunks(batch_size) {
+        let Some(first_step) = batch.first() else {
+            continue;
         };
-        let (source_name, target_name) = forward_names(entry.0, step.phase());
-        let Some(parent_identity) = entry.0.parent_execution_identity() else {
-            return invalid_plan(ExecutionDirection::Forward, Some(step.index()));
-        };
-        match filesystem.rename_no_replace_in_parent(
-            entry.1,
-            source_name,
-            target_name,
-            parent_identity,
-            entry.0.execution_identity(),
-        ) {
-            Ok(observed_identity) => {
-                if let Err(kind) = journal.append_completion(&JournalRecord::ForwardStepCompleted {
-                    step_index: step.index(),
-                    observed_identity,
-                }) {
-                    return journal_recovery(ExecutionDirection::Forward, Some(step.index()), kind);
-                }
-                completed_count += 1;
-            }
-            Err(error) if filesystem_error_is_ambiguous(error.kind()) => {
-                return ExecutionOutcome::RecoveryRequired(ExecutionRecovery::new(
-                    ExecutionDirection::Forward,
-                    Some(step.index()),
-                    ExecutionRecoveryReason::AmbiguousFilesystem { kind: error.kind() },
-                ));
-            }
-            Err(_) => {
+        if let Err(kind) = journal.append_forward_batch(first_step.index(), batch.len()) {
+            return journal_recovery(ExecutionDirection::Forward, Some(first_step.index()), kind);
+        }
+        for step in batch {
+            if should_cancel() {
                 return start_rollback(
                     plan,
                     filesystem,
                     journal,
                     completed_count,
-                    RollbackCause::ForwardStepFailed {
-                        step_index: step.index(),
-                    },
+                    RollbackCause::Cancelled,
                 );
+            }
+            let Some(entry) = plan.entry(step.source_id()) else {
+                return invalid_plan(ExecutionDirection::Forward, Some(step.index()));
+            };
+            let (source_name, target_name) = forward_names(entry.0, step.phase());
+            let Some(parent_identity) = entry.0.parent_execution_identity() else {
+                return invalid_plan(ExecutionDirection::Forward, Some(step.index()));
+            };
+            match filesystem.rename_no_replace_in_parent(
+                entry.1,
+                source_name,
+                target_name,
+                parent_identity,
+                entry.0.execution_identity(),
+            ) {
+                Ok(observed_identity) => {
+                    if let Err(kind) =
+                        journal.append_completion(&JournalRecord::ForwardStepCompleted {
+                            step_index: step.index(),
+                            observed_identity,
+                        })
+                    {
+                        return journal_recovery(
+                            ExecutionDirection::Forward,
+                            Some(step.index()),
+                            kind,
+                        );
+                    }
+                    completed_count += 1;
+                }
+                Err(error) if filesystem_error_is_ambiguous(error.kind()) => {
+                    return ExecutionOutcome::RecoveryRequired(ExecutionRecovery::new(
+                        ExecutionDirection::Forward,
+                        Some(step.index()),
+                        ExecutionRecoveryReason::AmbiguousFilesystem { kind: error.kind() },
+                    ));
+                }
+                Err(_) => {
+                    return start_rollback(
+                        plan,
+                        filesystem,
+                        journal,
+                        completed_count,
+                        RollbackCause::ForwardStepFailed {
+                            step_index: step.index(),
+                        },
+                    );
+                }
             }
         }
     }
@@ -830,6 +870,10 @@ mod tests {
                 Ok(())
             }
         }
+
+        fn forward_batch_size(&self) -> usize {
+            super::FORWARD_JOURNAL_BATCH_STEPS
+        }
     }
 
     fn frozen_fixture(
@@ -900,17 +944,17 @@ mod tests {
             },
         ];
         for failure in failures {
-            // Four prepared/completed pairs plus the forward terminal record.
-            assert_journal_failure_at_every_append(9, &[], failure)?;
+            // One forward intent batch, four completions, and the terminal record.
+            assert_journal_failure_at_every_append(6, &[], failure)?;
             // Failure at forward step 3, then three reverse prepared/completed pairs.
             assert_journal_failure_at_every_append(
-                15,
+                12,
                 &[(3, ExecutionFsErrorKind::DestinationExists)],
                 failure,
             )?;
             // The first rollback step also fails, exercising RollbackStepFailed.
             assert_journal_failure_at_every_append(
-                10,
+                7,
                 &[
                     (3, ExecutionFsErrorKind::DestinationExists),
                     (4, ExecutionFsErrorKind::SharingViolation),

@@ -11,7 +11,7 @@ use renamewright_core::{
     SourceFingerprint, SourceId, replay_journal,
 };
 
-pub const JOURNAL_SCHEMA_VERSION: u16 = 5;
+pub const JOURNAL_SCHEMA_VERSION: u16 = 6;
 pub const MIN_SUPPORTED_JOURNAL_SCHEMA_VERSION: u16 = 1;
 const MIN_RESUMABLE_JOURNAL_SCHEMA_VERSION: u16 = 5;
 pub const MAX_JOURNAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -526,6 +526,10 @@ impl JournalWriter {
         self.appender.append_buffered_completion(record)
     }
 
+    pub(crate) const fn schema_version(&self) -> u16 {
+        self.appender.schema_version
+    }
+
     #[must_use]
     pub const fn next_sequence(&self) -> u64 {
         self.appender.next_sequence
@@ -979,6 +983,20 @@ fn encode_record(
             put_usize(payload, *step_index, frame_index)?;
             Ok(2)
         }
+        JournalRecord::ForwardBatchPrepared {
+            first_step,
+            step_count,
+        } => {
+            if schema_version < 6 {
+                return Err(JournalCodecError::new(
+                    frame_index,
+                    JournalCodecErrorKind::InvalidPayload,
+                ));
+            }
+            put_usize(payload, *first_step, frame_index)?;
+            put_usize(payload, *step_count, frame_index)?;
+            Ok(13)
+        }
         JournalRecord::ForwardStepCompleted {
             step_index,
             observed_identity,
@@ -1056,6 +1074,10 @@ fn decode_record(
         }
         2 => JournalRecord::ForwardStepPrepared {
             step_index: cursor.read_usize()?,
+        },
+        13 if schema_version >= 6 => JournalRecord::ForwardBatchPrepared {
+            first_step: cursor.read_usize()?,
+            step_count: cursor.read_usize()?,
         },
         3 => JournalRecord::ForwardStepCompleted {
             step_index: cursor.read_usize()?,
@@ -1688,6 +1710,40 @@ mod tests {
         );
         assert_eq!(decode_journal(&fs::read(path)?)?.len(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn schema_five_journal_resumes_with_legacy_step_intents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("schema-five.rwj");
+        fs::write(
+            &path,
+            encode_frame_for_version(0, &transaction_started_with_native_parent(None), 0, 5)?,
+        )?;
+
+        let (writer, records) = JournalWriter::resume(&path)?;
+
+        assert_eq!(writer.schema_version(), 5);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            renamewright_core::replay_journal(&records)?,
+            renamewright_core::JournalStatus::ForwardPending { next_step: 0 }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_five_encoding_rejects_batched_forward_intent() {
+        let record = JournalRecord::ForwardBatchPrepared {
+            first_step: 0,
+            step_count: 2,
+        };
+
+        assert_eq!(
+            encode_frame_for_version(0, &record, 0, 5).map_err(|error| error.kind()),
+            Err(JournalCodecErrorKind::InvalidPayload)
+        );
     }
 
     fn transaction_started_with_native_parent(undo_of: Option<PlanId>) -> JournalRecord {

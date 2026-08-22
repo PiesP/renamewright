@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -1714,6 +1715,7 @@ struct PlanningMessage {
 struct PlanningTask {
     receiver: Receiver<PlanningMessage>,
     handle: Option<JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -1841,7 +1843,12 @@ impl LedgerTask {
 }
 
 impl PlanningTask {
+    fn request_cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
     fn finish(mut self) {
+        self.request_cancel();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -2730,7 +2737,11 @@ impl RenamewrightApp {
             return Arc::clone(&self.visible_rows.indices);
         }
 
-        if self.visible_rows.search_plan_id != plan_id {
+        let query = self.source_query.trim().to_lowercase();
+        if query.is_empty() {
+            self.visible_rows.search_text = Vec::new();
+            self.visible_rows.search_plan_id = None;
+        } else if self.visible_rows.search_plan_id != plan_id {
             self.visible_rows.search_text.clear();
             if let Some(plan) = &self.plan {
                 self.visible_rows.search_text.reserve(plan.rows().len());
@@ -2756,7 +2767,6 @@ impl RenamewrightApp {
             },
             |plan| plan.rows().len(),
         );
-        let query = self.source_query.trim().to_lowercase();
         let indices = (0..row_count)
             .filter(|index| {
                 if let Some(plan) = &self.plan {
@@ -2983,6 +2993,9 @@ impl RenamewrightApp {
     }
 
     fn supersede_pending_plan_refresh(&mut self) {
+        if let Some(task) = &self.planning_task {
+            task.request_cancel();
+        }
         self.planning_revision = self.planning_revision.saturating_add(1);
         self.planning_due = None;
         if matches!(
@@ -2994,6 +3007,9 @@ impl RenamewrightApp {
     }
 
     fn schedule_plan_refresh(&mut self, context: &egui::Context) {
+        if let Some(task) = &self.planning_task {
+            task.request_cancel();
+        }
         self.planning_revision = self.planning_revision.saturating_add(1);
         self.planning_due = Some(Instant::now() + PLANNING_DEBOUNCE);
         self.plan_is_current = false;
@@ -3075,10 +3091,14 @@ impl RenamewrightApp {
             let request = self.rule_request();
             let has_plan = self.plan.is_some();
             let application = Arc::clone(&self.application);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let worker_cancelled = Arc::clone(&cancelled);
             let (sender, receiver) = mpsc::channel();
             let handle = thread::spawn(move || {
                 let outcome = if has_plan {
-                    PlanningOutcome::Preview(application.preview_rules(request))
+                    PlanningOutcome::Preview(application.preview_rules_cancellable(request, || {
+                        worker_cancelled.load(Ordering::Acquire)
+                    }))
                 } else {
                     PlanningOutcome::Validation(application.validate_rule_request(&request))
                 };
@@ -3087,6 +3107,7 @@ impl RenamewrightApp {
             self.planning_task = Some(PlanningTask {
                 receiver,
                 handle: Some(handle),
+                cancelled,
             });
         }
 
@@ -5921,11 +5942,10 @@ impl RenamewrightApp {
                 || self.presets.presets().iter().any(|preset| {
                     !preset.name().is_ascii() || preset.rules().iter().any(rule_has_non_ascii_text)
                 })
-                || self.plan.as_ref().is_some_and(|plan| {
-                    plan.rows().iter().any(|row| {
-                        !row.original_name().is_ascii() || !row.proposed_name().is_ascii()
-                    })
-                }))
+                || self
+                    .plan
+                    .as_ref()
+                    .is_some_and(PlanDto::contains_non_ascii_source_name))
         {
             self.ensure_korean_font(ui.ctx());
         }
@@ -6263,6 +6283,7 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -6277,8 +6298,8 @@ mod tests {
         AccentChoice, AppearanceTheme, InterfaceDensity, KoreanFontState, LedgerMessage,
         LedgerTask, Locale, MAX_ADMITTED_SOURCES, MAX_RULE_TEXT_BYTES, MutationTask, NativePalette,
         PLANNING_DEBOUNCE, PREVIEW_PROPOSED_COLUMN_WIDTH, PREVIEW_SOURCE_COLUMN_WIDTH,
-        PendingConfirmation, PlanDto, PlanFilter, RenamewrightApp, RuleKind, RuleRequestDto,
-        adjacent_selection_index, apply_error_message, bound_rule_text,
+        PendingConfirmation, PlanDto, PlanFilter, PlanningTask, RenamewrightApp, RuleKind,
+        RuleRequestDto, adjacent_selection_index, apply_error_message, bound_rule_text,
         collect_bounded_source_paths, install_theme, install_theme_with_density,
         ledger_status_label, planning_error_message, preset_error_message, preview_column_label,
         recovery_error_message, semantics, truncate_utf8_to_bytes, undo_error_message,
@@ -6479,6 +6500,32 @@ mod tests {
 
         release_sender.send(())?;
         if let Some(task) = app.mutation_task.take() {
+            task.finish();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn superseding_a_preview_requests_worker_cancellation() -> Result<(), Box<dyn Error>> {
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        let (message_sender, receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let handle = thread::spawn(move || {
+            let _ = release_receiver.recv();
+            drop(message_sender);
+        });
+        app.planning_task = Some(PlanningTask {
+            receiver,
+            handle: Some(handle),
+            cancelled: Arc::clone(&cancelled),
+        });
+
+        app.schedule_plan_refresh(&egui::Context::default());
+
+        assert!(cancelled.load(Ordering::Acquire));
+        release_sender.send(())?;
+        if let Some(task) = app.planning_task.take() {
             task.finish();
         }
         Ok(())
@@ -7088,6 +7135,30 @@ mod tests {
         let filtered = app.visible_indices();
         assert!(!Arc::ptr_eq(&second, &filtered));
         assert_eq!(&*filtered, &[9_999]);
+    }
+
+    #[test]
+    fn empty_name_query_releases_the_search_projection() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("Quarterly report.txt");
+        fs::write(&source, b"report")?;
+        let mut app = RenamewrightApp::new_product(NativePalette::default(), None);
+        app.admit_sources_immediately(vec![source]);
+
+        let visible = app.visible_indices();
+        assert_eq!(&*visible, &[0]);
+        assert!(app.visible_rows.search_text.is_empty());
+        assert_eq!(app.visible_rows.search_text.capacity(), 0);
+
+        app.source_query = "quarterly".to_owned();
+        assert_eq!(&*app.visible_indices(), &[0]);
+        assert_eq!(app.visible_rows.search_text.len(), 1);
+
+        app.source_query.clear();
+        assert_eq!(&*app.visible_indices(), &[0]);
+        assert!(app.visible_rows.search_text.is_empty());
+        assert_eq!(app.visible_rows.search_text.capacity(), 0);
+        Ok(())
     }
 
     #[test]

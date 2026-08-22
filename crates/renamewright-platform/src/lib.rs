@@ -29,8 +29,8 @@ pub use execution_fs::{
 };
 pub use executor::{
     ExecutionOutcome, ExecutionRecovery, ExecutionRecoveryReason, ExecutionStartError,
-    FreezeExecutionError, FreezeExecutionErrorKind, FrozenExecutionPlan,
-    MAX_TEMPORARY_NAME_ATTEMPTS, execute_frozen_plan, freeze_execution_plan,
+    FORWARD_JOURNAL_BATCH_STEPS, FreezeExecutionError, FreezeExecutionErrorKind,
+    FrozenExecutionPlan, MAX_TEMPORARY_NAME_ATTEMPTS, execute_frozen_plan, freeze_execution_plan,
 };
 pub use journal::{
     AuthorizedJournal, JOURNAL_SCHEMA_VERSION, JournalCodecError, JournalCodecErrorKind,
